@@ -1,5 +1,8 @@
 -- 3D side of the pass drill: camera, the four players, ball, ground markers, the aiming line,
 -- and the replay of the server's simulated pass. Everything is local to this client.
+-- After a good pass the receiver shoots (beginFollowUp): the shot drill (ShotVisuals) owns the
+-- camera and the ball then, and this keeps the players on the pitch, lines the receiver up
+-- behind the ball and fades anyone standing between the camera and the goal while aiming.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -14,6 +17,8 @@ local BALL_RADIUS = ShotConfig.Ball.Radius
 local SCALE = ShotConfig.Goalkeeper.ModelScale
 local LINE_DOTS = 22
 local CAMERA_BLEND = 0.9
+local FADE = 0.65 -- LocalTransparencyModifier for players blocking the view of the goal
+local FADE_WIDTH = 4.5 -- studs either side of the camera-to-goal line
 
 local rgb = Color3.fromRGB
 local WHITE = Color3.new(1, 1, 1)
@@ -137,7 +142,15 @@ function PassVisuals.new()
 			end
 		end
 		model.Parent = folder
-		return FigureAnimator.new(model, rootHeight, SCALE)
+		local animator = FigureAnimator.new(model, rootHeight, SCALE)
+		animator.fadeParts = {}
+		animator.fade = 0
+		for _, d in model:GetDescendants() do
+			if d:IsA("BasePart") or d:IsA("Decal") then
+				table.insert(animator.fadeParts, d)
+			end
+		end
+		return animator
 	end
 	self.passer = figure("Passer", TEAM_KIT, "head")
 	self.mates = { figure("Teammate1", TEAM_KIT, "head"), figure("Teammate2", TEAM_KIT, "head") }
@@ -167,9 +180,10 @@ end
 
 -- Shows the drill (parents everything into the workspace) and moves the camera over.
 function PassVisuals:enter()
-	if self.active then
+	if self.active and not self.followUp then
 		return
 	end
+	self:_endFollowUp()
 	self.active = true
 	self.folder.Parent = workspace
 	local camera = workspace.CurrentCamera
@@ -177,8 +191,91 @@ function PassVisuals:enter()
 end
 
 function PassVisuals:exit()
+	self:_endFollowUp()
 	self.active = false
 	self.folder.Parent = nil
+end
+
+local function setFade(animator, amount: number)
+	if animator.fade == amount then
+		return
+	end
+	animator.fade = amount
+	for _, part in animator.fadeParts do
+		part.LocalTransparencyModifier = amount
+	end
+end
+
+function PassVisuals:_figures()
+	return { self.passer, self.mates[1], self.mates[2], self.defender }
+end
+
+function PassVisuals:_endFollowUp()
+	self.followUp = nil
+	for _, figure in self:_figures() do
+		setFade(figure, 0)
+	end
+end
+
+-- The shot after a good pass: receiver index, ball spot and the shot camera's position.
+function PassVisuals:beginFollowUp(receiver: number, spot: Vector3, cameraPosition: Vector3)
+	if not (self.active and self.layout and self.mates[receiver]) then
+		return -- nothing on the pitch to line up (e.g. joined mid-way); the shot still works
+	end
+	self.replay = nil
+	self.frozen = true
+	self.highlight = nil
+	local toGoal = flat(-spot)
+	toGoal = if toGoal.Magnitude > 1e-3 then toGoal.Unit else Vector3.new(0, 0, -1)
+	local right = toGoal:Cross(Vector3.yAxis)
+	self.followUp = {
+		receiver = receiver,
+		spot = spot,
+		camera = flat(cameraPosition),
+		stand = flat(spot - toGoal * 1.3 - right * 0.8), -- ball on his right foot
+		toGoal = toGoal,
+		kicked = false,
+	}
+	self:_setBall(Vector3.new(0, -50, 0)) -- the shot drill's ball takes over
+	for _, ring in self.mateRings do
+		ring.part.Parent = nil
+	end
+	self.defenderZone.part.Parent = nil
+	self:updateAiming(false, nil, 0, false)
+	self.mates[receiver]:play(nil)
+end
+
+-- The player released the shot: the receiver strikes it, everyone visible again.
+function PassVisuals:followUpKick()
+	local fu = self.followUp
+	if fu then
+		fu.kicked = true
+		self.mates[fu.receiver]:play("KICK")
+	end
+end
+
+function PassVisuals:_updateFollowUp(dt: number)
+	local fu = self.followUp
+	local receiver = self.mates[fu.receiver]
+	-- Receiver jogs the last steps to the ball; the others turn to watch.
+	local towards = fu.stand - receiver.position
+	local stepLen = math.min(towards.Magnitude, 9 * dt)
+	local nextPos = if towards.Magnitude > 1e-3 then receiver.position + towards.Unit * stepLen else fu.stand
+	receiver:moveTo(nextPos, fu.toGoal, dt)
+	for _, figure in self:_figures() do
+		if figure ~= receiver then
+			figure:moveTo(figure.position, flat(fu.spot - figure.position), dt)
+		end
+	end
+	-- Fade whoever stands between the camera and the goal (until the kick).
+	local line = -fu.camera
+	local lengthSq = line:Dot(line)
+	for _, figure in self:_figures() do
+		local rel = figure.position - fu.camera
+		local t = rel:Dot(line) / lengthSq
+		local lateral = (rel - line * t).Magnitude
+		setFade(figure, if not fu.kicked and t > 0 and t < 1 and lateral < FADE_WIDTH then FADE else 0)
+	end
 end
 
 function PassVisuals:_setBall(position: Vector3)
@@ -201,6 +298,7 @@ function PassVisuals:reset(layout)
 	self.frozen = false
 	self.replay = nil
 	self.highlight = nil
+	self:_endFollowUp()
 	self.ballRotation = CFrame.identity
 	local origin = layout.origin
 	self:_setBall(origin + Vector3.new(0, BALL_RADIUS, 0))
@@ -359,6 +457,15 @@ end
 -- Per-frame: camera, the defender's patrol, idle players and the replay.
 function PassVisuals:update(dt: number)
 	if not self.active or not self.layout then
+		return
+	end
+	if self.followUp then
+		self:_updateFollowUp(dt)
+		self.passer:update(dt)
+		for _, mate in self.mates do
+			mate:update(dt)
+		end
+		self.defender:update(dt)
 		return
 	end
 	local camera = workspace.CurrentCamera

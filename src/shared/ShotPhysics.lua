@@ -123,10 +123,10 @@ function ShotPhysics.solveLaunch(start: Vector3, target: Vector3, power: number,
 	return v
 end
 
--- Free-flight points from the ball spot to the goal plane, for the aiming preview.
-function ShotPhysics.previewPath(target: Vector3, power: number, spin: Vector3, count: number): { Vector3 }
+-- Free-flight points from the ball spot (or `from`) to the goal plane, for the aiming preview.
+function ShotPhysics.previewPath(target: Vector3, power: number, spin: Vector3, count: number, from: Vector3?): { Vector3 }
 	local dt = 1 / 120
-	local start = ShotPhysics.ballSpot()
+	local start = from or ShotPhysics.ballSpot()
 	local v0 = ShotPhysics.solveLaunch(start, target, power, spin, dt)
 	local _, total = crossFree(start, v0, spin, dt)
 	local points = table.create(count)

@@ -40,6 +40,11 @@ local TEXT = {
 	PassAfter = "Выбери свободного партнёра",
 	PassTutorialReady = "Повтори за пальцем: веди от мяча к партнёру",
 	PassTutorialHolding = "Отпусти на партнёре",
+	PassReceived = "Принял! Теперь удар",
+	FollowUpReady = "Партнёр принял пас — бей по воротам!",
+	FollowUpGoal = "Пас и гол! Осталось пасов: %d",
+	FollowUpMiss = "Пас засчитан. Осталось пасов: %d",
+	CompleteBonus = "Голов после паса: %d",
 	NextShot = "ЕЩЁ УДАР  ›",
 	Speed = "%d км/ч",
 	-- Training
@@ -130,6 +135,7 @@ local PHONE_BOOST = 1.7
 local PHONE_MIN_WIDTH = 680
 local PHONE_MIN_HEIGHT = 400
 local PHONE_LOGO = 0.8 -- the logo panel is decoration; on phones it gives its room to the goal
+local PHONE_GOALS = 0.68 -- the goals panel sits over the pitch on phones, so it is drawn smaller
 local POWER_SEGMENTS = 20
 local POWER_WARN = 0.85
 
@@ -384,6 +390,7 @@ function ShotHud.new()
 			uiScale.Scale = scale
 		end
 		self.logoScale.Scale = if phone then scale * PHONE_LOGO else scale
+		self.goalsScale.Scale = if phone then scale * PHONE_GOALS else scale
 	end
 	rescale()
 	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(rescale)
@@ -449,13 +456,14 @@ end
 function ShotHud:_buildGoals()
 	local root = panel({ Name = "Goals", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -18, 0, 14), Size = UDim2.fromOffset(292, 104) }, 10)
 	root.Parent = self.gui
-	self:_scaled(root)
+	self.goalsScale = self:_scaled(root)
 
 	local trophy = iconBox(root, UDim2.fromOffset(14, 12), 50, GOLD)
 	self.trophy = trophy
 	emoji(trophy, "🏆", 28)
 
-	local label = text({ Name = "GoalsLabel", Position = UDim2.fromOffset(78, 10), Size = UDim2.fromOffset(150, 18), Text = TEXT.Goals, TextSize = 15, TextColor3 = LILAC, Parent = root })
+	local label
+	label = text({ Name = "GoalsLabel", Position = UDim2.fromOffset(78, 10), Size = UDim2.fromOffset(150, 18), Text = TEXT.Goals, TextSize = 15, TextColor3 = LILAC, Parent = root })
 	sizeLimit(label, 15)
 	outline(label, 1.5)
 	self.goalsLabel = label
@@ -607,20 +615,20 @@ function ShotHud:_buildCompleteMenu()
 
 	local chips = frame({ Name = "Chips", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 240), Size = UDim2.fromOffset(460, 30), BackgroundTransparency = 1, Parent = body })
 	create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Center, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = chips })
-	local function chip(order: number, icon: string, value: string, color: Color3): (Frame, TextLabel)
+	local function chip(order: number, icon: string, value: string, color: Color3): (Frame, TextLabel, TextLabel)
 		local c = frame({ Name = "Chip", LayoutOrder = order, Size = UDim2.fromOffset(0, 30), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = NAVY, Parent = chips })
 		corner(c, 8)
 		stroke(c, color, 2)
 		create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 12), Parent = c })
 		create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder, Parent = c })
-		text({ LayoutOrder = 1, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = icon, TextSize = 16, FontFace = FONT_MEDIUM, Parent = c })
+		local iconLabel = text({ LayoutOrder = 1, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = icon, TextSize = 16, FontFace = FONT_MEDIUM, Parent = c })
 		local label = text({ LayoutOrder = 2, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = value, TextSize = 16, Parent = c })
 		outline(label, 1.5)
-		return c, label
+		return c, label, iconLabel
 	end
 	local _, stageChipText = chip(1, "✅", string.format(TEXT.CompleteStage, 1), LIME)
 	self.completeStageText = stageChipText
-	self.completeSpeed, self.completeSpeedText = chip(2, "⚡", "", GOLD)
+	self.completeSpeed, self.completeSpeedText, self.completeSpeedIcon = chip(2, "⚡", "", GOLD)
 
 	-- Two buttons: replay the task (secondary) and go on (primary).
 	self.retryButton = self:_buildButton(body, TEXT.PlayAgain, function()
@@ -969,21 +977,22 @@ function ShotHud:_setStage(stage: number)
 	self.stageText.Text = if stage > 3 then TEXT.StageFree else string.format(TEXT.Stage, stage)
 end
 
--- Labels for the current part of the training. kind: SHOT | PASS; mode: TUTORIAL | TASK | FREE.
-function ShotHud:setMode(kind: string, mode: string, taskGoals: number)
-	self.kind = kind
-	local pass = kind == "PASS"
-	if mode == "TUTORIAL" then
-		self.goalsLabel.Text = TEXT.GoalsTutorial
-	elseif mode == "TASK" then
-		self.goalsLabel.Text = string.format(if pass then TEXT.GoalsTaskPass else TEXT.GoalsTask, taskGoals)
-	else
+-- Labels for the current part of the training. stage: SHOT | PASS | FREE; mode: TUTORIAL | TASK
+-- | FREE (of the stage); kind: what the player is doing now, SHOT or PASS (power bar texts).
+function ShotHud:setMode(stage: string, mode: string, taskGoals: number, kind: string)
+	local pass = stage == "PASS"
+	if stage == "FREE" then
 		self.goalsLabel.Text = TEXT.GoalsFree
+	elseif mode == "TUTORIAL" then
+		self.goalsLabel.Text = TEXT.GoalsTutorial
+	else
+		self.goalsLabel.Text = string.format(if pass then TEXT.GoalsTaskPass else TEXT.GoalsTask, taskGoals)
 	end
-	self.modeText.Text = if mode == "FREE" then TEXT.ModeFree elseif pass then TEXT.ModePass else TEXT.Mode
-	self.powerHint.Text = if pass then TEXT.PassPowerHint else TEXT.PowerHint
-	self.powerZoneLabel.Text = if pass then TEXT.PassPowerZone else TEXT.PowerZone
-	self:_setStage(if mode == "FREE" then 4 elseif pass then 2 else 1)
+	self.modeText.Text = if stage == "FREE" then TEXT.ModeFree elseif pass then TEXT.ModePass else TEXT.Mode
+	local passing = kind == "PASS"
+	self.powerHint.Text = if passing then TEXT.PassPowerHint else TEXT.PowerHint
+	self.powerZoneLabel.Text = if passing then TEXT.PassPowerZone else TEXT.PowerZone
+	self:_setStage(if stage == "FREE" then 4 elseif pass then 2 else 1)
 end
 
 -- Highlights the power range that the guided shot asks for (nil hides it).
@@ -1000,17 +1009,25 @@ function ShotHud:setPowerZone(min: number?, max: number?)
 	zone.Visible = true
 end
 
--- Completion menu after a task is done. stats: { kind, goals, shots, bestSpeed }
-function ShotHud:showComplete(stats: { kind: string, goals: number, shots: number, bestSpeed: number? })
+-- Completion menu after a task is done. stats: { kind, goals, shots, bestSpeed, bonusGoals }
+function ShotHud:showComplete(stats: { kind: string, goals: number, shots: number, bestSpeed: number?, bonusGoals: number? })
 	self.card.Visible = false
 	self.cardButton.shineTween:Cancel()
 	local stage = if stats.kind == "PASS" then 2 else 1
 	self.completeSubtitle.Text = string.format(if stats.kind == "PASS" then TEXT.CompleteSubtitlePass else TEXT.CompleteSubtitle, stats.goals, stats.shots)
 	self.completeStageText.Text = string.format(TEXT.CompleteStage, stage)
-	local hasSpeed = type(stats.bestSpeed) == "number" and stats.bestSpeed > 0
-	self.completeSpeed.Visible = hasSpeed
-	if hasSpeed then
-		self.completeSpeedText.Text = string.format(TEXT.CompleteSpeed, math.floor(stats.bestSpeed + 0.5))
+	-- Second chip: the fastest goal (shot stage) or goals scored after passes (pass stage).
+	if stats.kind == "PASS" then
+		self.completeSpeed.Visible = true
+		self.completeSpeedIcon.Text = "⚽"
+		self.completeSpeedText.Text = string.format(TEXT.CompleteBonus, stats.bonusGoals or 0)
+	else
+		local hasSpeed = type(stats.bestSpeed) == "number" and stats.bestSpeed > 0
+		self.completeSpeed.Visible = hasSpeed
+		self.completeSpeedIcon.Text = "⚡"
+		if hasSpeed then
+			self.completeSpeedText.Text = string.format(TEXT.CompleteSpeed, math.floor(stats.bestSpeed + 0.5))
+		end
 	end
 	for i, ball in self.completeBalls do
 		ball.Visible = i <= stats.goals

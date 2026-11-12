@@ -16,6 +16,7 @@ local TutorialHint = require(script:WaitForChild("TutorialHint"))
 local PassVisuals = require(script:WaitForChild("PassVisuals"))
 
 local CARD_DELAY = 0.55 -- let the player see the ball hit the net before the card covers the goal
+local FOLLOW_UP_DELAY = 0.75 -- after a good pass: the receiver controls it, then the shot camera
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
 if not Remotes then
@@ -47,7 +48,8 @@ local passVisuals = PassVisuals.new()
 local input = InputController.new()
 local hint = TutorialHint.new()
 local currentEpisode = nil
-local currentKind = "SHOT"
+local currentScene = "SHOT" -- SHOT | PASS | FOLLOWUP (the shot after a good pass)
+local SCENE_BLEND = 0.9 -- camera glide between scenes; input waits for it
 local waitingForEpisode = false
 local bestSpeed = 0 -- fastest goal in the current task attempt, for the completion menu
 
@@ -77,30 +79,34 @@ end
 
 -- Goals panel: in a task, one pip per goal / good pass still needed; in free play, the last results.
 local function showProgress(info)
-	if info.mode == "FREE" then
+	if info.stage == "FREE" then
 		hud:setSeries(info.goals, 10, info.history, info.shots)
 	else
 		local done = {}
 		for _ = 1, info.goals do
-			table.insert(done, if info.kind == "PASS" then "GOOD" else "GOAL")
+			table.insert(done, if info.stage == "PASS" then "GOOD" else "GOAL")
 		end
 		hud:setSeries(info.goals, info.taskGoals, done)
 	end
 end
 
--- Switches the 3D drill (camera, ball, players) between the shot and the pass.
-local function setKind(kind: string)
-	if kind == currentKind then
-		return
+-- Switches the 3D scene: SHOT (shot drill), PASS (pass drill), FOLLOWUP (pass drill's players,
+-- shot drill's camera and ball). Returns whether the camera moves.
+local function setScene(scene: string): boolean
+	if scene == currentScene then
+		return false
 	end
-	currentKind = kind
-	if kind == "PASS" then
+	currentScene = scene
+	if scene == "PASS" then
 		visuals:setActive(false)
 		passVisuals:enter()
+	elseif scene == "FOLLOWUP" then
+		visuals:setActive(true) -- passVisuals stays, its players are on the pitch
 	else
 		passVisuals:exit()
 		visuals:setActive(true)
 	end
+	return true
 end
 
 input.onShoot = function(a, b, power)
@@ -116,6 +122,9 @@ input.onShoot = function(a, b, power)
 		hud:setTitle("PassFlying")
 		SubmitEpisodeInput:FireServer(episode.episodeId, a, b, power, passVisuals:clockTime())
 	else
+		if episode.mode == "FOLLOWUP" then
+			passVisuals:followUpKick()
+		end
 		visuals:onShotReleased()
 		hud:setTitle("Flying")
 		SubmitEpisodeInput:FireServer(episode.episodeId, a, b, power)
@@ -129,11 +138,17 @@ EpisodeStarted.OnClientEvent:Connect(function(episode)
 	waitingForEpisode = false
 	currentEpisode = episode
 	input:setEnabled(false)
-	setKind(episode.kind)
 	local pass = episode.kind == "PASS"
+	local followUp = episode.mode == "FOLLOWUP"
+	local moved = setScene(if pass then "PASS" elseif followUp then "FOLLOWUP" else "SHOT")
 	if pass then
 		passVisuals:reset(episode.layout)
 		input:setMode("PASS", episode.layout.origin)
+	elseif followUp then
+		visuals:reset(episode.spot)
+		passVisuals:beginFollowUp(episode.receiver, episode.spot, ShotVisuals.cameraPosition(episode.spot))
+		input:setMode("SHOT")
+		moved = true
 	else
 		visuals:reset()
 		input:setMode("SHOT")
@@ -141,12 +156,12 @@ EpisodeStarted.OnClientEvent:Connect(function(episode)
 	hud:hideCard()
 	hud:setPower(0)
 	showProgress(episode)
-	hud:setMode(episode.kind, episode.mode, episode.taskGoals)
-	if episode.shots == 0 then
+	hud:setMode(episode.stage, if followUp then episode.phaseMode else episode.mode, episode.taskGoals, episode.kind)
+	if episode.shots == 0 and not followUp then
 		bestSpeed = 0
 	end
 
-	local guide = episode.mode == "TUTORIAL" and episode.hint
+	local guide = episode.hint -- only sent for guided attempts
 	if guide then
 		hint:show(episode.kind, guide)
 		hud:setPowerZone(guide.powerMin, guide.powerMax)
@@ -170,26 +185,27 @@ EpisodeStarted.OnClientEvent:Connect(function(episode)
 		input:setGuide(nil)
 		passVisuals:setHighlight(nil)
 	end
-	hud:setTitle(if pass then (if guide then "PassTutorialReady" else "PassReady") else (if guide then "TutorialReady" else "Ready"))
+	hud:setTitle(if pass then (if guide then "PassTutorialReady" else "PassReady") elseif guide then "TutorialReady" elseif followUp then "FollowUpReady" else "Ready")
 
-	task.delay(ShotConfig.Input.ReadyDelay, function()
+	task.delay(if moved then math.max(SCENE_BLEND, ShotConfig.Input.ReadyDelay) else ShotConfig.Input.ReadyDelay, function()
 		if currentEpisode == episode then
 			input:setEnabled(true)
 		end
 	end)
 end)
 
--- What the card says after each attempt, by the server's training status.
+-- What the card says after each attempt, by the server's training status. In the pass stage the
+-- card comes after the shot that follows a good pass, or straight after a failed pass.
 local function showOutcome(result)
 	local status = result.status
-	local pass = result.kind == "PASS"
-	local key = if pass then "PASS_" .. result.detail else result.detail
+	local passStage = result.stage == "PASS"
+	local key = if result.kind == "PASS" then "PASS_" .. result.detail else result.detail
 	local speed = result.speedKmh
 	if status == "COMPLETED" then
-		hud:showComplete({ kind = result.kind, goals = result.goals, shots = result.shots, bestSpeed = if pass then nil else bestSpeed })
+		hud:showComplete({ kind = result.stage, goals = result.goals, shots = result.shots, bestSpeed = bestSpeed, bonusGoals = result.bonusGoals })
 	elseif status == "TUTORIAL_DONE" then
 		hud:showResult(key, {
-			subtitle = string.format(if pass then hud.text.PassTutorialDone else hud.text.TutorialDone, result.taskGoals),
+			subtitle = string.format(if passStage then hud.text.PassTutorialDone else hud.text.TutorialDone, result.taskGoals),
 			button = hud.text.ToTask,
 			speedKmh = speed,
 		})
@@ -198,8 +214,10 @@ local function showOutcome(result)
 	else
 		local left = result.taskGoals - result.goals
 		local subtitle = nil
-		if result.mode == "TASK" and result.outcome == (if pass then "GOOD" else "GOAL") then
-			subtitle = string.format(if pass then hud.text.PassLeft else hud.text.TaskLeft, left)
+		if result.mode == "FOLLOWUP" then
+			subtitle = string.format(if result.outcome == "GOAL" then hud.text.FollowUpGoal else hud.text.FollowUpMiss, left)
+		elseif result.mode == "TASK" and result.stage == "SHOT" and result.outcome == "GOAL" then
+			subtitle = string.format(hud.text.TaskLeft, left)
 		end
 		hud:showResult(key, { subtitle = subtitle, speedKmh = speed })
 	end
@@ -223,11 +241,21 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	end
 
 	local function onDecisive()
-		if result.mode ~= "TUTORIAL" then
+		if result.mode == "TASK" or result.mode == "FREE" then
 			showProgress(result)
 			if result.outcome == (if pass then "GOOD" else "GOAL") then
 				hud:bumpGoals()
 			end
+		end
+		if result.followUp then
+			-- Good pass: no card, the receiver shoots next.
+			hud:setTitle("PassReceived")
+			task.delay(FOLLOW_UP_DELAY, function()
+				if not currentEpisode and not waitingForEpisode then
+					requestEpisode()
+				end
+			end)
+			return
 		end
 		hud:setTitle(if pass then "PassAfter" else "AfterShot")
 		task.delay(CARD_DELAY, function()
@@ -256,7 +284,7 @@ end)
 
 local wasHolding = false
 RunService.RenderStepped:Connect(function(dt)
-	local pass = currentKind == "PASS"
+	local pass = currentScene == "PASS"
 	visuals:update(dt) -- keeper (and the camera while the shot drill is active)
 	passVisuals:update(dt)
 	input:update()

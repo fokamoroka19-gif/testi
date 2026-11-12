@@ -77,6 +77,7 @@ function ShotVisuals.new()
 	self.ballRotation = CFrame.identity
 	self.active = true
 	self.blendT = 1
+	self.spot = ShotPhysics.ballSpot()
 
 	local folder = create("Folder", { Name = "ShotVisuals", Parent = workspace })
 
@@ -239,12 +240,20 @@ function ShotVisuals:_spinBall(angularVelocity: Vector3, dt: number)
 	end
 end
 
-function ShotVisuals:reset()
+-- spot: where the ball is (default: the shot drill's spot; a shot after a pass starts at the receiver).
+function ShotVisuals:reset(spot: Vector3?)
 	self.token += 1
 	self.holdBall = false
 	self.ballRotation = CFrame.identity
 	self.trail.Enabled = false
-	self:_setBall(ShotPhysics.ballSpot())
+	local newSpot = spot or ShotPhysics.ballSpot()
+	if self.active and self.spot and (newSpot - self.spot).Magnitude > 0.1 then
+		-- New shooting position: glide the camera over instead of cutting.
+		local camera = workspace.CurrentCamera
+		self.blendFrom, self.blendFov, self.blendT = camera.CFrame, camera.FieldOfView, 0
+	end
+	self.spot = newSpot
+	self:_setBall(self.spot)
 	if self.keeper then
 		self.keeper:recover()
 	end
@@ -252,6 +261,17 @@ function ShotVisuals:reset()
 		self.netBack.CFrame = self.netBackHome
 	end
 	self:updateAiming(false, 0, 0.5, 0, false)
+end
+
+-- The shot camera sits behind the ball on the line to the goal, as far back and as high as for the
+-- shot drill's own spot (where this gives exactly ShotConfig.Camera.Position).
+function ShotVisuals.cameraPosition(spot: Vector3): Vector3
+	local cam = ShotConfig.Camera.Position
+	local home = ShotPhysics.ballSpot()
+	local back = Vector3.new(cam.X - home.X, 0, cam.Z - home.Z).Magnitude
+	local away = Vector3.new(spot.X, 0, spot.Z)
+	away = if away.Magnitude > 1e-3 then away.Unit else Vector3.new(0, 0, 1)
+	return Vector3.new(spot.X, cam.Y, spot.Z) + away * back
 end
 
 -- Off while another drill (the pass) owns the camera: the ball is put away, the keeper idles.
@@ -267,6 +287,9 @@ function ShotVisuals:setActive(active: boolean)
 	else
 		self.token += 1 -- stops any replay in progress
 		self.holdBall = false
+		if self.keeper then
+			self.keeper:recover() -- back on his feet after the last shot
+		end
 		self.trail.Enabled = false
 		self:_setBall(Vector3.new(0, -50, 0))
 		self:updateAiming(false, 0, 0.5, 0, false)
@@ -289,7 +312,7 @@ function ShotVisuals:update(dt: number)
 		local camera = workspace.CurrentCamera
 		camera.CameraType = Enum.CameraType.Scriptable
 		local fov = ShotConfig.Camera.FieldOfView - self.fovKick
-		local base = CFrame.lookAt(ShotConfig.Camera.Position, ShotConfig.Camera.LookAt)
+		local base = CFrame.lookAt(ShotVisuals.cameraPosition(self.spot), ShotConfig.Camera.LookAt)
 		if self.shake > 0 then
 			local t = self.clock * 25
 			local amount = self.shake * 0.3
@@ -337,7 +360,7 @@ function ShotVisuals:updateAiming(enabled: boolean, aimX: number, aimY: number, 
 		return
 	end
 	self.previewKey = key
-	local points = ShotPhysics.previewPath(point, power, ShotPhysics.spinFor(aimX, power), PREVIEW_DOTS)
+	local points = ShotPhysics.previewPath(point, power, ShotPhysics.spinFor(aimX, power), PREVIEW_DOTS, self.spot)
 	for i, dot in self.dots do
 		local p = points[i]
 		if p then
@@ -399,7 +422,7 @@ function ShotVisuals:playShot(result, onDecisive: () -> ())
 	local decisiveFired = false
 	self.trail.Enabled = (result.speedKmh or 0) >= 85
 
-	local t, last = 0, ShotPhysics.ballSpot()
+	local t, last = 0, self.spot
 	while t < duration + AFTER_PATH_SECONDS do
 		local dt = RunService.RenderStepped:Wait()
 		if self.token ~= token then

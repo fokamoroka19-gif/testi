@@ -3120,7 +3120,7 @@ ShotConfig.Training = {
 	GuidedPowerMin = 0.55, -- the green zone on the power bar during the guided shot
 	GuidedPowerMax = 0.8,
 	GuidedSafeMargin = 2, -- studs kept clear of the frame and the keeper's reach on the guided shot
-	GuidedKeeperDelay = 0.3, -- keeper reacts this much later on the guided shot
+	GuidedKeeperDelay = 0.45, -- keeper reacts this much later on guided shots (also from an angle after a pass)
 	TaskGoals = 5,
 	-- Training keeper: still saves central shots, beatable in the corners.
 	TaskKeeperSkill = 15,
@@ -3281,10 +3281,10 @@ function ShotPhysics.solveLaunch(start: Vector3, target: Vector3, power: number,
 	return v
 end
 
--- Free-flight points from the ball spot to the goal plane, for the aiming preview.
-function ShotPhysics.previewPath(target: Vector3, power: number, spin: Vector3, count: number): { Vector3 }
+-- Free-flight points from the ball spot (or `from`) to the goal plane, for the aiming preview.
+function ShotPhysics.previewPath(target: Vector3, power: number, spin: Vector3, count: number, from: Vector3?): { Vector3 }
 	local dt = 1 / 120
-	local start = ShotPhysics.ballSpot()
+	local start = from or ShotPhysics.ballSpot()
 	local v0 = ShotPhysics.solveLaunch(start, target, power, spin, dt)
 	local _, total = crossFree(start, v0, spin, dt)
 	local points = table.create(count)
@@ -4576,6 +4576,9 @@ return SceneBuilder
 --   stage SHOT  TUTORIAL (one guided shot that always scores) -> TASK (score Training.TaskGoals)
 --   stage PASS  TUTORIAL (one guided pass that always arrives) -> TASK (PassConfig.Training.TaskPasses good passes)
 --   After a TASK the phase is DONE and the menu asks for "RETRY" (task again) or "NEXT" (next stage).
+--   A good pass is followed by a SHOT episode (mode FOLLOWUP) from where the receiver took the ball;
+--   the pass already counted, the shot only adds to `bonusGoals`. The pass's status (TUTORIAL_DONE,
+--   CONTINUE, COMPLETED) is reported with the shot's result.
 --   stage FREE  free shooting against the normal keeper (placeholder until a full match exists)
 -- Misses never reset task progress.
 --
@@ -4603,10 +4606,17 @@ local STAGES = { SHOT = true, PASS = true, FREE = true }
 type Episode = {
 	id: number,
 	kind: string, -- SHOT | PASS
-	mode: string, -- TUTORIAL | TASK | FREE
+	mode: string, -- TUTORIAL | TASK | FREE | FOLLOWUP
 	seed: number,
 	startedAt: number,
 	layout: PassPhysics.Layout?,
+	followUp: FollowUp?,
+}
+type FollowUp = {
+	spot: Vector3, -- ball position for the shot
+	receiver: number, -- teammate index
+	phaseMode: string, -- the pass's mode (TUTORIAL | TASK)
+	passStatus: string, -- the pass's training status
 }
 type PlayerState = {
 	nextEpisodeId: number,
@@ -4617,6 +4627,8 @@ type PlayerState = {
 	shots: number, -- attempts in the current task (or in free play)
 	goals: number, -- goals / good passes
 	history: { string }, -- outcome of each attempt, most recent last (free play keeps the last 10)
+	bonusGoals: number, -- pass stage: goals scored after good passes in this task attempt
+	followUp: FollowUp?, -- a good pass waiting for its shot
 }
 
 local EpisodeService = {}
@@ -4626,7 +4638,7 @@ local seedSource = Random.new()
 local remotes
 
 local function resetCounters(state: PlayerState)
-	state.shots, state.goals, state.history = 0, 0, {}
+	state.shots, state.goals, state.history, state.bonusGoals = 0, 0, {}, 0
 end
 
 local function getState(player: Player): PlayerState
@@ -4642,6 +4654,7 @@ local function getState(player: Player): PlayerState
 			shots = 0,
 			goals = 0,
 			history = {},
+			bonusGoals = 0,
 		}
 		states[player] = state
 	end
@@ -4672,10 +4685,33 @@ end
 
 local function progress(state: PlayerState)
 	return {
+		stage = state.stage,
 		goals = state.goals,
 		shots = state.shots,
+		bonusGoals = state.bonusGoals,
 		taskGoals = taskGoal(state.stage),
 		history = table.clone(state.history),
+	}
+end
+
+-- Guided aim for a shot from `spot`: the far top corner, as seen from that side of the pitch.
+local function guidedAim(spot: Vector3?): (number, number)
+	local x = Training.TutorialAim.X
+	if spot and spot.X > 0 then
+		x = -x
+	end
+	return x, Training.TutorialAim.Y
+end
+
+local function shotHint(spot: Vector3?)
+	local aimX, aimY = guidedAim(spot)
+	return {
+		aimX = aimX,
+		aimY = aimY,
+		ringRadius = Training.TutorialRingRadius,
+		tapRadius = Training.TutorialTapRadius,
+		powerMin = Training.GuidedPowerMin,
+		powerMax = Training.GuidedPowerMax,
 	}
 end
 
@@ -4699,25 +4735,46 @@ local function sendEpisode(player: Player, state: PlayerState, episode: Episode)
 	payload.kind = episode.kind
 	payload.mode = episode.mode
 	payload.layout = episode.layout
+	if episode.followUp then
+		payload.spot = episode.followUp.spot
+		payload.receiver = episode.followUp.receiver
+		payload.phaseMode = episode.followUp.phaseMode
+	end
 	if episode.mode == "TUTORIAL" then
 		if episode.kind == "PASS" then
 			payload.hint = passHint(episode.layout :: PassPhysics.Layout)
 		else
-			payload.hint = {
-				aimX = Training.TutorialAim.X,
-				aimY = Training.TutorialAim.Y,
-				ringRadius = Training.TutorialRingRadius,
-				tapRadius = Training.TutorialTapRadius,
-				powerMin = Training.GuidedPowerMin,
-				powerMax = Training.GuidedPowerMax,
-			}
+			payload.hint = shotHint(nil)
 		end
+	elseif episode.followUp and episode.followUp.phaseMode == "TUTORIAL" then
+		payload.hint = shotHint(episode.followUp.spot) -- first shot after the guided pass is guided too
 	end
 	remotes.EpisodeStarted:FireClient(player, payload)
 end
 
 -- choice: what the completion menu asked for ("RETRY" or "NEXT"); ignored in other phases.
 local function startEpisode(player: Player, state: PlayerState, choice: string?)
+	local followUp = state.followUp
+	if followUp then
+		-- The shot after a good pass comes first, even if that pass completed the task.
+		state.followUp = nil
+		local episode = {
+			id = state.nextEpisodeId,
+			kind = "SHOT",
+			mode = "FOLLOWUP",
+			seed = seedSource:NextInteger(1, 2 ^ 31 - 1),
+			startedAt = os.clock(),
+			followUp = followUp,
+		}
+		state.nextEpisodeId += 1
+		state.active = episode
+		print(string.format(
+			"[EpisodeService] %s: episode #%d started (SHOT FOLLOWUP from (%.1f, %.1f), seed %d)",
+			player.Name, episode.id, followUp.spot.X, followUp.spot.Z, episode.seed
+		))
+		sendEpisode(player, state, episode)
+		return
+	end
 	if state.phase == "DONE" then
 		if choice == "NEXT" then
 			state.stage = if state.stage == "SHOT" then "PASS" else "FREE"
@@ -4809,8 +4866,17 @@ local function resolveShot(active: Episode, aimX: number, aimY: number, power: n
 	}
 	local stats = { shooting = ShotConfig.DefaultShooting, keeperSkill = Training.TaskKeeperSkill }
 	local options
-	if active.mode == "TUTORIAL" then
-		options = { guided = { aimX = Training.TutorialAim.X, aimY = Training.TutorialAim.Y } }
+	local followUp = active.followUp
+	if followUp then
+		-- Training keeper; the first one (after the guided pass) is a sure goal like the guided shot.
+		options = { start = followUp.spot, keeperDelay = Training.TaskKeeperDelay }
+		if followUp.phaseMode == "TUTORIAL" then
+			local guideX, guideY = guidedAim(followUp.spot)
+			options.guided = { aimX = guideX, aimY = guideY }
+		end
+	elseif active.mode == "TUTORIAL" then
+		local guideX, guideY = guidedAim(nil)
+		options = { guided = { aimX = guideX, aimY = guideY } }
 	elseif active.mode == "TASK" then
 		options = { keeperDelay = Training.TaskKeeperDelay }
 	else
@@ -4910,7 +4976,29 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, a: any, b: a
 
 	-- Consume the episode once it has a result, so it can never produce a second one.
 	state.active = nil
-	local status = advance(state, active.mode, success, outcome)
+	local status
+	local followUp = active.followUp
+	if followUp then
+		status = followUp.passStatus -- the pass already counted
+		if success and followUp.phaseMode == "TASK" then
+			state.bonusGoals += 1
+		end
+	else
+		status = advance(state, active.mode, success, outcome)
+		if active.kind == "PASS" and success and payload.receiver and payload.receiverTrack then
+			-- The receiver takes it towards goal and shoots next.
+			local meet = payload.receiverTrack[#payload.receiverTrack]
+			local toGoal = Vector3.new(-meet.X, 0, -meet.Z).Unit
+			local ground = meet + toGoal * PassConfig.Teammate.Reach * 0.7
+			state.followUp = {
+				spot = Vector3.new(ground.X, ShotConfig.Ball.Radius, ground.Z),
+				receiver = payload.receiver,
+				phaseMode = active.mode,
+				passStatus = status,
+			}
+			payload.followUp = true
+		end
+	end
 	print(string.format(
 		"[EpisodeService] %s: episode #%d %s %s %s -> %s/%s, %d km/h, %s (%d of %d)",
 		player.Name, active.id, active.kind, active.mode, summary, outcome, detail, speedKmh,
@@ -5041,7 +5129,8 @@ export type ShotStats = { shooting: number, keeperSkill: number }
 -- guided: tutorial shot that always scores. Unsafe aims are moved to (aimX, aimY), power is kept
 -- in a comfortable range, there is no scatter and the keeper dives too late.
 -- keeperDelay: extra keeper reaction time in seconds (easier keeper for the training task).
-export type ShotOptions = { guided: { aimX: number, aimY: number }?, keeperDelay: number? }
+-- start: ball position (default: the penalty-area spot); a shot after a pass starts at the receiver.
+export type ShotOptions = { guided: { aimX: number, aimY: number }?, keeperDelay: number?, start: Vector3? }
 export type ShotResult = {
 	input: ShotInput, -- the input actually used (guided shots may move the aim)
 	outcome: string, -- "GOAL" | "SAVE" | "POST" | "MISS" (series history / scoring)
@@ -5120,7 +5209,7 @@ function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random, o
 		jitterX, jitterY = 0, 0
 	end
 	local spin = ShotPhysics.spinFor(input.aimX, input.power, jitterX, jitterY)
-	local start = ShotPhysics.ballSpot()
+	local start = (options and options.start) or ShotPhysics.ballSpot()
 	local velocity = ShotPhysics.solveLaunch(start, target, input.power, spin)
 
 	-- 3. Goalkeeper: reacts after a short delay, then moves at a skill-based speed. He only
@@ -5128,6 +5217,9 @@ function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random, o
 	local reaction = Keeper.ReactionTime + (rng:NextNumber() * 2 - 1) * Keeper.ReactionJitter
 	if guided then
 		reaction += ShotConfig.Training.GuidedKeeperDelay
+		-- From further out the ball is in the air longer; he is late by the same margin anyway.
+		local extra = (target - start).Magnitude - (ShotPhysics.aimToGoalPoint(input.aimX, input.aimY) - ShotPhysics.ballSpot()).Magnitude
+		reaction += math.max(0, extra) / ShotPhysics.ballSpeed(input.power)
 	elseif options and options.keeperDelay then
 		reaction += options.keeperDelay
 	end
@@ -5249,6 +5341,7 @@ local TutorialHint = require(script:WaitForChild("TutorialHint"))
 local PassVisuals = require(script:WaitForChild("PassVisuals"))
 
 local CARD_DELAY = 0.55 -- let the player see the ball hit the net before the card covers the goal
+local FOLLOW_UP_DELAY = 0.75 -- after a good pass: the receiver controls it, then the shot camera
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
 if not Remotes then
@@ -5280,7 +5373,8 @@ local passVisuals = PassVisuals.new()
 local input = InputController.new()
 local hint = TutorialHint.new()
 local currentEpisode = nil
-local currentKind = "SHOT"
+local currentScene = "SHOT" -- SHOT | PASS | FOLLOWUP (the shot after a good pass)
+local SCENE_BLEND = 0.9 -- camera glide between scenes; input waits for it
 local waitingForEpisode = false
 local bestSpeed = 0 -- fastest goal in the current task attempt, for the completion menu
 
@@ -5310,30 +5404,34 @@ end
 
 -- Goals panel: in a task, one pip per goal / good pass still needed; in free play, the last results.
 local function showProgress(info)
-	if info.mode == "FREE" then
+	if info.stage == "FREE" then
 		hud:setSeries(info.goals, 10, info.history, info.shots)
 	else
 		local done = {}
 		for _ = 1, info.goals do
-			table.insert(done, if info.kind == "PASS" then "GOOD" else "GOAL")
+			table.insert(done, if info.stage == "PASS" then "GOOD" else "GOAL")
 		end
 		hud:setSeries(info.goals, info.taskGoals, done)
 	end
 end
 
--- Switches the 3D drill (camera, ball, players) between the shot and the pass.
-local function setKind(kind: string)
-	if kind == currentKind then
-		return
+-- Switches the 3D scene: SHOT (shot drill), PASS (pass drill), FOLLOWUP (pass drill's players,
+-- shot drill's camera and ball). Returns whether the camera moves.
+local function setScene(scene: string): boolean
+	if scene == currentScene then
+		return false
 	end
-	currentKind = kind
-	if kind == "PASS" then
+	currentScene = scene
+	if scene == "PASS" then
 		visuals:setActive(false)
 		passVisuals:enter()
+	elseif scene == "FOLLOWUP" then
+		visuals:setActive(true) -- passVisuals stays, its players are on the pitch
 	else
 		passVisuals:exit()
 		visuals:setActive(true)
 	end
+	return true
 end
 
 input.onShoot = function(a, b, power)
@@ -5349,6 +5447,9 @@ input.onShoot = function(a, b, power)
 		hud:setTitle("PassFlying")
 		SubmitEpisodeInput:FireServer(episode.episodeId, a, b, power, passVisuals:clockTime())
 	else
+		if episode.mode == "FOLLOWUP" then
+			passVisuals:followUpKick()
+		end
 		visuals:onShotReleased()
 		hud:setTitle("Flying")
 		SubmitEpisodeInput:FireServer(episode.episodeId, a, b, power)
@@ -5362,11 +5463,17 @@ EpisodeStarted.OnClientEvent:Connect(function(episode)
 	waitingForEpisode = false
 	currentEpisode = episode
 	input:setEnabled(false)
-	setKind(episode.kind)
 	local pass = episode.kind == "PASS"
+	local followUp = episode.mode == "FOLLOWUP"
+	local moved = setScene(if pass then "PASS" elseif followUp then "FOLLOWUP" else "SHOT")
 	if pass then
 		passVisuals:reset(episode.layout)
 		input:setMode("PASS", episode.layout.origin)
+	elseif followUp then
+		visuals:reset(episode.spot)
+		passVisuals:beginFollowUp(episode.receiver, episode.spot, ShotVisuals.cameraPosition(episode.spot))
+		input:setMode("SHOT")
+		moved = true
 	else
 		visuals:reset()
 		input:setMode("SHOT")
@@ -5374,12 +5481,12 @@ EpisodeStarted.OnClientEvent:Connect(function(episode)
 	hud:hideCard()
 	hud:setPower(0)
 	showProgress(episode)
-	hud:setMode(episode.kind, episode.mode, episode.taskGoals)
-	if episode.shots == 0 then
+	hud:setMode(episode.stage, if followUp then episode.phaseMode else episode.mode, episode.taskGoals, episode.kind)
+	if episode.shots == 0 and not followUp then
 		bestSpeed = 0
 	end
 
-	local guide = episode.mode == "TUTORIAL" and episode.hint
+	local guide = episode.hint -- only sent for guided attempts
 	if guide then
 		hint:show(episode.kind, guide)
 		hud:setPowerZone(guide.powerMin, guide.powerMax)
@@ -5403,26 +5510,27 @@ EpisodeStarted.OnClientEvent:Connect(function(episode)
 		input:setGuide(nil)
 		passVisuals:setHighlight(nil)
 	end
-	hud:setTitle(if pass then (if guide then "PassTutorialReady" else "PassReady") else (if guide then "TutorialReady" else "Ready"))
+	hud:setTitle(if pass then (if guide then "PassTutorialReady" else "PassReady") elseif guide then "TutorialReady" elseif followUp then "FollowUpReady" else "Ready")
 
-	task.delay(ShotConfig.Input.ReadyDelay, function()
+	task.delay(if moved then math.max(SCENE_BLEND, ShotConfig.Input.ReadyDelay) else ShotConfig.Input.ReadyDelay, function()
 		if currentEpisode == episode then
 			input:setEnabled(true)
 		end
 	end)
 end)
 
--- What the card says after each attempt, by the server's training status.
+-- What the card says after each attempt, by the server's training status. In the pass stage the
+-- card comes after the shot that follows a good pass, or straight after a failed pass.
 local function showOutcome(result)
 	local status = result.status
-	local pass = result.kind == "PASS"
-	local key = if pass then "PASS_" .. result.detail else result.detail
+	local passStage = result.stage == "PASS"
+	local key = if result.kind == "PASS" then "PASS_" .. result.detail else result.detail
 	local speed = result.speedKmh
 	if status == "COMPLETED" then
-		hud:showComplete({ kind = result.kind, goals = result.goals, shots = result.shots, bestSpeed = if pass then nil else bestSpeed })
+		hud:showComplete({ kind = result.stage, goals = result.goals, shots = result.shots, bestSpeed = bestSpeed, bonusGoals = result.bonusGoals })
 	elseif status == "TUTORIAL_DONE" then
 		hud:showResult(key, {
-			subtitle = string.format(if pass then hud.text.PassTutorialDone else hud.text.TutorialDone, result.taskGoals),
+			subtitle = string.format(if passStage then hud.text.PassTutorialDone else hud.text.TutorialDone, result.taskGoals),
 			button = hud.text.ToTask,
 			speedKmh = speed,
 		})
@@ -5431,8 +5539,10 @@ local function showOutcome(result)
 	else
 		local left = result.taskGoals - result.goals
 		local subtitle = nil
-		if result.mode == "TASK" and result.outcome == (if pass then "GOOD" else "GOAL") then
-			subtitle = string.format(if pass then hud.text.PassLeft else hud.text.TaskLeft, left)
+		if result.mode == "FOLLOWUP" then
+			subtitle = string.format(if result.outcome == "GOAL" then hud.text.FollowUpGoal else hud.text.FollowUpMiss, left)
+		elseif result.mode == "TASK" and result.stage == "SHOT" and result.outcome == "GOAL" then
+			subtitle = string.format(hud.text.TaskLeft, left)
 		end
 		hud:showResult(key, { subtitle = subtitle, speedKmh = speed })
 	end
@@ -5456,11 +5566,21 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	end
 
 	local function onDecisive()
-		if result.mode ~= "TUTORIAL" then
+		if result.mode == "TASK" or result.mode == "FREE" then
 			showProgress(result)
 			if result.outcome == (if pass then "GOOD" else "GOAL") then
 				hud:bumpGoals()
 			end
+		end
+		if result.followUp then
+			-- Good pass: no card, the receiver shoots next.
+			hud:setTitle("PassReceived")
+			task.delay(FOLLOW_UP_DELAY, function()
+				if not currentEpisode and not waitingForEpisode then
+					requestEpisode()
+				end
+			end)
+			return
 		end
 		hud:setTitle(if pass then "PassAfter" else "AfterShot")
 		task.delay(CARD_DELAY, function()
@@ -5489,7 +5609,7 @@ end)
 
 local wasHolding = false
 RunService.RenderStepped:Connect(function(dt)
-	local pass = currentKind == "PASS"
+	local pass = currentScene == "PASS"
 	visuals:update(dt) -- keeper (and the camera while the shot drill is active)
 	passVisuals:update(dt)
 	input:update()
@@ -6479,6 +6599,9 @@ return KeeperAnimator
             <string name="Name">PassVisuals</string>
             <string name="Source"><![CDATA[-- 3D side of the pass drill: camera, the four players, ball, ground markers, the aiming line,
 -- and the replay of the server's simulated pass. Everything is local to this client.
+-- After a good pass the receiver shoots (beginFollowUp): the shot drill (ShotVisuals) owns the
+-- camera and the ball then, and this keeps the players on the pitch, lines the receiver up
+-- behind the ball and fades anyone standing between the camera and the goal while aiming.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -6493,6 +6616,8 @@ local BALL_RADIUS = ShotConfig.Ball.Radius
 local SCALE = ShotConfig.Goalkeeper.ModelScale
 local LINE_DOTS = 22
 local CAMERA_BLEND = 0.9
+local FADE = 0.65 -- LocalTransparencyModifier for players blocking the view of the goal
+local FADE_WIDTH = 4.5 -- studs either side of the camera-to-goal line
 
 local rgb = Color3.fromRGB
 local WHITE = Color3.new(1, 1, 1)
@@ -6616,7 +6741,15 @@ function PassVisuals.new()
 			end
 		end
 		model.Parent = folder
-		return FigureAnimator.new(model, rootHeight, SCALE)
+		local animator = FigureAnimator.new(model, rootHeight, SCALE)
+		animator.fadeParts = {}
+		animator.fade = 0
+		for _, d in model:GetDescendants() do
+			if d:IsA("BasePart") or d:IsA("Decal") then
+				table.insert(animator.fadeParts, d)
+			end
+		end
+		return animator
 	end
 	self.passer = figure("Passer", TEAM_KIT, "head")
 	self.mates = { figure("Teammate1", TEAM_KIT, "head"), figure("Teammate2", TEAM_KIT, "head") }
@@ -6646,9 +6779,10 @@ end
 
 -- Shows the drill (parents everything into the workspace) and moves the camera over.
 function PassVisuals:enter()
-	if self.active then
+	if self.active and not self.followUp then
 		return
 	end
+	self:_endFollowUp()
 	self.active = true
 	self.folder.Parent = workspace
 	local camera = workspace.CurrentCamera
@@ -6656,8 +6790,91 @@ function PassVisuals:enter()
 end
 
 function PassVisuals:exit()
+	self:_endFollowUp()
 	self.active = false
 	self.folder.Parent = nil
+end
+
+local function setFade(animator, amount: number)
+	if animator.fade == amount then
+		return
+	end
+	animator.fade = amount
+	for _, part in animator.fadeParts do
+		part.LocalTransparencyModifier = amount
+	end
+end
+
+function PassVisuals:_figures()
+	return { self.passer, self.mates[1], self.mates[2], self.defender }
+end
+
+function PassVisuals:_endFollowUp()
+	self.followUp = nil
+	for _, figure in self:_figures() do
+		setFade(figure, 0)
+	end
+end
+
+-- The shot after a good pass: receiver index, ball spot and the shot camera's position.
+function PassVisuals:beginFollowUp(receiver: number, spot: Vector3, cameraPosition: Vector3)
+	if not (self.active and self.layout and self.mates[receiver]) then
+		return -- nothing on the pitch to line up (e.g. joined mid-way); the shot still works
+	end
+	self.replay = nil
+	self.frozen = true
+	self.highlight = nil
+	local toGoal = flat(-spot)
+	toGoal = if toGoal.Magnitude > 1e-3 then toGoal.Unit else Vector3.new(0, 0, -1)
+	local right = toGoal:Cross(Vector3.yAxis)
+	self.followUp = {
+		receiver = receiver,
+		spot = spot,
+		camera = flat(cameraPosition),
+		stand = flat(spot - toGoal * 1.3 - right * 0.8), -- ball on his right foot
+		toGoal = toGoal,
+		kicked = false,
+	}
+	self:_setBall(Vector3.new(0, -50, 0)) -- the shot drill's ball takes over
+	for _, ring in self.mateRings do
+		ring.part.Parent = nil
+	end
+	self.defenderZone.part.Parent = nil
+	self:updateAiming(false, nil, 0, false)
+	self.mates[receiver]:play(nil)
+end
+
+-- The player released the shot: the receiver strikes it, everyone visible again.
+function PassVisuals:followUpKick()
+	local fu = self.followUp
+	if fu then
+		fu.kicked = true
+		self.mates[fu.receiver]:play("KICK")
+	end
+end
+
+function PassVisuals:_updateFollowUp(dt: number)
+	local fu = self.followUp
+	local receiver = self.mates[fu.receiver]
+	-- Receiver jogs the last steps to the ball; the others turn to watch.
+	local towards = fu.stand - receiver.position
+	local stepLen = math.min(towards.Magnitude, 9 * dt)
+	local nextPos = if towards.Magnitude > 1e-3 then receiver.position + towards.Unit * stepLen else fu.stand
+	receiver:moveTo(nextPos, fu.toGoal, dt)
+	for _, figure in self:_figures() do
+		if figure ~= receiver then
+			figure:moveTo(figure.position, flat(fu.spot - figure.position), dt)
+		end
+	end
+	-- Fade whoever stands between the camera and the goal (until the kick).
+	local line = -fu.camera
+	local lengthSq = line:Dot(line)
+	for _, figure in self:_figures() do
+		local rel = figure.position - fu.camera
+		local t = rel:Dot(line) / lengthSq
+		local lateral = (rel - line * t).Magnitude
+		setFade(figure, if not fu.kicked and t > 0 and t < 1 and lateral < FADE_WIDTH then FADE else 0)
+	end
 end
 
 function PassVisuals:_setBall(position: Vector3)
@@ -6680,6 +6897,7 @@ function PassVisuals:reset(layout)
 	self.frozen = false
 	self.replay = nil
 	self.highlight = nil
+	self:_endFollowUp()
 	self.ballRotation = CFrame.identity
 	local origin = layout.origin
 	self:_setBall(origin + Vector3.new(0, BALL_RADIUS, 0))
@@ -6840,6 +7058,15 @@ function PassVisuals:update(dt: number)
 	if not self.active or not self.layout then
 		return
 	end
+	if self.followUp then
+		self:_updateFollowUp(dt)
+		self.passer:update(dt)
+		for _, mate in self.mates do
+			mate:update(dt)
+		end
+		self.defender:update(dt)
+		return
+	end
 	local camera = workspace.CurrentCamera
 	camera.CameraType = Enum.CameraType.Scriptable
 	local target = CFrame.lookAt(PassConfig.Camera.Position, PassConfig.Camera.LookAt)
@@ -6946,6 +7173,11 @@ local TEXT = {
 	PassAfter = "Выбери свободного партнёра",
 	PassTutorialReady = "Повтори за пальцем: веди от мяча к партнёру",
 	PassTutorialHolding = "Отпусти на партнёре",
+	PassReceived = "Принял! Теперь удар",
+	FollowUpReady = "Партнёр принял пас — бей по воротам!",
+	FollowUpGoal = "Пас и гол! Осталось пасов: %d",
+	FollowUpMiss = "Пас засчитан. Осталось пасов: %d",
+	CompleteBonus = "Голов после паса: %d",
 	NextShot = "ЕЩЁ УДАР  ›",
 	Speed = "%d км/ч",
 	-- Training
@@ -7036,6 +7268,7 @@ local PHONE_BOOST = 1.7
 local PHONE_MIN_WIDTH = 680
 local PHONE_MIN_HEIGHT = 400
 local PHONE_LOGO = 0.8 -- the logo panel is decoration; on phones it gives its room to the goal
+local PHONE_GOALS = 0.68 -- the goals panel sits over the pitch on phones, so it is drawn smaller
 local POWER_SEGMENTS = 20
 local POWER_WARN = 0.85
 
@@ -7290,6 +7523,7 @@ function ShotHud.new()
 			uiScale.Scale = scale
 		end
 		self.logoScale.Scale = if phone then scale * PHONE_LOGO else scale
+		self.goalsScale.Scale = if phone then scale * PHONE_GOALS else scale
 	end
 	rescale()
 	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(rescale)
@@ -7355,13 +7589,14 @@ end
 function ShotHud:_buildGoals()
 	local root = panel({ Name = "Goals", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -18, 0, 14), Size = UDim2.fromOffset(292, 104) }, 10)
 	root.Parent = self.gui
-	self:_scaled(root)
+	self.goalsScale = self:_scaled(root)
 
 	local trophy = iconBox(root, UDim2.fromOffset(14, 12), 50, GOLD)
 	self.trophy = trophy
 	emoji(trophy, "🏆", 28)
 
-	local label = text({ Name = "GoalsLabel", Position = UDim2.fromOffset(78, 10), Size = UDim2.fromOffset(150, 18), Text = TEXT.Goals, TextSize = 15, TextColor3 = LILAC, Parent = root })
+	local label
+	label = text({ Name = "GoalsLabel", Position = UDim2.fromOffset(78, 10), Size = UDim2.fromOffset(150, 18), Text = TEXT.Goals, TextSize = 15, TextColor3 = LILAC, Parent = root })
 	sizeLimit(label, 15)
 	outline(label, 1.5)
 	self.goalsLabel = label
@@ -7513,20 +7748,20 @@ function ShotHud:_buildCompleteMenu()
 
 	local chips = frame({ Name = "Chips", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 240), Size = UDim2.fromOffset(460, 30), BackgroundTransparency = 1, Parent = body })
 	create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Center, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = chips })
-	local function chip(order: number, icon: string, value: string, color: Color3): (Frame, TextLabel)
+	local function chip(order: number, icon: string, value: string, color: Color3): (Frame, TextLabel, TextLabel)
 		local c = frame({ Name = "Chip", LayoutOrder = order, Size = UDim2.fromOffset(0, 30), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = NAVY, Parent = chips })
 		corner(c, 8)
 		stroke(c, color, 2)
 		create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 12), Parent = c })
 		create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder, Parent = c })
-		text({ LayoutOrder = 1, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = icon, TextSize = 16, FontFace = FONT_MEDIUM, Parent = c })
+		local iconLabel = text({ LayoutOrder = 1, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = icon, TextSize = 16, FontFace = FONT_MEDIUM, Parent = c })
 		local label = text({ LayoutOrder = 2, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = value, TextSize = 16, Parent = c })
 		outline(label, 1.5)
-		return c, label
+		return c, label, iconLabel
 	end
 	local _, stageChipText = chip(1, "✅", string.format(TEXT.CompleteStage, 1), LIME)
 	self.completeStageText = stageChipText
-	self.completeSpeed, self.completeSpeedText = chip(2, "⚡", "", GOLD)
+	self.completeSpeed, self.completeSpeedText, self.completeSpeedIcon = chip(2, "⚡", "", GOLD)
 
 	-- Two buttons: replay the task (secondary) and go on (primary).
 	self.retryButton = self:_buildButton(body, TEXT.PlayAgain, function()
@@ -7875,21 +8110,22 @@ function ShotHud:_setStage(stage: number)
 	self.stageText.Text = if stage > 3 then TEXT.StageFree else string.format(TEXT.Stage, stage)
 end
 
--- Labels for the current part of the training. kind: SHOT | PASS; mode: TUTORIAL | TASK | FREE.
-function ShotHud:setMode(kind: string, mode: string, taskGoals: number)
-	self.kind = kind
-	local pass = kind == "PASS"
-	if mode == "TUTORIAL" then
-		self.goalsLabel.Text = TEXT.GoalsTutorial
-	elseif mode == "TASK" then
-		self.goalsLabel.Text = string.format(if pass then TEXT.GoalsTaskPass else TEXT.GoalsTask, taskGoals)
-	else
+-- Labels for the current part of the training. stage: SHOT | PASS | FREE; mode: TUTORIAL | TASK
+-- | FREE (of the stage); kind: what the player is doing now, SHOT or PASS (power bar texts).
+function ShotHud:setMode(stage: string, mode: string, taskGoals: number, kind: string)
+	local pass = stage == "PASS"
+	if stage == "FREE" then
 		self.goalsLabel.Text = TEXT.GoalsFree
+	elseif mode == "TUTORIAL" then
+		self.goalsLabel.Text = TEXT.GoalsTutorial
+	else
+		self.goalsLabel.Text = string.format(if pass then TEXT.GoalsTaskPass else TEXT.GoalsTask, taskGoals)
 	end
-	self.modeText.Text = if mode == "FREE" then TEXT.ModeFree elseif pass then TEXT.ModePass else TEXT.Mode
-	self.powerHint.Text = if pass then TEXT.PassPowerHint else TEXT.PowerHint
-	self.powerZoneLabel.Text = if pass then TEXT.PassPowerZone else TEXT.PowerZone
-	self:_setStage(if mode == "FREE" then 4 elseif pass then 2 else 1)
+	self.modeText.Text = if stage == "FREE" then TEXT.ModeFree elseif pass then TEXT.ModePass else TEXT.Mode
+	local passing = kind == "PASS"
+	self.powerHint.Text = if passing then TEXT.PassPowerHint else TEXT.PowerHint
+	self.powerZoneLabel.Text = if passing then TEXT.PassPowerZone else TEXT.PowerZone
+	self:_setStage(if stage == "FREE" then 4 elseif pass then 2 else 1)
 end
 
 -- Highlights the power range that the guided shot asks for (nil hides it).
@@ -7906,17 +8142,25 @@ function ShotHud:setPowerZone(min: number?, max: number?)
 	zone.Visible = true
 end
 
--- Completion menu after a task is done. stats: { kind, goals, shots, bestSpeed }
-function ShotHud:showComplete(stats: { kind: string, goals: number, shots: number, bestSpeed: number? })
+-- Completion menu after a task is done. stats: { kind, goals, shots, bestSpeed, bonusGoals }
+function ShotHud:showComplete(stats: { kind: string, goals: number, shots: number, bestSpeed: number?, bonusGoals: number? })
 	self.card.Visible = false
 	self.cardButton.shineTween:Cancel()
 	local stage = if stats.kind == "PASS" then 2 else 1
 	self.completeSubtitle.Text = string.format(if stats.kind == "PASS" then TEXT.CompleteSubtitlePass else TEXT.CompleteSubtitle, stats.goals, stats.shots)
 	self.completeStageText.Text = string.format(TEXT.CompleteStage, stage)
-	local hasSpeed = type(stats.bestSpeed) == "number" and stats.bestSpeed > 0
-	self.completeSpeed.Visible = hasSpeed
-	if hasSpeed then
-		self.completeSpeedText.Text = string.format(TEXT.CompleteSpeed, math.floor(stats.bestSpeed + 0.5))
+	-- Second chip: the fastest goal (shot stage) or goals scored after passes (pass stage).
+	if stats.kind == "PASS" then
+		self.completeSpeed.Visible = true
+		self.completeSpeedIcon.Text = "⚽"
+		self.completeSpeedText.Text = string.format(TEXT.CompleteBonus, stats.bonusGoals or 0)
+	else
+		local hasSpeed = type(stats.bestSpeed) == "number" and stats.bestSpeed > 0
+		self.completeSpeed.Visible = hasSpeed
+		self.completeSpeedIcon.Text = "⚡"
+		if hasSpeed then
+			self.completeSpeedText.Text = string.format(TEXT.CompleteSpeed, math.floor(stats.bestSpeed + 0.5))
+		end
 	end
 	for i, ball in self.completeBalls do
 		ball.Visible = i <= stats.goals
@@ -8025,6 +8269,7 @@ function ShotVisuals.new()
 	self.ballRotation = CFrame.identity
 	self.active = true
 	self.blendT = 1
+	self.spot = ShotPhysics.ballSpot()
 
 	local folder = create("Folder", { Name = "ShotVisuals", Parent = workspace })
 
@@ -8187,12 +8432,20 @@ function ShotVisuals:_spinBall(angularVelocity: Vector3, dt: number)
 	end
 end
 
-function ShotVisuals:reset()
+-- spot: where the ball is (default: the shot drill's spot; a shot after a pass starts at the receiver).
+function ShotVisuals:reset(spot: Vector3?)
 	self.token += 1
 	self.holdBall = false
 	self.ballRotation = CFrame.identity
 	self.trail.Enabled = false
-	self:_setBall(ShotPhysics.ballSpot())
+	local newSpot = spot or ShotPhysics.ballSpot()
+	if self.active and self.spot and (newSpot - self.spot).Magnitude > 0.1 then
+		-- New shooting position: glide the camera over instead of cutting.
+		local camera = workspace.CurrentCamera
+		self.blendFrom, self.blendFov, self.blendT = camera.CFrame, camera.FieldOfView, 0
+	end
+	self.spot = newSpot
+	self:_setBall(self.spot)
 	if self.keeper then
 		self.keeper:recover()
 	end
@@ -8200,6 +8453,17 @@ function ShotVisuals:reset()
 		self.netBack.CFrame = self.netBackHome
 	end
 	self:updateAiming(false, 0, 0.5, 0, false)
+end
+
+-- The shot camera sits behind the ball on the line to the goal, as far back and as high as for the
+-- shot drill's own spot (where this gives exactly ShotConfig.Camera.Position).
+function ShotVisuals.cameraPosition(spot: Vector3): Vector3
+	local cam = ShotConfig.Camera.Position
+	local home = ShotPhysics.ballSpot()
+	local back = Vector3.new(cam.X - home.X, 0, cam.Z - home.Z).Magnitude
+	local away = Vector3.new(spot.X, 0, spot.Z)
+	away = if away.Magnitude > 1e-3 then away.Unit else Vector3.new(0, 0, 1)
+	return Vector3.new(spot.X, cam.Y, spot.Z) + away * back
 end
 
 -- Off while another drill (the pass) owns the camera: the ball is put away, the keeper idles.
@@ -8215,6 +8479,9 @@ function ShotVisuals:setActive(active: boolean)
 	else
 		self.token += 1 -- stops any replay in progress
 		self.holdBall = false
+		if self.keeper then
+			self.keeper:recover() -- back on his feet after the last shot
+		end
 		self.trail.Enabled = false
 		self:_setBall(Vector3.new(0, -50, 0))
 		self:updateAiming(false, 0, 0.5, 0, false)
@@ -8237,7 +8504,7 @@ function ShotVisuals:update(dt: number)
 		local camera = workspace.CurrentCamera
 		camera.CameraType = Enum.CameraType.Scriptable
 		local fov = ShotConfig.Camera.FieldOfView - self.fovKick
-		local base = CFrame.lookAt(ShotConfig.Camera.Position, ShotConfig.Camera.LookAt)
+		local base = CFrame.lookAt(ShotVisuals.cameraPosition(self.spot), ShotConfig.Camera.LookAt)
 		if self.shake > 0 then
 			local t = self.clock * 25
 			local amount = self.shake * 0.3
@@ -8285,7 +8552,7 @@ function ShotVisuals:updateAiming(enabled: boolean, aimX: number, aimY: number, 
 		return
 	end
 	self.previewKey = key
-	local points = ShotPhysics.previewPath(point, power, ShotPhysics.spinFor(aimX, power), PREVIEW_DOTS)
+	local points = ShotPhysics.previewPath(point, power, ShotPhysics.spinFor(aimX, power), PREVIEW_DOTS, self.spot)
 	for i, dot in self.dots do
 		local p = points[i]
 		if p then
@@ -8347,7 +8614,7 @@ function ShotVisuals:playShot(result, onDecisive: () -> ())
 	local decisiveFired = false
 	self.trail.Enabled = (result.speedKmh or 0) >= 85
 
-	local t, last = 0, ShotPhysics.ballSpot()
+	local t, last = 0, self.spot
 	while t < duration + AFTER_PATH_SECONDS do
 		local dt = RunService.RenderStepped:Wait()
 		if self.token ~= token then

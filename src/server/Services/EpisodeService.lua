@@ -5,6 +5,9 @@
 --   stage SHOT  TUTORIAL (one guided shot that always scores) -> TASK (score Training.TaskGoals)
 --   stage PASS  TUTORIAL (one guided pass that always arrives) -> TASK (PassConfig.Training.TaskPasses good passes)
 --   After a TASK the phase is DONE and the menu asks for "RETRY" (task again) or "NEXT" (next stage).
+--   A good pass is followed by a SHOT episode (mode FOLLOWUP) from where the receiver took the ball;
+--   the pass already counted, the shot only adds to `bonusGoals`. The pass's status (TUTORIAL_DONE,
+--   CONTINUE, COMPLETED) is reported with the shot's result.
 --   stage FREE  free shooting against the normal keeper (placeholder until a full match exists)
 -- Misses never reset task progress.
 --
@@ -32,10 +35,17 @@ local STAGES = { SHOT = true, PASS = true, FREE = true }
 type Episode = {
 	id: number,
 	kind: string, -- SHOT | PASS
-	mode: string, -- TUTORIAL | TASK | FREE
+	mode: string, -- TUTORIAL | TASK | FREE | FOLLOWUP
 	seed: number,
 	startedAt: number,
 	layout: PassPhysics.Layout?,
+	followUp: FollowUp?,
+}
+type FollowUp = {
+	spot: Vector3, -- ball position for the shot
+	receiver: number, -- teammate index
+	phaseMode: string, -- the pass's mode (TUTORIAL | TASK)
+	passStatus: string, -- the pass's training status
 }
 type PlayerState = {
 	nextEpisodeId: number,
@@ -46,6 +56,8 @@ type PlayerState = {
 	shots: number, -- attempts in the current task (or in free play)
 	goals: number, -- goals / good passes
 	history: { string }, -- outcome of each attempt, most recent last (free play keeps the last 10)
+	bonusGoals: number, -- pass stage: goals scored after good passes in this task attempt
+	followUp: FollowUp?, -- a good pass waiting for its shot
 }
 
 local EpisodeService = {}
@@ -55,7 +67,7 @@ local seedSource = Random.new()
 local remotes
 
 local function resetCounters(state: PlayerState)
-	state.shots, state.goals, state.history = 0, 0, {}
+	state.shots, state.goals, state.history, state.bonusGoals = 0, 0, {}, 0
 end
 
 local function getState(player: Player): PlayerState
@@ -71,6 +83,7 @@ local function getState(player: Player): PlayerState
 			shots = 0,
 			goals = 0,
 			history = {},
+			bonusGoals = 0,
 		}
 		states[player] = state
 	end
@@ -101,10 +114,33 @@ end
 
 local function progress(state: PlayerState)
 	return {
+		stage = state.stage,
 		goals = state.goals,
 		shots = state.shots,
+		bonusGoals = state.bonusGoals,
 		taskGoals = taskGoal(state.stage),
 		history = table.clone(state.history),
+	}
+end
+
+-- Guided aim for a shot from `spot`: the far top corner, as seen from that side of the pitch.
+local function guidedAim(spot: Vector3?): (number, number)
+	local x = Training.TutorialAim.X
+	if spot and spot.X > 0 then
+		x = -x
+	end
+	return x, Training.TutorialAim.Y
+end
+
+local function shotHint(spot: Vector3?)
+	local aimX, aimY = guidedAim(spot)
+	return {
+		aimX = aimX,
+		aimY = aimY,
+		ringRadius = Training.TutorialRingRadius,
+		tapRadius = Training.TutorialTapRadius,
+		powerMin = Training.GuidedPowerMin,
+		powerMax = Training.GuidedPowerMax,
 	}
 end
 
@@ -128,25 +164,46 @@ local function sendEpisode(player: Player, state: PlayerState, episode: Episode)
 	payload.kind = episode.kind
 	payload.mode = episode.mode
 	payload.layout = episode.layout
+	if episode.followUp then
+		payload.spot = episode.followUp.spot
+		payload.receiver = episode.followUp.receiver
+		payload.phaseMode = episode.followUp.phaseMode
+	end
 	if episode.mode == "TUTORIAL" then
 		if episode.kind == "PASS" then
 			payload.hint = passHint(episode.layout :: PassPhysics.Layout)
 		else
-			payload.hint = {
-				aimX = Training.TutorialAim.X,
-				aimY = Training.TutorialAim.Y,
-				ringRadius = Training.TutorialRingRadius,
-				tapRadius = Training.TutorialTapRadius,
-				powerMin = Training.GuidedPowerMin,
-				powerMax = Training.GuidedPowerMax,
-			}
+			payload.hint = shotHint(nil)
 		end
+	elseif episode.followUp and episode.followUp.phaseMode == "TUTORIAL" then
+		payload.hint = shotHint(episode.followUp.spot) -- first shot after the guided pass is guided too
 	end
 	remotes.EpisodeStarted:FireClient(player, payload)
 end
 
 -- choice: what the completion menu asked for ("RETRY" or "NEXT"); ignored in other phases.
 local function startEpisode(player: Player, state: PlayerState, choice: string?)
+	local followUp = state.followUp
+	if followUp then
+		-- The shot after a good pass comes first, even if that pass completed the task.
+		state.followUp = nil
+		local episode = {
+			id = state.nextEpisodeId,
+			kind = "SHOT",
+			mode = "FOLLOWUP",
+			seed = seedSource:NextInteger(1, 2 ^ 31 - 1),
+			startedAt = os.clock(),
+			followUp = followUp,
+		}
+		state.nextEpisodeId += 1
+		state.active = episode
+		print(string.format(
+			"[EpisodeService] %s: episode #%d started (SHOT FOLLOWUP from (%.1f, %.1f), seed %d)",
+			player.Name, episode.id, followUp.spot.X, followUp.spot.Z, episode.seed
+		))
+		sendEpisode(player, state, episode)
+		return
+	end
 	if state.phase == "DONE" then
 		if choice == "NEXT" then
 			state.stage = if state.stage == "SHOT" then "PASS" else "FREE"
@@ -238,8 +295,17 @@ local function resolveShot(active: Episode, aimX: number, aimY: number, power: n
 	}
 	local stats = { shooting = ShotConfig.DefaultShooting, keeperSkill = Training.TaskKeeperSkill }
 	local options
-	if active.mode == "TUTORIAL" then
-		options = { guided = { aimX = Training.TutorialAim.X, aimY = Training.TutorialAim.Y } }
+	local followUp = active.followUp
+	if followUp then
+		-- Training keeper; the first one (after the guided pass) is a sure goal like the guided shot.
+		options = { start = followUp.spot, keeperDelay = Training.TaskKeeperDelay }
+		if followUp.phaseMode == "TUTORIAL" then
+			local guideX, guideY = guidedAim(followUp.spot)
+			options.guided = { aimX = guideX, aimY = guideY }
+		end
+	elseif active.mode == "TUTORIAL" then
+		local guideX, guideY = guidedAim(nil)
+		options = { guided = { aimX = guideX, aimY = guideY } }
 	elseif active.mode == "TASK" then
 		options = { keeperDelay = Training.TaskKeeperDelay }
 	else
@@ -339,7 +405,29 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, a: any, b: a
 
 	-- Consume the episode once it has a result, so it can never produce a second one.
 	state.active = nil
-	local status = advance(state, active.mode, success, outcome)
+	local status
+	local followUp = active.followUp
+	if followUp then
+		status = followUp.passStatus -- the pass already counted
+		if success and followUp.phaseMode == "TASK" then
+			state.bonusGoals += 1
+		end
+	else
+		status = advance(state, active.mode, success, outcome)
+		if active.kind == "PASS" and success and payload.receiver and payload.receiverTrack then
+			-- The receiver takes it towards goal and shoots next.
+			local meet = payload.receiverTrack[#payload.receiverTrack]
+			local toGoal = Vector3.new(-meet.X, 0, -meet.Z).Unit
+			local ground = meet + toGoal * PassConfig.Teammate.Reach * 0.7
+			state.followUp = {
+				spot = Vector3.new(ground.X, ShotConfig.Ball.Radius, ground.Z),
+				receiver = payload.receiver,
+				phaseMode = active.mode,
+				passStatus = status,
+			}
+			payload.followUp = true
+		end
+	end
 	print(string.format(
 		"[EpisodeService] %s: episode #%d %s %s %s -> %s/%s, %d km/h, %s (%d of %d)",
 		player.Name, active.id, active.kind, active.mode, summary, outcome, detail, speedKmh,

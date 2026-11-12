@@ -14,7 +14,8 @@ export type ShotStats = { shooting: number, keeperSkill: number }
 -- guided: tutorial shot that always scores. Unsafe aims are moved to (aimX, aimY), power is kept
 -- in a comfortable range, there is no scatter and the keeper dives too late.
 -- keeperDelay: extra keeper reaction time in seconds (easier keeper for the training task).
-export type ShotOptions = { guided: { aimX: number, aimY: number }?, keeperDelay: number? }
+-- start: ball position (default: the penalty-area spot); a shot after a pass starts at the receiver.
+export type ShotOptions = { guided: { aimX: number, aimY: number }?, keeperDelay: number?, start: Vector3? }
 export type ShotResult = {
 	input: ShotInput, -- the input actually used (guided shots may move the aim)
 	outcome: string, -- "GOAL" | "SAVE" | "POST" | "MISS" (series history / scoring)
@@ -93,7 +94,7 @@ function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random, o
 		jitterX, jitterY = 0, 0
 	end
 	local spin = ShotPhysics.spinFor(input.aimX, input.power, jitterX, jitterY)
-	local start = ShotPhysics.ballSpot()
+	local start = (options and options.start) or ShotPhysics.ballSpot()
 	local velocity = ShotPhysics.solveLaunch(start, target, input.power, spin)
 
 	-- 3. Goalkeeper: reacts after a short delay, then moves at a skill-based speed. He only
@@ -101,6 +102,9 @@ function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random, o
 	local reaction = Keeper.ReactionTime + (rng:NextNumber() * 2 - 1) * Keeper.ReactionJitter
 	if guided then
 		reaction += ShotConfig.Training.GuidedKeeperDelay
+		-- From further out the ball is in the air longer; he is late by the same margin anyway.
+		local extra = (target - start).Magnitude - (ShotPhysics.aimToGoalPoint(input.aimX, input.aimY) - ShotPhysics.ballSpot()).Magnitude
+		reaction += math.max(0, extra) / ShotPhysics.ballSpeed(input.power)
 	elseif options and options.keeperDelay then
 		reaction += options.keeperDelay
 	end

@@ -89,7 +89,7 @@ ShotConfig.Training = {
 	GuidedPowerMin = 0.55, -- the green zone on the power bar during the guided shot
 	GuidedPowerMax = 0.8,
 	GuidedSafeMargin = 2, -- studs kept clear of the frame and the keeper's reach on the guided shot
-	GuidedKeeperDelay = 0.3, -- keeper reacts this much later on the guided shot
+	GuidedKeeperDelay = 0.45, -- keeper reacts this much later on guided shots (also from an angle after a pass)
 	TaskGoals = 5,
 	-- Training keeper: still saves central shots, beatable in the corners.
 	TaskKeeperSkill = 15,

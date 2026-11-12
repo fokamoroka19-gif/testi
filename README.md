@@ -94,8 +94,14 @@ up to 4 studs to meet it. Results: **ТОЧНЫЙ ПАС** (received), **ПЕР�
 first), **СЛИШКОМ СИЛЬНО** (too fast for the teammate to control), **НЕ ДОШЁЛ** / **МИМО**.
 A teammate the defender isn't near is safe; one he is patrolling towards needs the right moment.
 
+**Pass, then shot.** After a good pass the receiver controls the ball, the camera glides behind him
+and you take the shot from there (same controls as the shot drill, against the training keeper).
+The pass already counts for the task; the shot is a bonus (**Голов после паса** on the completion
+menu). Players standing between the camera and the goal are faded while you aim. The first shot
+after the guided pass is guided too (finger and ring on the goal, always a goal).
+
 1. **Guided pass.** The target teammate's ring pulses and the finger shows it: press at the ball,
-   drag to the teammate, let go. This pass always arrives.
+   drag to the teammate, let go. This pass always arrives, and the receiver's shot always scores.
 2. **Task.** 5 good passes in any number of attempts, in random situations (`PassConfig.Layouts`).
 3. **Completed.** The menu again: **ЕЩЁ РАЗ** replays the task, **ДАЛЕЕ** opens free play
    (unlimited shots against the normal keeper) until the next stage (a full match) exists.
@@ -107,8 +113,9 @@ The flow is decided on the server (`EpisodeService`), so a client can't skip a t
 `ShotConfig.Training` (shot) and `PassConfig` (pass). To test the pass stage without replaying the
 shot training, set `ShotConfig.Training.StartStage = "PASS"`.
 
-On phones (short side under 500 px) the HUD is drawn up to 1.7× larger than the plain fit (the logo a bit less), as far as
-the power panel and the completion menu still fit the screen (`PHONE_*` at the top of `ShotHud`).
+On phones (short side under 500 px) the HUD is drawn up to 1.7× larger than the plain fit, as far as
+the power panel and the completion menu still fit the screen. The logo (×0.8) and the goals panel
+(×0.68) are drawn smaller so they don't cover the pitch (`PHONE_*` at the top of `ShotHud`).
 
 ## Controls
 
