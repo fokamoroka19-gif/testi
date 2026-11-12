@@ -7,10 +7,10 @@
 local ShotConfig = {}
 
 ShotConfig.Goal = {
-	Width = 24, -- inside width, post to post
-	Height = 8, -- inside height, ground to crossbar
-	PostRadius = 0.35,
-	NetDepth = 6,
+	Width = 30, -- inside width, post to post (oversized for readability; real ratio 3:1)
+	Height = 10, -- inside height, ground to crossbar
+	PostRadius = 0.4,
+	NetDepth = 7,
 	-- Fraction of the ball radius that must overlap the frame to count as POST;
 	-- lighter touches deflect in (goal side) or out (wide side).
 	FrameHitDepth = 0.5,
@@ -20,36 +20,61 @@ ShotConfig.Ball = {
 	Radius = 1,
 }
 
-ShotConfig.ShotDistance = 36 -- goal line to ball spot
+ShotConfig.ShotDistance = 40 -- goal line to ball spot
 
--- Lower than workspace.Gravity on purpose: weak shots get a visible loop, hard shots stay flat.
-ShotConfig.Gravity = 60
-ShotConfig.MinBallSpeed = 40 -- power 0
-ShotConfig.MaxBallSpeed = 110 -- power 1
+-- Positions of solid things the ball can bounce off after crossing the line.
+ShotConfig.Arena = {
+	BoardZ = -20, -- front face of the advertising boards / wall behind the goal
+	BoardHeight = 4,
+}
+
+ShotConfig.Physics = {
+	-- Lower than workspace.Gravity on purpose: weak shots get a visible loop, hard shots stay flat.
+	Gravity = 55,
+	MinBallSpeed = 45, -- power 0
+	MaxBallSpeed = 120, -- power 1
+	Drag = 0.0032, -- quadratic air drag, per stud
+	Magnus = 0.022, -- curve per (rad/s * stud/s)
+	SpinDecay = 0.35, -- per second
+	CurlSpin = 9, -- rad/s of side spin for a shot aimed at the post (curls back towards the centre)
+	DipSpin = 7, -- rad/s of top spin at full power (hard shots dip)
+	SpinJitter = 1.5, -- rad/s random spin, makes no two shots identical
+	GroundRestitution = 0.5,
+	GroundFriction = 0.35, -- fraction of horizontal speed lost per bounce
+	RollingFriction = 9, -- stud/s^2 while rolling
+	FrameRestitution = 0.65, -- posts and crossbar
+	NetDamping = 0.15, -- fraction of speed kept when the ball hits the net
+	BoardRestitution = 0.45,
+	SimStep = 1 / 240,
+	SampleStep = 1 / 60,
+	MaxSimTime = 3.2,
+}
 
 ShotConfig.Accuracy = {
 	-- Standard deviation (studs) of the random offset from the aim point, by Shooting skill.
-	ScatterAtZeroSkill = 2.6,
-	ScatterAtMaxSkill = 0.5,
+	ScatterAtZeroSkill = 3.2,
+	ScatterAtMaxSkill = 0.6,
 	MaxSigmas = 2.5, -- cap so a single shot is never wildly off
 	-- Power above this threshold is less accurate and tends to rise over the bar.
 	OverpowerFrom = 0.85,
-	OverpowerScatter = 1.5,
-	OverpowerLift = 2.5,
+	OverpowerScatter = 1.8,
+	OverpowerLift = 3,
 }
 
 ShotConfig.Goalkeeper = {
 	Enabled = true,
 	Skill = 60, -- 0..100, opponent goalkeeper rating
+	ModelScale = 1.4, -- R15 rig scale; ~7.5 studs tall next to the 10-stud goal
 	HomeX = 0,
-	HomeY = 3.5, -- body centre
-	HomeZ = 1.2, -- stands just in front of the line
-	Reach = 3, -- distance the hands cover without moving
-	ReactionTime = 0.22,
+	HomeY = 4.2, -- body centre (root part) height when standing
+	HomeZ = 1.6, -- stands just in front of the line
+	Reach = 4.2, -- distance from the body centre the gloves cover without moving
+	ReactionTime = 0.2,
 	ReactionJitter = 0.06, -- +/- random part of the reaction time
-	DiveSpeedAtZeroSkill = 10,
-	DiveSpeedAtMaxSkill = 26,
-	ModelScale = 1.15, -- R15 rig scale; ~6 studs tall next to the 8-stud goal
+	DiveSpeedAtZeroSkill = 12,
+	DiveSpeedAtMaxSkill = 30,
+	CatchMaxSpeed = 70, -- slower shots that reach the keeper comfortably are held, not parried
+	CatchMargin = 1.5, -- studs of spare reach needed to hold the ball
 }
 
 -- Placeholder until career data exists (GDD: new players start around OVR 40).
@@ -73,8 +98,8 @@ ShotConfig.Input = {
 
 -- Far and narrow, so the ball sits just above the bottom panel and the goal fills the middle.
 ShotConfig.Camera = {
-	Position = Vector3.new(0, 6, 72),
-	LookAt = Vector3.new(0, 2.5, 0),
+	Position = Vector3.new(0, 6, 82),
+	LookAt = Vector3.new(0, 3, 0),
 	FieldOfView = 28,
 }
 

@@ -3,13 +3,11 @@
 -- always match the geometry the server uses for outcomes.
 
 local Lighting = game:GetService("Lighting")
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
 
 local Goal = ShotConfig.Goal
-local Keeper = ShotConfig.Goalkeeper
 local VERTICAL = CFrame.Angles(0, 0, math.pi / 2) -- cylinder parts are long along X
 
 local WHITE = Color3.new(1, 1, 1)
@@ -298,94 +296,6 @@ local function buildWall(scene: Instance)
 	end
 end
 
-local KEEPER_COLORS = {
-	Head = Color3.fromRGB(234, 192, 160),
-	UpperTorso = Color3.fromRGB(255, 140, 0),
-	LowerTorso = Color3.fromRGB(28, 28, 32),
-	LeftUpperArm = Color3.fromRGB(255, 140, 0),
-	RightUpperArm = Color3.fromRGB(255, 140, 0),
-	LeftLowerArm = Color3.fromRGB(255, 140, 0),
-	RightLowerArm = Color3.fromRGB(255, 140, 0),
-	LeftHand = LIME, -- gloves
-	RightHand = LIME,
-	LeftUpperLeg = Color3.fromRGB(28, 28, 32),
-	RightUpperLeg = Color3.fromRGB(28, 28, 32),
-	LeftLowerLeg = Color3.fromRGB(255, 140, 0),
-	RightLowerLeg = Color3.fromRGB(255, 140, 0),
-	LeftFoot = Color3.fromRGB(20, 20, 22),
-	RightFoot = Color3.fromRGB(20, 20, 22),
-}
-
-local function makeRigKeeper(): Model
-	local description = Instance.new("HumanoidDescription")
-	local model = Players:CreateHumanoidModelFromDescription(description, Enum.HumanoidRigType.R15)
-	model.Name = "Goalkeeper"
-	local bodyColors = model:FindFirstChildOfClass("BodyColors")
-	if bodyColors then
-		bodyColors:Destroy() -- otherwise it overrides the kit colours below
-	end
-	for _, part in model:GetDescendants() do
-		if part:IsA("BasePart") then
-			part.CanCollide = false
-			part.CanQuery = false
-			part.CanTouch = false
-			local color = KEEPER_COLORS[part.Name]
-			if color then
-				part.Color = color
-			end
-		end
-	end
-	local humanoid = model:FindFirstChildOfClass("Humanoid")
-	if humanoid then
-		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-		humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
-	end
-	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart
-	root.Anchored = true -- anchors the whole rig; the client moves it with PivotTo
-	model.PrimaryPart = root
-	model:ScaleTo(Keeper.ModelScale)
-	return model
-end
-
--- Simple block figure, used only if the R15 rig can't be created.
-local function makeBlockKeeper(): Model
-	local model = Instance.new("Model")
-	model.Name = "Goalkeeper"
-	local specs = {
-		{ "Torso", Vector3.new(2.2, 2.2, 1.1), Vector3.new(0, 4.2, 0), KEEPER_COLORS.UpperTorso },
-		{ "Head", Vector3.new(1.3, 1.3, 1.3), Vector3.new(0, 6, 0), KEEPER_COLORS.Head },
-		{ "LeftLeg", Vector3.new(0.9, 3, 0.9), Vector3.new(-0.55, 1.5, 0), KEEPER_COLORS.LeftUpperLeg },
-		{ "RightLeg", Vector3.new(0.9, 3, 0.9), Vector3.new(0.55, 1.5, 0), KEEPER_COLORS.RightUpperLeg },
-		{ "LeftArm", Vector3.new(0.75, 2.4, 0.75), Vector3.new(-1.55, 4.1, 0), KEEPER_COLORS.LeftUpperArm },
-		{ "RightArm", Vector3.new(0.75, 2.4, 0.75), Vector3.new(1.55, 4.1, 0), KEEPER_COLORS.RightUpperArm },
-	}
-	for _, spec in specs do
-		local part = makePart({ Name = spec[1], Size = spec[2], CFrame = CFrame.new(spec[3]), Color = spec[4], Parent = model })
-		if spec[1] == "Torso" then
-			model.PrimaryPart = part
-		end
-	end
-	return model
-end
-
-local function buildKeeper(scene: Instance)
-	if not Keeper.Enabled then
-		return
-	end
-	local ok, model = pcall(makeRigKeeper)
-	if not ok then
-		warn("[SceneBuilder] Could not create the R15 goalkeeper, using a simple one:", model)
-		model = makeBlockKeeper()
-	end
-	-- Face the shooter (+Z) and stand with the feet on the ground.
-	local facing = CFrame.Angles(0, math.pi, 0)
-	model:PivotTo(facing)
-	local box, size = model:GetBoundingBox()
-	local lift = -(box.Position.Y - size.Y / 2)
-	model:PivotTo(CFrame.new(Keeper.HomeX, lift, Keeper.HomeZ) * facing)
-	model.Parent = scene
-end
-
 local function ensureChild(parent: Instance, className: string, name: string): any
 	local existing = parent:FindFirstChildOfClass(className)
 	if existing then
@@ -441,7 +351,6 @@ function SceneBuilder.build(): Folder
 	buildPitch(scene)
 	buildGoal(scene)
 	buildWall(scene)
-	buildKeeper(scene)
 	scene.Parent = workspace
 
 	setupLighting()
