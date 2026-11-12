@@ -11,7 +11,12 @@ local Keeper = ShotConfig.Goalkeeper
 
 export type ShotInput = { aimX: number, aimY: number, power: number }
 export type ShotStats = { shooting: number, keeperSkill: number }
+-- guided: tutorial shot that always scores. Unsafe aims are moved to (aimX, aimY), power is kept
+-- in a comfortable range, there is no scatter and the keeper dives too late.
+-- keeperDelay: extra keeper reaction time in seconds (easier keeper for the training task).
+export type ShotOptions = { guided: { aimX: number, aimY: number }?, keeperDelay: number? }
 export type ShotResult = {
+	input: ShotInput, -- the input actually used (guided shots may move the aim)
 	outcome: string, -- "GOAL" | "SAVE" | "POST" | "MISS" (series history / scoring)
 	detail: string, -- GOAL | POST_IN | CATCH | PARRY | POST | BAR | WIDE | OVER (what the player sees)
 	start: Vector3,
@@ -42,8 +47,29 @@ local function gaussian(rng: Random): number
 	return math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2)
 end
 
-function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random): ShotResult
+-- A guided shot keeps the player's aim only where it is a sure goal: well inside the frame
+-- and out of the keeper's reach.
+function ShotResolver.isSafeGuidedAim(aimX: number, aimY: number): boolean
+	local margin = ShotConfig.Training.GuidedSafeMargin
+	local point = ShotPhysics.aimToGoalPoint(aimX, aimY)
+	local fromKeeper = Vector3.new(point.X - Keeper.HomeX, point.Y - Keeper.HomeY, 0).Magnitude
+	return math.abs(point.X) <= Goal.Width / 2 - margin
+		and point.Y >= ShotConfig.Ball.Radius + 0.5
+		and point.Y <= Goal.Height - margin
+		and fromKeeper >= Keeper.Reach + margin
+end
+
+function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random, options: ShotOptions?): ShotResult
 	local accuracy = ShotConfig.Accuracy
+	local guided = options and options.guided
+	if guided then
+		local training = ShotConfig.Training
+		local aimX, aimY = input.aimX, input.aimY
+		if not ShotResolver.isSafeGuidedAim(aimX, aimY) then
+			aimX, aimY = guided.aimX, guided.aimY
+		end
+		input = { aimX = aimX, aimY = aimY, power = math.clamp(input.power, training.GuidedPowerMin, training.GuidedPowerMax) }
+	end
 
 	-- 1. Inaccuracy: better shooters scatter less; overpowered shots scatter more and rise.
 	local skill = math.clamp(stats.shooting, 0, 100) / 100
@@ -53,19 +79,31 @@ function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random): 
 	local cap = accuracy.MaxSigmas
 	local offsetX = math.clamp(gaussian(rng), -cap, cap) * sigma
 	local offsetY = math.clamp(gaussian(rng), -cap, cap) * sigma + overpower * accuracy.OverpowerLift
+	if guided then
+		offsetX, offsetY = 0, 0
+	end
 
 	local intended = ShotPhysics.aimToGoalPoint(input.aimX, input.aimY)
 	local target = Vector3.new(intended.X + offsetX, math.max(ShotConfig.Ball.Radius, intended.Y + offsetY), 0)
 
 	-- 2. Spin and the launch velocity that flies (with drag and curl) to the target.
 	local jitter = ShotConfig.Physics.SpinJitter
-	local spin = ShotPhysics.spinFor(input.aimX, input.power, (rng:NextNumber() * 2 - 1) * jitter, (rng:NextNumber() * 2 - 1) * jitter)
+	local jitterX, jitterY = (rng:NextNumber() * 2 - 1) * jitter, (rng:NextNumber() * 2 - 1) * jitter
+	if guided then
+		jitterX, jitterY = 0, 0
+	end
+	local spin = ShotPhysics.spinFor(input.aimX, input.power, jitterX, jitterY)
 	local start = ShotPhysics.ballSpot()
 	local velocity = ShotPhysics.solveLaunch(start, target, input.power, spin)
 
 	-- 3. Goalkeeper: reacts after a short delay, then moves at a skill-based speed. He only
 	-- dives for shots heading for the frame; when the ball reaches him he catches or parries.
 	local reaction = Keeper.ReactionTime + (rng:NextNumber() * 2 - 1) * Keeper.ReactionJitter
+	if guided then
+		reaction += ShotConfig.Training.GuidedKeeperDelay
+	elseif options and options.keeperDelay then
+		reaction += options.keeperDelay
+	end
 	local diveSpeed = lerp(Keeper.DiveSpeedAtZeroSkill, Keeper.DiveSpeedAtMaxSkill, math.clamp(stats.keeperSkill, 0, 100) / 100)
 	local zone = ShotPhysics.classify(target)
 	local keeperDives = Keeper.Enabled
@@ -133,6 +171,7 @@ function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random): 
 	end
 
 	return {
+		input = input,
 		outcome = outcome,
 		detail = detail,
 		start = start,

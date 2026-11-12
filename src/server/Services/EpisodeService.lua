@@ -1,5 +1,10 @@
 -- Owns interactive episodes: hands them out, validates client input and sends back results.
 -- The client only ever sends {episodeId, aimX, aimY, power}; it never reports an outcome.
+--
+-- Shot training flow, decided here so the client can't skip it:
+--   TUTORIAL  one guided shot (finger hint on the client) that always scores
+--   TASK      score Training.TaskGoals of Training.TaskShots; ends early once that is impossible
+--   DONE      task completed; the next request starts the task again
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -7,17 +12,19 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
 local ShotResolver = require(script.Parent.ShotResolver)
 
-type Episode = { id: number, kind: string, seed: number, startedAt: number }
+local Training = ShotConfig.Training
+
+type Episode = { id: number, kind: string, mode: string, seed: number, startedAt: number }
 type PlayerState = {
 	nextEpisodeId: number,
 	active: Episode?,
 	lastRemoteAt: number,
-	shots: number, -- shots taken in the current series
+	phase: string, -- "TUTORIAL" | "TASK" | "DONE"
+	shots: number, -- task shots taken in the current attempt
 	goals: number,
-	history: { string }, -- outcome of each shot in the current series
+	history: { string }, -- outcome of each task shot
+	restartTask: boolean, -- the last task attempt failed; reset it on the next episode
 }
-
-local SERIES_LENGTH = ShotConfig.Drill.ShotsPerSeries
 
 local EpisodeService = {}
 
@@ -25,10 +32,24 @@ local states: { [Player]: PlayerState } = {}
 local seedSource = Random.new()
 local remotes
 
+local function resetTask(state: PlayerState)
+	state.shots, state.goals, state.history = 0, 0, {}
+	state.restartTask = false
+end
+
 local function getState(player: Player): PlayerState
 	local state = states[player]
 	if not state then
-		state = { nextEpisodeId = 1, active = nil, lastRemoteAt = -math.huge, shots = 0, goals = 0, history = {} }
+		state = {
+			nextEpisodeId = 1,
+			active = nil,
+			lastRemoteAt = -math.huge,
+			phase = "TUTORIAL",
+			shots = 0,
+			goals = 0,
+			history = {},
+			restartTask = false,
+		}
 		states[player] = state
 	end
 	return state
@@ -52,31 +73,51 @@ local function isNumberInRange(value: any, min: number, max: number): boolean
 	return value >= min - tolerance and value <= max + tolerance
 end
 
-local function sendEpisode(player: Player, state: PlayerState, episode: Episode)
-	remotes.EpisodeStarted:FireClient(player, {
-		episodeId = episode.id,
-		kind = episode.kind,
-		shotNumber = state.shots + 1,
-		seriesLength = SERIES_LENGTH,
+local function progress(state: PlayerState)
+	return {
 		goals = state.goals,
+		shots = state.shots,
+		taskShots = Training.TaskShots,
+		taskGoals = Training.TaskGoals,
 		history = table.clone(state.history),
-	})
+	}
+end
+
+local function sendEpisode(player: Player, state: PlayerState, episode: Episode)
+	local payload = progress(state)
+	payload.episodeId = episode.id
+	payload.kind = episode.kind
+	payload.mode = episode.mode
+	if episode.mode == "TUTORIAL" then
+		payload.hint = {
+			aimX = Training.TutorialAim.X,
+			aimY = Training.TutorialAim.Y,
+			tapRadius = Training.TutorialTapRadius,
+			powerMin = Training.GuidedPowerMin,
+			powerMax = Training.GuidedPowerMax,
+		}
+	end
+	remotes.EpisodeStarted:FireClient(player, payload)
 end
 
 local function startEpisode(player: Player, state: PlayerState)
-	if state.shots >= SERIES_LENGTH then
-		state.shots, state.goals, state.history = 0, 0, {}
+	if state.phase == "DONE" then
+		state.phase = "TASK" -- "play again" from the completion menu
+		resetTask(state)
+	elseif state.restartTask then
+		resetTask(state)
 	end
 	local episode = {
 		id = state.nextEpisodeId,
 		kind = "SHOT",
-		-- Logged so any result can be reproduced from (seed, input).
+		mode = if state.phase == "TUTORIAL" then "TUTORIAL" else "TASK",
+		-- Logged so any result can be reproduced from (seed, input, mode).
 		seed = seedSource:NextInteger(1, 2 ^ 31 - 1),
 		startedAt = os.clock(),
 	}
 	state.nextEpisodeId += 1
 	state.active = episode
-	print(string.format("[EpisodeService] %s: episode #%d started (SHOT, seed %d)", player.Name, episode.id, episode.seed))
+	print(string.format("[EpisodeService] %s: episode #%d started (SHOT %s, seed %d)", player.Name, episode.id, episode.mode, episode.seed))
 	sendEpisode(player, state, episode)
 end
 
@@ -102,6 +143,35 @@ local function onRequestEpisode(player: Player)
 		return
 	end
 	startEpisode(player, state)
+end
+
+-- Updates the training progress after a shot and returns what happens next:
+-- TUTORIAL_DONE | TUTORIAL_RETRY | CONTINUE | FAILED | COMPLETED
+local function advance(state: PlayerState, mode: string, outcome: string): string
+	if mode == "TUTORIAL" then
+		if outcome ~= "GOAL" then
+			return "TUTORIAL_RETRY" -- should not happen: guided shots always score
+		end
+		state.phase = "TASK"
+		resetTask(state)
+		return "TUTORIAL_DONE"
+	end
+
+	state.shots += 1
+	if outcome == "GOAL" then
+		state.goals += 1
+	end
+	table.insert(state.history, outcome)
+	if state.goals >= Training.TaskGoals then
+		state.phase = "DONE"
+		return "COMPLETED"
+	end
+	local shotsLeft = Training.TaskShots - state.shots
+	if state.goals + shotsLeft < Training.TaskGoals then
+		state.restartTask = true
+		return "FAILED"
+	end
+	return "CONTINUE"
 end
 
 local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, aimY: any, power: any)
@@ -139,49 +209,44 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, a
 		aimY = math.clamp(aimY, 0, 1),
 		power = math.clamp(power, 0, 1),
 	}
-	local stats = { shooting = ShotConfig.DefaultShooting, keeperSkill = ShotConfig.Goalkeeper.Skill }
-	local result = ShotResolver.resolve(input, stats, Random.new(active.seed))
-
-	state.shots += 1
-	if result.outcome == "GOAL" then
-		state.goals += 1
+	local stats = { shooting = ShotConfig.DefaultShooting, keeperSkill = Training.TaskKeeperSkill }
+	local options
+	if active.mode == "TUTORIAL" then
+		options = { guided = { aimX = Training.TutorialAim.X, aimY = Training.TutorialAim.Y } }
+	else
+		options = { keeperDelay = Training.TaskKeeperDelay }
 	end
-	table.insert(state.history, result.outcome)
-	local seriesOver = state.shots >= SERIES_LENGTH
+	local result = ShotResolver.resolve(input, stats, Random.new(active.seed), options)
+	local status = advance(state, active.mode, result.outcome)
 
+	local used = result.input
 	print(string.format(
-		"[EpisodeService] %s: episode #%d aim=(%.2f, %.2f) power=%.2f -> %s/%s, %d km/h (%d goals from %d/%d shots)",
-		player.Name, active.id, input.aimX, input.aimY, input.power, result.outcome, result.detail, result.speedKmh,
-		state.goals, state.shots, SERIES_LENGTH
+		"[EpisodeService] %s: episode #%d %s aim=(%.2f, %.2f) power=%.2f -> %s/%s, %d km/h, %s (%d goals from %d/%d task shots)",
+		player.Name, active.id, active.mode, used.aimX, used.aimY, used.power, result.outcome, result.detail, result.speedKmh,
+		status, state.goals, state.shots, Training.TaskShots
 	))
-	if seriesOver then
-		print(string.format("[EpisodeService] %s: series finished, %d/%d goals", player.Name, state.goals, SERIES_LENGTH))
-	end
 
 	local sim = result.sim
-	remotes.EpisodeResult:FireClient(player, {
-		episodeId = active.id,
-		outcome = result.outcome,
-		detail = result.detail,
-		speedKmh = result.speedKmh,
-		-- The client replays this exact path, so what it shows always matches the outcome.
-		path = sim.path,
-		sampleStep = ShotConfig.Physics.SampleStep,
-		events = sim.events,
-		spin = result.spin,
-		held = sim.held,
-		decisiveTime = result.decisiveTime,
-		keeperTime = sim.keeperTime,
-		keeperTarget = result.keeperTarget,
-		keeperReaction = result.keeperReaction,
-		keeperDives = result.keeperDives,
-		keeperKind = sim.keeperKind,
-		shots = state.shots,
-		goals = state.goals,
-		seriesLength = SERIES_LENGTH,
-		seriesOver = seriesOver,
-		history = table.clone(state.history),
-	})
+	local payload = progress(state)
+	payload.episodeId = active.id
+	payload.mode = active.mode
+	payload.status = status
+	payload.outcome = result.outcome
+	payload.detail = result.detail
+	payload.speedKmh = result.speedKmh
+	-- The client replays this exact path, so what it shows always matches the outcome.
+	payload.path = sim.path
+	payload.sampleStep = ShotConfig.Physics.SampleStep
+	payload.events = sim.events
+	payload.spin = result.spin
+	payload.held = sim.held
+	payload.decisiveTime = result.decisiveTime
+	payload.keeperTime = sim.keeperTime
+	payload.keeperTarget = result.keeperTarget
+	payload.keeperReaction = result.keeperReaction
+	payload.keeperDives = result.keeperDives
+	payload.keeperKind = sim.keeperKind
+	remotes.EpisodeResult:FireClient(player, payload)
 end
 
 function EpisodeService.init(remoteEvents)

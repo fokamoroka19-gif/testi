@@ -136,10 +136,10 @@ end
 type LedStyle = { from: Color3, to: Color3, textColor: Color3, text: string }
 
 local IMAGE_TAG = "NfsImage" -- see ShotClient/ImageLoader
-local BOARD_IMAGES = { "Logo", "Nfs", "Lime", "Ten" }
+local BOARD_IMAGES = { "Wide", "NfsShield", "StarBall" }
 
 -- Self-lit LED panel drawn on the face pointing at the pitch (+Z).
-local function ledFace(part: BasePart, style: LedStyle, pixelsPerStud: number, textHeight: number, image: string?)
+local function ledFace(part: BasePart, style: LedStyle, pixelsPerStud: number, textHeight: number, image: string?, tiles: number?)
 	local gui = create("SurfaceGui", {
 		Face = Enum.NormalId.Back,
 		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
@@ -182,11 +182,13 @@ local function ledFace(part: BasePart, style: LedStyle, pixelsPerStud: number, t
 	})
 	if image then
 		-- Banner artwork from Images/Banners.lua; the client fills it in and shows it (ImageLoader).
+		-- tiles > 1 repeats the image across the panel (the long balcony ribbon).
 		local art = create("ImageLabel", {
 			Name = "Art",
 			Size = UDim2.fromScale(1, 1),
 			BackgroundTransparency = 1,
-			ScaleType = Enum.ScaleType.Stretch,
+			ScaleType = if tiles then Enum.ScaleType.Tile else Enum.ScaleType.Stretch,
+			TileSize = UDim2.fromScale(1 / (tiles or 1), 1),
 			Visible = false,
 			ZIndex = 2,
 			Parent = panel,
@@ -547,7 +549,7 @@ local function buildStand(scene: Instance, rng: Random)
 			Color = NAVY,
 			Parent = stand,
 		})
-		ledFace(ribbon, RIBBON_STYLE, 20, 0.7, "Ribbon")
+		ledFace(ribbon, RIBBON_STYLE, 20, 0.7, "Ribbon", 4)
 	end
 	neonStrip(stand, "RibbonGlow", ribbonBottom + ribbonHeight + 0.14, lowerBack - 0.3, VIOLET_BRIGHT)
 

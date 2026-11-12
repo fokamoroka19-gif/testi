@@ -5,8 +5,8 @@ ModuleScripts (src/shared/Images/*.lua) and turned into EditableImages on the cl
 (see src/client/ShotClient/ImageLoader.lua).
 
 Inputs : tools/assets/source/logo.png          the game logo (used exactly as supplied)
-         tools/assets/source/keeper_sheet.png  goalkeeper character sheet (textures, star emblems)
-         tools/assets/fonts/Montserrat-BlackItalic.ttf
+         tools/assets/source/banner_logos.jpg  five logo variants for the stadium boards
+         tools/assets/source/keeper_sheet.png  goalkeeper character sheet (kit textures)
 Outputs: src/shared/Images/{Logo,Banners,Keeper}.lua and preview PNGs in assets/generated/
 
 Run:  python3 tools/assets/build_images.py   (needs Pillow)
@@ -18,26 +18,15 @@ c >= 128 -> copy (c - 128 + 3) bytes from u16 offset back.
 
 import base64
 import os
-import random
 import struct
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
 SOURCE = os.path.join(HERE, "source")
-FONT = os.path.join(HERE, "fonts", "Montserrat-BlackItalic.ttf")
 OUT_LUA = os.path.join(ROOT, "src", "shared", "Images")
 OUT_PNG = os.path.join(ROOT, "assets", "generated")
-
-CREAM = (247, 236, 214)
-GOLD = (255, 191, 31)
-ORANGE = (255, 140, 20)
-RED = (255, 45, 85)
-LIME = (190, 240, 30)
-VIOLET = (123, 77, 255)
-DARK = (20, 9, 38)
-INK = (14, 6, 28)
 
 # ---------------------------------------------------------------- packing
 
@@ -115,112 +104,6 @@ def write_module(name: str, images: dict, comment: str):
     print(f"{name}.lua: {len(images)} images, {total // 1024} KB")
 
 
-# ---------------------------------------------------------------- helpers
-
-sheet = Image.open(os.path.join(SOURCE, "keeper_sheet.png")).convert("RGB")
-
-
-def font(size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(FONT, size)
-
-
-def star_mask(box, kind: str, scale: int = 6) -> Image.Image:
-    """Clean alpha mask of a star emblem cut from the character sheet."""
-    crop = sheet.crop(box)
-    crop = crop.resize((crop.width * scale, crop.height * scale), Image.LANCZOS)
-    mask = Image.new("L", crop.size, 0)
-    src, dst = crop.load(), mask.load()
-    for y in range(crop.height):
-        for x in range(crop.width):
-            r, g, b = src[x, y]
-            if kind == "white":
-                on = min(r, g, b) > 150
-            else:
-                on = g > 150 and r > 110 and b < 120
-            dst[x, y] = 255 if on else 0
-    mask = mask.filter(ImageFilter.GaussianBlur(scale * 0.6)).point(lambda v: 255 if v > 110 else 0)
-    mask = mask.filter(ImageFilter.GaussianBlur(1.2))
-    return mask.crop(mask.getbbox())
-
-
-WHITE_STAR = star_mask((1168, 776, 1264, 854), "white")
-LIME_STAR = star_mask((1290, 776, 1384, 854), "lime")
-
-
-def paste_star(canvas: Image.Image, mask: Image.Image, color, height: int, center, outline=INK):
-    m = mask.resize((int(mask.width * height / mask.height), height), Image.LANCZOS)
-    x, y = int(center[0] - m.width / 2), int(center[1] - m.height / 2)
-    if outline:
-        grown = m.filter(ImageFilter.MaxFilter(9))
-        canvas.paste(Image.new("RGBA", m.size, outline + (255,)), (x + 5, y + 7), grown)
-        canvas.paste(Image.new("RGBA", m.size, outline + (255,)), (x, y), grown)
-    canvas.paste(Image.new("RGBA", m.size, color + (255,)), (x, y), m)
-
-
-def text(draw: ImageDraw.ImageDraw, xy, s: str, size: int, fill, anchor="lm", stroke=10, shadow=8):
-    f = font(size)
-    if shadow:
-        draw.text((xy[0] + shadow * 0.6, xy[1] + shadow), s, font=f, fill=INK, anchor=anchor, stroke_width=stroke, stroke_fill=INK)
-    draw.text(xy, s, font=f, fill=fill, anchor=anchor, stroke_width=stroke, stroke_fill=INK)
-
-
-def background(w: int, h: int, seed: int, slash=(70, 44, 120)) -> Image.Image:
-    """Dark purple panel with the kit's diagonal camo slashes and a glowing violet frame."""
-    img = Image.new("RGBA", (w, h))
-    px = ImageDraw.Draw(img)
-    for y in range(h):
-        t = y / max(1, h - 1)
-        c = tuple(int(a + (b - a) * t) for a, b in zip((44, 18, 86), (16, 7, 32)))
-        px.line([(0, y), (w, y)], fill=c + (255,))
-    rng = random.Random(seed)
-    camo = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    cd = ImageDraw.Draw(camo)
-    for _ in range(int(w / 70)):
-        x = rng.uniform(-h, w)
-        thick = rng.uniform(h * 0.12, h * 0.35)
-        length = rng.uniform(h * 0.8, h * 2.0)
-        y = rng.uniform(-h * 0.2, h * 1.2)
-        dx, dy = length * 0.82, -length * 0.57
-        poly = [(x, y), (x + dx, y + dy), (x + dx + thick * 0.5, y + dy + thick * 0.4), (x + thick * 0.5, y + thick)]
-        cd.polygon(poly, fill=slash + (rng.randint(70, 130),))
-    img.alpha_composite(camo)
-    glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow)
-    gd.rectangle([6, 6, w - 7, h - 7], outline=VIOLET + (255,), width=10)
-    img.alpha_composite(glow.filter(ImageFilter.GaussianBlur(10)))
-    fd = ImageDraw.Draw(img)
-    fd.rectangle([0, 0, w - 1, h - 1], outline=INK + (255,), width=8)
-    fd.rectangle([8, 8, w - 9, h - 9], outline=VIOLET + (255,), width=5)
-    return img
-
-
-def sparkle(draw: ImageDraw.ImageDraw, cx: float, cy: float, r: float, color=GOLD):
-    pts = []
-    for i in range(10):
-        a = -1.5708 + i * 0.6283
-        rr = r if i % 2 == 0 else r * 0.45
-        pts.append((cx + rr * __import__("math").cos(a), cy + rr * __import__("math").sin(a)))
-    draw.polygon(pts, fill=color + (255,), outline=INK + (255,), width=max(2, int(r / 6)))
-
-
-def lime_slashes(img: Image.Image, x0: int, count: int, seed: int):
-    rng = random.Random(seed)
-    w, h = img.size
-    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    x = x0
-    for _ in range(count):
-        thick = rng.uniform(10, 26)
-        top = rng.uniform(-10, h * 0.3)
-        d.polygon([(x, h + 10), (x + h * 0.75, top), (x + h * 0.75 + thick, top), (x + thick, h + 10)], fill=LIME + (230,))
-        x += rng.uniform(28, 46)
-    img.alpha_composite(layer)
-
-
-def finish(img: Image.Image, size) -> Image.Image:
-    return img.resize(size, Image.LANCZOS)
-
-
 # ---------------------------------------------------------------- logo
 
 logo_src = Image.open(os.path.join(SOURCE, "logo.png")).convert("RGBA")
@@ -228,78 +111,85 @@ logo_src = logo_src.crop(logo_src.getchannel("A").getbbox())
 scale = min(1024 / logo_src.width, 1024 / logo_src.height)
 LOGO = logo_src.resize((round(logo_src.width * scale), round(logo_src.height * scale)), Image.LANCZOS)
 
-# ---------------------------------------------------------------- banners (boards are 5:1)
+# ---------------------------------------------------------------- stadium boards
+# The five supplied logo variants are cut from banner_logos.jpg as they are (no redrawing) and
+# laid out on dark purple LED boards. Each cut keeps its own glow; its edges are feathered so
+# the source background melts into the board.
 
-BW, BH = 2000, 400  # drawn at 2x, stored at 1000x200
+banner_src = Image.open(os.path.join(SOURCE, "banner_logos.jpg")).convert("RGB")
+
+BANNER_LOGO_BOXES = {
+    "Nfs": (40, 20, 760, 415),  # NFS + crown + lime star
+    "Ball": (815, 15, 1460, 385),  # NEW FOOTBALL STAR with the ball top right
+    "Star": (45, 440, 765, 735),  # gold star + NEW FOOTBALL STAR
+    "Shield": (895, 385, 1395, 775),  # crest
+    "Wide": (235, 765, 1175, 995),  # ball + NEW FOOTBALL STAR, wide
+}
+
+BOARD_TOP = (36, 7, 76)
+BOARD_BOTTOM = (13, 2, 32)
+VIOLET = (123, 77, 255)
 
 
-def banner_logo() -> Image.Image:
-    img = background(BW, BH, 1)
-    lime_slashes(img, 1560, 6, 11)
-    logo = LOGO.resize((int(LOGO.width * 360 / LOGO.height), 360), Image.LANCZOS)
-    img.alpha_composite(logo, (90, 22))
+def cut(name: str) -> Image.Image:
+    crop = banner_src.crop(BANNER_LOGO_BOXES[name]).convert("RGBA")
+    w, h = crop.size
+    feather = int(min(w, h) * 0.09)
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([feather, feather, w - 1 - feather, h - 1 - feather], feather, fill=255)
+    crop.putalpha(mask.filter(ImageFilter.GaussianBlur(feather * 0.6)))
+    return crop
+
+
+def board_background(w: int, h: int) -> Image.Image:
+    img = Image.new("RGBA", (w, h))
     d = ImageDraw.Draw(img)
-    text(d, (1000, 160), "SHOOTING", 120, CREAM)
-    text(d, (1060, 285), "DRILL", 120, GOLD)
-    sparkle(d, 1480, 280, 50)
-    return finish(img, (1000, 200))
+    for y in range(h):
+        t = y / max(1, h - 1)
+        d.line([(0, y), (w, y)], fill=tuple(int(a + (b - a) * t) for a, b in zip(BOARD_TOP, BOARD_BOTTOM)) + (255,))
+    # Thin violet LED edge top and bottom.
+    glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    gd.line([(0, 3), (w, 3)], fill=VIOLET + (200,), width=4)
+    gd.line([(0, h - 4), (w, h - 4)], fill=VIOLET + (200,), width=4)
+    img.alpha_composite(glow.filter(ImageFilter.GaussianBlur(3)))
+    return img
 
 
-def banner_nfs() -> Image.Image:
-    img = background(BW, BH, 2)
-    paste_star(img, WHITE_STAR, CREAM, 300, (300, 200))
-    d = ImageDraw.Draw(img)
-    text(d, (560, 190), "NFS", 290, CREAM, stroke=14, shadow=12)
-    text(d, (1260, 140), "NEW FOOTBALL", 84, CREAM)
-    text(d, (1290, 255), "STAR", 110, RED)
-    sparkle(d, 1690, 250, 52)
-    return finish(img, (1000, 200))
+def layout(size, names, pad=0.04, gap=0.05) -> Image.Image:
+    """Logos side by side at the largest common scale that fits, centred on a board."""
+    w, h = size
+    cuts = [cut(n) for n in names]
+    avail_w = w * (1 - 2 * pad - gap * (len(cuts) - 1))
+    natural = sum(c.width / c.height for c in cuts)
+    height = min(h, avail_w / natural)
+    img = board_background(w, h)
+    widths = [c.width / c.height * height for c in cuts]
+    total = sum(widths) + w * gap * (len(cuts) - 1)
+    x = (w - total) / 2
+    for c, cw in zip(cuts, widths):
+        scaled = c.resize((round(cw), round(height)), Image.LANCZOS)
+        img.alpha_composite(scaled, (round(x), round((h - height) / 2)))
+        x += cw + w * gap
+    return img
 
 
-def banner_lime() -> Image.Image:
-    img = background(BW, BH, 3)
-    lime_slashes(img, 40, 9, 31)
-    paste_star(img, LIME_STAR, LIME, 320, (560, 200))
-    d = ImageDraw.Draw(img)
-    text(d, (860, 150), "NEW FOOTBALL", 108, CREAM)
-    text(d, (900, 285), "STAR", 140, RED)
-    paste_star(img, WHITE_STAR, GOLD, 150, (1420, 285))
-    return finish(img, (1000, 200))
+BOARD_SIZE = (1024, 197)  # 20 x 4 stud boards (the SurfaceGui panel is ~5.2:1; 1024 is the size limit)
 
 
-def banner_ten() -> Image.Image:
-    img = background(BW, BH, 4)
-    d = ImageDraw.Draw(img)
-    text(d, (330, 205), "10", 330, CREAM, anchor="mm", stroke=16, shadow=14)
-    paste_star(img, WHITE_STAR, CREAM, 120, (560, 90))
-    # Gold "PLAY" plate in the style of the UI kit's primary button.
-    d.rounded_rectangle([780, 108, 1540, 310], 34, fill=(176, 92, 8, 255), outline=INK + (255,), width=10)
-    d.rounded_rectangle([780, 92, 1540, 286], 34, fill=GOLD + (255,), outline=INK + (255,), width=10)
-    d.rounded_rectangle([810, 108, 1510, 160], 22, fill=(255, 222, 120, 255))
-    text(d, (1110, 192), "PLAY", 130, INK, anchor="mm", stroke=0, shadow=0)
-    d.polygon([(1330, 140), (1330, 244), (1420, 192)], fill=INK + (255,))
-    paste_star(img, LIME_STAR, LIME, 230, (1760, 200))
-    return finish(img, (1000, 200))
-
-
-def ribbon() -> Image.Image:
-    w, h = 2048, 88
-    img = background(w, h, 5)
-    d = ImageDraw.Draw(img)
-    x = 40
-    while x < w - 200:
-        paste_star(img, WHITE_STAR, CREAM, 62, (x + 40, h / 2), outline=INK)
-        text(d, (x + 90, h / 2 + 2), "NEW FOOTBALL", 46, CREAM, stroke=5, shadow=3)
-        x += 90 + d.textlength("NEW FOOTBALL ", font=font(46))
-        text(d, (x, h / 2 + 2), "STAR", 46, RED, stroke=5, shadow=3)
-        x += d.textlength("STAR  ", font=font(46))
-        paste_star(img, LIME_STAR, LIME, 62, (x + 30, h / 2), outline=INK)
-        text(d, (x + 80, h / 2 + 2), "NFS", 46, GOLD, stroke=5, shadow=3)
-        x += 80 + d.textlength("NFS    ", font=font(46))
-    return finish(img, (1024, 44))
+def boards() -> dict:
+    return {
+        "Wide": layout(BOARD_SIZE, ["Wide"]),
+        "NfsShield": layout(BOARD_SIZE, ["Nfs", "Shield"]),
+        "StarBall": layout(BOARD_SIZE, ["Star", "Ball"]),
+        # One tile of the balcony ribbon; SceneBuilder repeats it 4 times per 42-stud panel.
+        "Ribbon": layout((560, 80), ["Wide", "Nfs"], pad=0.03, gap=0.04),
+    }
 
 
 # ---------------------------------------------------------------- keeper textures
+
+keeper_sheet = Image.open(os.path.join(SOURCE, "keeper_sheet.png")).convert("RGB")
 # Boxes are in character-sheet pixels (FRONT / LEFT / BACK views); a small inset skips the rim light.
 
 KEEPER_BOXES = {
@@ -337,7 +227,7 @@ MIRRORED = ["HeadSide", "UpperTorsoSide", "LowerTorsoSide", "UpperLegSide", "Low
 def keeper_textures() -> dict:
     out = {}
     for name, box in KEEPER_BOXES.items():
-        out[name] = sheet.crop(box).convert("RGBA")
+        out[name] = keeper_sheet.crop(box).convert("RGBA")
     for name in MIRRORED:
         out[name + "R"] = out[name].transpose(Image.FLIP_LEFT_RIGHT)
     return out
@@ -363,12 +253,11 @@ def contact_sheet(images: dict, path: str):
 if __name__ == "__main__":
     os.makedirs(OUT_LUA, exist_ok=True)
     os.makedirs(OUT_PNG, exist_ok=True)
+    for old in os.listdir(OUT_PNG):
+        if old.endswith(".png"):
+            os.remove(os.path.join(OUT_PNG, old))
     write_module("Logo", {"Logo": LOGO}, "Game logo, from tools/assets/source/logo.png.")
-    write_module(
-        "Banners",
-        {"Logo": banner_logo(), "Nfs": banner_nfs(), "Lime": banner_lime(), "Ten": banner_ten(), "Ribbon": ribbon()},
-        "LED board artwork for the stadium.",
-    )
+    write_module("Banners", boards(), "LED board artwork: the supplied logos from tools/assets/source/banner_logos.jpg.")
     textures = keeper_textures()
     write_module("Keeper", textures, "Goalkeeper kit textures cut from tools/assets/source/keeper_sheet.png.")
     contact_sheet(textures, os.path.join(OUT_PNG, "keeper_contact_sheet.png"))

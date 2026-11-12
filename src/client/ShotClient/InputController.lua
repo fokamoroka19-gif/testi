@@ -19,6 +19,8 @@ function InputController.new()
 		aimY = 0.5,
 		power = 0,
 		onShoot = nil :: ((aimX: number, aimY: number, power: number) -> ())?,
+		-- Guided shot: presses only count near (aimX, aimY) and the aim stays there.
+		guide = nil :: { aimX: number, aimY: number, accepts: (aimX: number, aimY: number) -> boolean, onRejected: (() -> ())? }?,
 		_activeInput = nil :: InputObject?,
 		_holdStartedAt = 0,
 	}, InputController)
@@ -53,18 +55,35 @@ function InputController:update()
 	self.power = 1 - math.abs(1 - 2 * phase) -- 0 -> 1 -> 0
 end
 
+function InputController:setGuide(guide)
+	self.guide = guide
+	if guide then
+		self.aimX, self.aimY = guide.aimX, guide.aimY
+	end
+end
+
 -- Projects a screen point onto the goal plane (Z = 0).
-function InputController:_aimAt(position: Vector3)
+local function screenToAim(position: Vector3): (number?, number?)
 	local camera = workspace.CurrentCamera
 	if not camera then
-		return
+		return nil, nil
 	end
 	local ray = camera:ScreenPointToRay(position.X, position.Y)
 	if ray.Direction.Z > -1e-4 then
-		return
+		return nil, nil
 	end
 	local point = ray.Origin + ray.Direction * (-ray.Origin.Z / ray.Direction.Z)
-	self.aimX, self.aimY = ShotPhysics.goalPointToAim(point)
+	return ShotPhysics.goalPointToAim(point)
+end
+
+function InputController:_aimAt(position: Vector3)
+	if self.guide then
+		return
+	end
+	local aimX, aimY = screenToAim(position)
+	if aimX then
+		self.aimX, self.aimY = aimX, aimY
+	end
 end
 
 function InputController:_onBegan(input: InputObject, gameProcessed: boolean)
@@ -73,6 +92,16 @@ function InputController:_onBegan(input: InputObject, gameProcessed: boolean)
 	end
 	local inputType = input.UserInputType
 	if inputType == Enum.UserInputType.MouseButton1 or inputType == Enum.UserInputType.Touch then
+		local guide = self.guide
+		if guide then
+			local aimX, aimY = screenToAim(input.Position)
+			if not (aimX and guide.accepts(aimX, aimY)) then
+				if guide.onRejected then
+					guide.onRejected()
+				end
+				return
+			end
+		end
 		self.holding = true
 		self._activeInput = input
 		self._holdStartedAt = os.clock()

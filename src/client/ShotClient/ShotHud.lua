@@ -27,10 +27,27 @@ local TEXT = {
 	Holding = "Отпусти, чтобы ударить",
 	Flying = "Удар!",
 	AfterShot = "Выбери точку удара и попробуй ещё",
+	TutorialReady = "Повтори за пальцем: нажми на кружок и держи",
+	TutorialHolding = "Отпусти, когда сила в зелёной зоне",
+	PowerZone = "ЗОНА УДАРА",
 	NextShot = "ЕЩЁ УДАР  ›",
-	NewSeries = "НОВАЯ СЕРИЯ  ›",
-	SeriesOver = "Серия окончена: %d из %d голов",
 	Speed = "%d км/ч",
+	-- Training
+	TutorialTag = "ПОДСКАЗКА",
+	TutorialGoal = "Повтори за пальцем — этот удар точно в цель",
+	TaskTag = "ЗАДАНИЕ  •  УДАР %d ИЗ %d",
+	TaskGoal = 'Забей <font color="#FFBF1F">%d</font> голов из %d',
+	TutorialDone = "Так и бей! Теперь задание: %d голов из %d",
+	ToTask = "К ЗАДАНИЮ  ›",
+	TutorialRetry = "Попробуй ещё раз по подсказке",
+	TaskLeft = "Осталось забить: %d",
+	TaskFailed = "Задание не выполнено: нужно %d голов из %d",
+	Retry = "ЗАНОВО  ›",
+	CompleteTitle = "ТРЕНИРОВКА\nПРОЙДЕНА!",
+	CompleteSubtitle = "Удар освоен: %d из %d голов",
+	CompleteSpeed = "Лучший удар: %d км/ч",
+	CompleteStage = "Этап 1 из 3 пройден",
+	PlayAgain = "ПРОЙТИ ЕЩЁ РАЗ  ›",
 	Outcomes = {
 		GOAL = { "ГОЛ!", "Отличное попадание в створ" },
 		POST_IN = { "ГОЛ!", "От штанги в сетку!" },
@@ -55,6 +72,7 @@ local RED = rgb(255, 45, 85)
 local RED_LIGHT = rgb(255, 150, 170)
 local GOLD = rgb(255, 191, 31)
 local GOLD_LIGHT = rgb(255, 226, 120)
+local LIME = rgb(170, 240, 40)
 local ORANGE = rgb(255, 159, 10)
 local LIP = rgb(178, 84, 0)
 local CREAM = rgb(247, 236, 214)
@@ -295,6 +313,7 @@ end
 
 function ShotHud.new()
 	local self = setmetatable({}, ShotHud)
+	self.text = TEXT -- shared with the entry script for training messages
 	self.scales = {}
 	self.onContinue = nil :: (() -> ())?
 
@@ -311,7 +330,9 @@ function ShotHud.new()
 	self:_buildLogo()
 	self:_buildGoals()
 	self:_buildPowerPanel()
+	self:_buildTaskBanner()
 	self:_buildCard()
+	self:_buildCompleteMenu()
 
 	local function rescale()
 		local viewport = workspace.CurrentCamera.ViewportSize
@@ -359,6 +380,7 @@ function ShotHud:_buildLogo()
 
 	local stage = text({ Name = "Stage", Position = UDim2.fromOffset(12, 172), Size = UDim2.fromOffset(112, 20), Text = TEXT.Stage, TextSize = 15, FontFace = FONT_BOLD, TextTransparency = 0.15, Parent = root })
 	outline(stage, 1.5)
+	self.stageDots = {}
 	for i = 1, 3 do
 		local current = i == 1
 		local dot = frame({
@@ -372,6 +394,7 @@ function ShotHud:_buildLogo()
 		})
 		corner(dot, 2)
 		stroke(dot, if current then INK else VIOLET, 2)
+		self.stageDots[i] = dot
 	end
 end
 
@@ -446,12 +469,39 @@ function ShotHud:_buildPowerPanel()
 		self.segmentOff[i] = if warn then rgb(74, 20, 48) else rgb(44, 28, 78)
 		seg.BackgroundColor3 = self.segmentOff[i]
 	end
+	local zone = frame({
+		Name = "PowerZone",
+		AnchorPoint = Vector2.new(0, 0.5),
+		BackgroundColor3 = LIME,
+		BackgroundTransparency = 0.72,
+		Visible = false,
+		ZIndex = 2,
+		Parent = track,
+	})
+	corner(zone, 4)
+	stroke(zone, LIME, 2.5)
+	local zoneLabel = text({
+		Name = "Label",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 1, 3),
+		Size = UDim2.fromOffset(120, 16),
+		Text = TEXT.PowerZone,
+		TextSize = 13,
+		TextColor3 = LIME,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = zone,
+	})
+	outline(zoneLabel, 1.5)
+	TweenService:Create(zone, TweenInfo.new(0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { BackgroundTransparency = 0.45 }):Play()
+	self.powerZone = zone
+
 	local marker = frame({ Name = "WarnMarker", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(POWER_WARN, 0.5), Size = UDim2.new(0, 4, 1, 12), BackgroundColor3 = CREAM, ZIndex = 2, Parent = track })
 	corner(marker, 1)
 	stroke(marker, INK, 1.5)
 
 	local hint = text({ Name = "Hint", Position = UDim2.fromOffset(84, 84), Size = UDim2.new(1, -100, 0, 18), Text = TEXT.PowerHint, TextSize = 14, FontFace = FONT_MEDIUM, TextTransparency = 0.25, Parent = root })
 	sizeLimit(hint, 14)
+	self.powerHint = hint
 
 	slashes(root, UDim2.new(1, -62, 0, 84), 18, GLOW)
 
@@ -460,8 +510,89 @@ function ShotHud:_buildPowerPanel()
 	self.powerWarn = false
 end
 
+function ShotHud:_buildTaskBanner()
+	local root = panel({ Name = "TaskBanner", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 14), Size = UDim2.fromOffset(440, 66), Visible = false }, 10)
+	root.Parent = self.gui
+	self:_scaled(root)
+	self.taskBanner = root
+	local inner = frame({ Name = "Inner", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = root })
+	self.taskPop = create("UIScale", { Parent = inner })
+	local accent = frame({ Name = "Accent", Position = UDim2.fromOffset(14, 14), Size = UDim2.fromOffset(6, 38), BackgroundColor3 = GOLD, Parent = inner })
+	corner(accent, 2)
+	self.taskAccent = accent
+	self.taskTag = text({ Name = "Tag", Position = UDim2.fromOffset(32, 8), Size = UDim2.new(1, -46, 0, 18), Text = "", TextSize = 14, TextColor3 = LILAC, FontFace = FONT_BOLD, Parent = inner })
+	outline(self.taskTag, 1.5)
+	self.taskText = text({ Name = "Goal", Position = UDim2.fromOffset(32, 26), Size = UDim2.new(1, -46, 0, 30), Text = "", TextSize = 22, Parent = inner })
+	sizeLimit(self.taskText, 22)
+	outline(self.taskText, 2)
+end
+
+function ShotHud:_buildCompleteMenu()
+	local root = frame({ Name = "TrainingComplete", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, ZIndex = 20, Parent = self.gui })
+	self.complete = root
+	self.completeDim = frame({ Name = "Dim", Position = UDim2.fromOffset(-200, -120), Size = UDim2.new(1, 400, 1, 240), BackgroundColor3 = INK, BackgroundTransparency = 0.45, Parent = root })
+
+	local holder = frame({ Name = "Holder", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.48), Size = UDim2.fromOffset(500, 380), BackgroundTransparency = 1, Parent = root })
+	self:_scaled(holder)
+	local body, glows = panel({ Name = "Pop", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1) }, 16, GOLD)
+	body.Parent = holder
+	for _, g in glows do
+		g.Color = GOLD
+	end
+	self.completePop = create("UIScale", { Parent = body })
+	slashes(body, UDim2.fromOffset(16, 12), 24, GLOW)
+	slashes(body, UDim2.new(1, -66, 0, 12), 24, GLOW)
+
+	local badge = frame({ Name = "Badge", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0), Size = UDim2.fromOffset(84, 84), BackgroundTransparency = 1, ZIndex = 3, Parent = body })
+	local diamond = frame({ Name = "Diamond", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(60, 60), Rotation = 45, BackgroundColor3 = NAVY, Parent = badge })
+	corner(diamond, 8)
+	stroke(diamond, GOLD, 3.5)
+	stroke(frame({ Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = diamond }), GOLD, 10, 0.75)
+	emoji(badge, "🏆", 36)
+	for _, side in { -1, 1 } do
+		local sparkle = text({ AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, side * 66, 0.5, 6), Size = UDim2.fromOffset(28, 28), Text = "★", TextSize = 26, TextColor3 = GOLD, TextXAlignment = Enum.TextXAlignment.Center, Parent = badge })
+		outline(sparkle, 2)
+	end
+	self.completeBadge = badge
+
+	local title = bigText({ Name = "Title", Text = TEXT.CompleteTitle, TextSize = 46, TextColor3 = WHITE, TextXAlignment = Enum.TextXAlignment.Center, Position = UDim2.fromOffset(20, 50), Size = UDim2.new(1, -40, 0, 104), Parent = body }, 4, Vector2.new(0, 5), 46)
+	create("UIGradient", { Rotation = 90, Color = ColorSequence.new(CREAM, GOLD), Parent = title })
+
+	self.completeSubtitle = text({ Name = "Subtitle", Position = UDim2.fromOffset(20, 160), Size = UDim2.new(1, -40, 0, 24), Text = "", TextSize = 20, FontFace = FONT_BOLD, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
+	outline(self.completeSubtitle, 1.5)
+
+	local balls = frame({ Name = "Balls", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 192), Size = UDim2.fromOffset(300, 36), BackgroundTransparency = 1, Parent = body })
+	create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Center, Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = balls })
+	self.completeBalls = {}
+	for i = 1, 8 do
+		local ball = text({ Name = "Ball" .. i, LayoutOrder = i, Size = UDim2.fromOffset(34, 34), Text = "⚽", TextSize = 30, FontFace = FONT_MEDIUM, TextXAlignment = Enum.TextXAlignment.Center, Visible = false, Parent = balls })
+		create("UIScale", { Parent = ball })
+		self.completeBalls[i] = ball
+	end
+
+	local chips = frame({ Name = "Chips", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 240), Size = UDim2.fromOffset(460, 30), BackgroundTransparency = 1, Parent = body })
+	create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Center, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = chips })
+	local function chip(order: number, icon: string, value: string, color: Color3): (Frame, TextLabel)
+		local c = frame({ Name = "Chip", LayoutOrder = order, Size = UDim2.fromOffset(0, 30), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = NAVY, Parent = chips })
+		corner(c, 8)
+		stroke(c, color, 2)
+		create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 12), Parent = c })
+		create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder, Parent = c })
+		text({ LayoutOrder = 1, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = icon, TextSize = 16, FontFace = FONT_MEDIUM, Parent = c })
+		local label = text({ LayoutOrder = 2, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = value, TextSize = 16, Parent = c })
+		outline(label, 1.5)
+		return c, label
+	end
+	chip(1, "✅", TEXT.CompleteStage, LIME)
+	self.completeSpeed, self.completeSpeedText = chip(2, "⚡", "", GOLD)
+
+	self.completeButton = self:_buildButton(body, TEXT.PlayAgain)
+	self.completeButton.button.Position = UDim2.new(0.5, 0, 0, 296)
+	self.completeButton.button.Size = UDim2.fromOffset(300, 52)
+end
+
 -- Gold primary button: dark lip below, gradient face clipped by a CanvasGroup with a moving shine.
-function ShotHud:_buildButton(parent: Instance)
+function ShotHud:_buildButton(parent: Instance, labelText: string)
 	local button = create("TextButton", {
 		Name = "Continue",
 		AnchorPoint = Vector2.new(0.5, 0),
@@ -495,10 +626,10 @@ function ShotHud:_buildButton(parent: Instance)
 	local edge = frame({ Name = "Outline", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = body })
 	corner(edge, 9)
 	stroke(edge, INK, 2.5)
-	local label = text({ Name = "Label", Size = UDim2.fromScale(1, 1), Text = TEXT.NextShot, TextSize = 24, TextColor3 = INK, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
+	local label = text({ Name = "Label", Size = UDim2.fromScale(1, 1), Text = labelText, TextSize = 24, TextColor3 = INK, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
 	outline(label, 1.5, GOLD_LIGHT).Transparency = 0.4
 
-	self.shineTween = TweenService:Create(
+	local shineTween = TweenService:Create(
 		shine,
 		TweenInfo.new(0.75, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, -1, false, 1.6),
 		{ Position = UDim2.fromScale(1.3, 0.5) }
@@ -521,10 +652,13 @@ function ShotHud:_buildButton(parent: Instance)
 		self:_continue()
 	end)
 
-	self.button = button
-	self.buttonBody = body
-	self.shine = shine
-	self.buttonLabel = label
+	return { button = button, body = body, shine = shine, label = label, shineTween = shineTween }
+end
+
+local function playShine(parts)
+	parts.body.Position = UDim2.fromOffset(0, 0)
+	parts.shine.Position = UDim2.fromScale(-0.3, 0.5)
+	parts.shineTween:Play()
 end
 
 function ShotHud:_buildCard()
@@ -609,11 +743,14 @@ function ShotHud:_buildCard()
 	outline(self.speedText, 1.5)
 	self.speedChip = chip
 
-	self:_buildButton(body)
+	local parts = self:_buildButton(body, TEXT.NextShot)
+	self.cardButton = parts
+	self.button = parts.button
+	self.buttonLabel = parts.label
 end
 
 function ShotHud:_continue()
-	if self.card.Visible and self.onContinue then
+	if (self.card.Visible or self.complete.Visible) and self.onContinue then
 		self.onContinue()
 	end
 end
@@ -624,7 +761,7 @@ function ShotHud:pressContinue()
 end
 
 function ShotHud:isCardVisible(): boolean
-	return self.card.Visible
+	return self.card.Visible or self.complete.Visible
 end
 
 -- kind: Ready | Holding | Flying | AfterShot. Called every frame while aiming, so it skips repeats.
@@ -707,17 +844,18 @@ function ShotHud:bumpGoals()
 end
 
 -- kind: GOAL | POST_IN | CATCH | PARRY | POST | BAR | WIDE | OVER
--- details: optional { speedKmh = number }
-function ShotHud:showResult(kind: string, seriesText: string?, details: { speedKmh: number? }?)
+-- options: subtitle (replaces the outcome tip), button (label), speedKmh
+function ShotHud:showResult(kind: string, options: { subtitle: string?, button: string?, speedKmh: number? }?)
 	local style = KIND_STYLE[kind] or KIND_STYLE.WIDE
 	local info = TEXT.Outcomes[kind] or { kind, "" }
+	options = options or {}
 
 	setBigText(self.cardTitle, info[1])
 	self.titleGradient.Color = ColorSequence.new(style.top, style.bottom)
-	self.cardSubtitle.Text = seriesText or info[2]
-	self.buttonLabel.Text = if seriesText then TEXT.NewSeries else TEXT.NextShot
+	self.cardSubtitle.Text = options.subtitle or info[2]
+	self.buttonLabel.Text = options.button or TEXT.NextShot
 
-	local speed = details and details.speedKmh
+	local speed = options.speedKmh
 	local hasChip = type(speed) == "number" and speed > 0
 	self.speedChip.Visible = hasChip
 	if hasChip then
@@ -726,7 +864,6 @@ function ShotHud:showResult(kind: string, seriesText: string?, details: { speedK
 	-- Without the chip the card closes up around the button.
 	self.card.Size = UDim2.fromOffset(400, if hasChip then 240 else 206)
 	self.button.Position = UDim2.new(0.5, 0, 0, if hasChip then 172 else 138)
-	self.buttonBody.Position = UDim2.fromOffset(0, 0)
 
 	for _, s in self.cardGlows do
 		s.Color = style.accent
@@ -745,17 +882,75 @@ function ShotHud:showResult(kind: string, seriesText: string?, details: { speedK
 	TweenService:Create(self.titlePop, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out, 0, false, 0.08), { Scale = 1 }):Play()
 	self.badge.Rotation = -120
 	TweenService:Create(self.badge, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Rotation = 0 }):Play()
-	self.shine.Position = UDim2.fromScale(-0.3, 0.5)
-	self.shineTween:Play()
-end
-
-function ShotHud:seriesText(goals: number, seriesLength: number): string
-	return string.format(TEXT.SeriesOver, goals, seriesLength)
+	playShine(self.cardButton)
 end
 
 function ShotHud:hideCard()
 	self.card.Visible = false
-	self.shineTween:Cancel()
+	self.cardButton.shineTween:Cancel()
+	self.complete.Visible = false
+	self.completeButton.shineTween:Cancel()
+end
+
+-- Top banner: the guided shot's hint, or the task with the current shot number.
+function ShotHud:setTask(mode: string, shots: number, taskShots: number, taskGoals: number)
+	if mode == "TUTORIAL" then
+		self.taskTag.Text = TEXT.TutorialTag
+		self.taskText.Text = TEXT.TutorialGoal
+		self.taskAccent.BackgroundColor3 = LIME
+	else
+		self.taskTag.Text = string.format(TEXT.TaskTag, math.min(shots + 1, taskShots), taskShots)
+		self.taskText.Text = string.format(TEXT.TaskGoal, taskGoals, taskShots)
+		self.taskAccent.BackgroundColor3 = GOLD
+	end
+	self.taskBanner.Visible = true
+	self.taskPop.Scale = 0.85
+	TweenService:Create(self.taskPop, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+end
+
+-- Highlights the power range that the guided shot asks for (nil hides it).
+function ShotHud:setPowerZone(min: number?, max: number?)
+	local zone = self.powerZone
+	-- The zone label sits where the general power tip is, so they take turns.
+	self.powerHint.Visible = not (min and max)
+	if not (min and max) then
+		zone.Visible = false
+		return
+	end
+	zone.Position = UDim2.fromScale(min, 0.5)
+	zone.Size = UDim2.new(max - min, 0, 1, 10)
+	zone.Visible = true
+end
+
+-- Completion menu after the task is done. stats: { goals, taskShots, bestSpeed }
+function ShotHud:showComplete(stats: { goals: number, taskShots: number, bestSpeed: number? })
+	self.card.Visible = false
+	self.cardButton.shineTween:Cancel()
+	self.completeSubtitle.Text = string.format(TEXT.CompleteSubtitle, stats.goals, stats.taskShots)
+	local hasSpeed = type(stats.bestSpeed) == "number" and stats.bestSpeed > 0
+	self.completeSpeed.Visible = hasSpeed
+	if hasSpeed then
+		self.completeSpeedText.Text = string.format(TEXT.CompleteSpeed, math.floor(stats.bestSpeed + 0.5))
+	end
+	for i, ball in self.completeBalls do
+		ball.Visible = i <= stats.taskShots
+		ball.TextTransparency = if i <= stats.goals then 0 else 0.7
+	end
+	self.stageDots[1].BackgroundColor3 = LIME
+
+	self.complete.Visible = true
+	self.completeDim.BackgroundTransparency = 1
+	TweenService:Create(self.completeDim, TweenInfo.new(0.3), { BackgroundTransparency = 0.45 }):Play()
+	self.completePop.Scale = 0.5
+	TweenService:Create(self.completePop, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	for i, ball in self.completeBalls do
+		local holderScale = ball:FindFirstChildOfClass("UIScale")
+		holderScale.Scale = 0
+		TweenService:Create(holderScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out, 0, false, 0.25 + i * 0.09), { Scale = 1 }):Play()
+	end
+	self.completeBadge.Rotation = -140
+	TweenService:Create(self.completeBadge, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Rotation = 0 }):Play()
+	playShine(self.completeButton)
 end
 
 return ShotHud

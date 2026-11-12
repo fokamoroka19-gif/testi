@@ -1,7 +1,8 @@
 # New Football Star — Stage 1: the shot
 
 Playable prototype of the SHOT mini-game (GDD §5, roadmap v0.1): training ground, goal, ball,
-goalkeeper, crosshair, power bar, 10-shot series and GOAL / SAVE / POST / MISS results. Works with mouse and touch.
+goalkeeper, crosshair, power bar, a shot training (finger hint, then a 5-shot task) and GOAL / SAVE / POST / MISS results.
+Works with mouse and touch.
 
 **Client draws, server decides.** The client only sends `{episodeId, aimX, aimY, power}`.
 The server checks types, ranges, the current episode, repeats and request rate, then computes
@@ -36,13 +37,15 @@ The server modules can be anywhere under ServerScriptService (next to `Main` or 
 | `src/client/ShotClient/ShotHud.lua` | `.../ShotClient/ShotHud` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/KeeperAnimator.lua` | `.../ShotClient/KeeperAnimator` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/ImageLoader.lua` | `.../ShotClient/ImageLoader` (child of the LocalScript) | ModuleScript |
+| `src/client/ShotClient/TutorialHint.lua` | `.../ShotClient/TutorialHint` (child of the LocalScript) | ModuleScript |
 
 The default Baseplate and SpawnLocation are removed automatically during play (they would cover the pitch and goal).
 
 ## Artwork (logo, stadium banners, goalkeeper kit)
 
 The HUD logo is the supplied `tools/assets/source/logo.png`, unchanged apart from trimming the empty
-border. The LED boards and balcony ribbon show banner artwork in the game's purple/gold style, and the
+border. The LED boards and balcony ribbon show the five supplied logo variants
+(`tools/assets/source/banner_logos.jpg`, cut out as they are and laid on dark purple boards), and the
 goalkeeper is a blocky R15 rig in the proportions of the character sheet (`tools/assets/source/keeper_sheet.png`)
 with the sheet's face, hair, kit, number 10 and gloves painted on. Previews of every image are in `assets/generated/`.
 
@@ -55,13 +58,27 @@ If you upload the logo to Roblox yourself, put its id in `LOGO_IMAGE` at the top
 To change the art, edit `tools/assets/build_images.py` and run `python3 tools/assets/build_images.py`
 (needs Pillow), then rebuild the place file.
 
+## Shot training
+
+1. **Guided shot.** A pulsing ring on the goal shows where to press, and a finger demonstrates it:
+   press, hold while the power bar fills to the green **ЗОНА УДАРА**, release. Presses away from the
+   ring don't count (the finger shakes and points at it again). This shot always scores: the server
+   keeps the aim and power in a safe range, takes away the random error and makes the keeper late.
+2. **Task.** Score 5 goals from 5 shots against the training keeper. The banner at the top shows the
+   shot number, and the dots under the goals counter show each result. After a miss or a save, the task
+   can't be completed any more, so the card offers **ЗАНОВО** and the task starts again from shot 1.
+3. **Completed.** After the 5th goal a **ТРЕНИРОВКА ПРОЙДЕНА!** menu appears (goals, fastest shot,
+   stage 1 done). **ПРОЙТИ ЕЩЁ РАЗ** starts the task again.
+
+The flow is decided on the server (`EpisodeService`), so a client can't skip the task. Numbers
+(hint position, green zone, task length, training keeper) are in `ShotConfig.Training`.
+
 ## Controls
 
 Press on the goal to place the crosshair. Hold to charge power (the bar at the bottom goes up and down),
 then release to shoot. On PC the crosshair follows the mouse before you click. While you hold,
 the dotted line shows the planned path without random error. After each shot a result card appears.
-Press **ЕЩЁ УДАР** (or Space / Enter / gamepad A) for the next shot. A series is 10 shots; the
-dots under the goals counter show each result.
+Press its button (or Space / Enter / gamepad A) to continue.
 
 - Aiming close to a post or the bar beats the keeper but risks POST or MISS.
 - Weak shots are slow and easy to save. Shots near the centre always get saved.
@@ -73,8 +90,8 @@ All on-screen text is in the `TEXT` table at the top of `ShotHud`.
 
 1. **PC:** press Play. The Output window should show:
    `[SceneBuilder] Stadium built (… objects)`, `[KeeperBuilder] Goalkeeper ready (R15 blocks, … studs tall)`, `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
-   `[EpisodeService] <you>: episode #1 started (SHOT, seed …)`, and after each shot
-   `[EpisodeService] <you>: episode #1 aim=(0.72, 0.55) power=0.64 -> GOAL/GOAL, 98 km/h (1 goals from 1/10 shots)`.
+   `[EpisodeService] <you>: episode #1 started (SHOT TUTORIAL, seed …)`, and after each shot a line like
+   `[EpisodeService] <you>: episode #2 TASK aim=(0.72, 0.55) power=0.64 -> GOAL/GOAL, 98 km/h, CONTINUE (1 goals from 1/5 task shots)`.
    There should be no red errors.
 2. **Phone layout:** Test → Device emulator, choose a phone in landscape, and repeat.
    The HUD respects screen notches, and no thumbstick or jump button appears.
@@ -83,8 +100,9 @@ All on-screen text is in the `TEXT` table at the top of `ShotHud`.
    `game.ReplicatedStorage.Remotes.SubmitEpisodeInput:FireServer(999, 5, 5, 5)`.
    The Output should show an orange `rejected input … (unknown or already finished episode)`
    warning and the score should not change. Sending the same episode twice is rejected the same way.
-5. **Reproduce a result:** the seed is printed for every episode. Passing the same seed and input to
-   `ShotResolver.resolve` always gives the same outcome.
+5. **Reproduce a result:** the seed and mode are printed for every episode. Passing the same seed,
+   input and options (guided for TUTORIAL, `keeperDelay` for TASK) to `ShotResolver.resolve` always
+   gives the same outcome.
 
 ## Physics
 
@@ -100,8 +118,5 @@ the post or be parried onto the frame. The client replays the exact path the ser
 
 All numbers are in `ShotConfig`: goal size, distance, ball speed, physics (drag, curl, dip,
 bounciness), shooting accuracy, overpower, goalkeeper skill/reaction/dive speed/catching
-(`Goalkeeper.Enabled = false` gives the "no keeper" variant), and camera.
+(`Goalkeeper.Enabled = false` gives the "no keeper" variant), the shot training (`Training`), and camera.
 `DefaultShooting = 42` stands in for the player's stat until careers exist (Stage 4).
-
-To use the PNG logo instead of the text-built one, upload it to Roblox (Asset Manager → Images)
-and put its id into `LOGO_IMAGE` at the top of `ShotHud`.
