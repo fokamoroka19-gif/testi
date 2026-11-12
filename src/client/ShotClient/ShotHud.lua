@@ -5,6 +5,7 @@ local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 
 local ImageLoader = require(script.Parent:WaitForChild("ImageLoader"))
+local UiKit = require(script.Parent:WaitForChild("UiKit"))
 
 local ShotHud = {}
 ShotHud.__index = ShotHud
@@ -84,24 +85,11 @@ local TEXT = {
 	},
 }
 
+local C = UiKit.Colors
 local rgb = Color3.fromRGB
-local NAVY = rgb(18, 11, 36)
-local PANEL_TOP = rgb(43, 18, 80)
-local PANEL_BOTTOM = rgb(27, 15, 51)
-local VIOLET = rgb(90, 47, 194)
-local GLOW = rgb(123, 77, 255)
-local LILAC = rgb(190, 168, 255)
-local RED = rgb(255, 45, 85)
-local RED_LIGHT = rgb(255, 150, 170)
-local GOLD = rgb(255, 191, 31)
-local GOLD_LIGHT = rgb(255, 226, 120)
-local LIME = rgb(170, 240, 40)
-local ORANGE = rgb(255, 159, 10)
-local LIP = rgb(178, 84, 0)
-local CREAM = rgb(247, 236, 214)
-local INK = rgb(18, 6, 31)
-local SHADOW = rgb(46, 16, 92)
-local WHITE = Color3.new(1, 1, 1)
+local NAVY, PANEL_TOP, PANEL_BOTTOM, VIOLET, GLOW, LILAC = C.NAVY, C.PANEL_TOP, C.PANEL_BOTTOM, C.VIOLET, C.GLOW, C.LILAC
+local RED, RED_LIGHT, GOLD, GOLD_LIGHT, LIME, ORANGE = C.RED, C.RED_LIGHT, C.GOLD, C.GOLD_LIGHT, C.LIME, C.ORANGE
+local CREAM, INK, WHITE = C.CREAM, C.INK, C.WHITE
 
 -- Card look per result kind: title gradient (top -> bottom), glow accent and badge glyph.
 local KIND_STYLE = {
@@ -122,10 +110,7 @@ local KIND_STYLE = {
 }
 local PIP_COLORS = { GOAL = GOLD, SAVE = GLOW, POST = CREAM, MISS = RED, GOOD = GOLD, INTERCEPTED = GLOW }
 
-local MONTSERRAT = "rbxasset://fonts/families/Montserrat.json"
-local FONT_HEAVY = Font.new(MONTSERRAT, Enum.FontWeight.Heavy, Enum.FontStyle.Italic)
-local FONT_BOLD = Font.new(MONTSERRAT, Enum.FontWeight.Bold, Enum.FontStyle.Italic)
-local FONT_MEDIUM = Font.new(MONTSERRAT, Enum.FontWeight.Medium)
+local FONT_HEAVY, FONT_BOLD, FONT_MEDIUM = UiKit.Fonts.HEAVY, UiKit.Fonts.BOLD, UiKit.Fonts.MEDIUM
 
 local DESIGN_SIZE = Vector2.new(1280, 720)
 -- Phone layout: screens whose short side is under PHONE_HEIGHT get PHONE_BOOST, limited so the
@@ -139,142 +124,9 @@ local PHONE_GOALS = 0.68 -- the goals panel sits over the pitch on phones, so it
 local POWER_SEGMENTS = 20
 local POWER_WARN = 0.85
 
-local function create(className: string, props: { [string]: any }): any
-	local inst = Instance.new(className)
-	local parent = props.Parent
-	for key, value in props do
-		if key ~= "Parent" then
-			inst[key] = value
-		end
-	end
-	inst.Parent = parent
-	return inst
-end
-
-local function frame(props: { [string]: any }): Frame
-	props.BorderSizePixel = 0
-	if props.BackgroundTransparency == nil then
-		props.BackgroundTransparency = 0
-	end
-	return create("Frame", props)
-end
-
-local function text(props: { [string]: any }): TextLabel
-	props.BackgroundTransparency = 1
-	props.RichText = true
-	props.FontFace = props.FontFace or FONT_HEAVY
-	props.TextColor3 = props.TextColor3 or CREAM
-	props.TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Left
-	return create("TextLabel", props)
-end
-
-local function corner(parent: Instance, radius: number?)
-	create("UICorner", { CornerRadius = if radius then UDim.new(0, radius) else UDim.new(1, 0), Parent = parent })
-end
-
--- Border stroke for frames and buttons.
-local function stroke(parent: Instance, color: Color3, thickness: number, transparency: number?): UIStroke
-	return create("UIStroke", {
-		Color = color,
-		Thickness = thickness,
-		Transparency = transparency or 0,
-		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-		Parent = parent,
-	})
-end
-
--- Text outline; mitred joins keep the chunky pixel-kit corners.
-local function outline(label: TextLabel, thickness: number, color: Color3?): UIStroke
-	return create("UIStroke", {
-		Color = color or INK,
-		Thickness = thickness,
-		LineJoinMode = Enum.LineJoinMode.Miter,
-		Parent = label,
-	})
-end
-
-local function sizeLimit(label: TextLabel, maxSize: number)
-	label.TextScaled = true
-	create("UITextSizeConstraint", { MaxTextSize = maxSize, MinTextSize = 8, Parent = label })
-end
-
--- Outlined text with a hard drop shadow (a sibling label, so it cannot be a child of the text).
-local shadowOf = setmetatable({}, { __mode = "k" })
-
-local function bigText(props: { [string]: any }, thickness: number, offset: Vector2, maxSize: number?): TextLabel
-	local shadowProps = table.clone(props)
-	shadowProps.Name = (props.Name or "Text") .. "Shadow"
-	shadowProps.TextColor3 = SHADOW
-	shadowProps.Position = (props.Position or UDim2.new()) + UDim2.fromOffset(offset.X, offset.Y)
-	shadowProps.Text = string.gsub(props.Text or "", "<[^>]+>", "")
-	local shadow = text(shadowProps)
-	outline(shadow, thickness)
-	local main = text(table.clone(props))
-	outline(main, thickness)
-	if maxSize then
-		sizeLimit(shadow, maxSize)
-		sizeLimit(main, maxSize)
-	end
-	shadowOf[main] = shadow
-	return main
-end
-
-local function setBigText(label: TextLabel, value: string)
-	label.Text = value
-	local shadow = shadowOf[label]
-	if shadow then
-		shadow.Text = string.gsub(value, "<[^>]+>", "")
-	end
-end
-
--- Dark purple panel: vertical gradient, violet border and a soft glow from stacked strokes.
--- Returns the root and its glow strokes so callers can recolour them.
-local function panel(props: { [string]: any }, radius: number, glowColor: Color3?): (Frame, { UIStroke })
-	props.BackgroundTransparency = 1
-	local root = frame(props)
-	local glows = {}
-	for _, layer in { { 4, 0.7 }, { 9, 0.84 }, { 16, 0.93 } } do
-		local halo = frame({ Name = "Glow", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = root })
-		corner(halo, radius)
-		table.insert(glows, stroke(halo, glowColor or GLOW, layer[1], layer[2]))
-	end
-	local bg = frame({ Name = "Background", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 0.04, ZIndex = 0, Parent = root })
-	corner(bg, radius)
-	create("UIGradient", { Color = ColorSequence.new(PANEL_TOP, PANEL_BOTTOM), Rotation = 90, Parent = bg })
-	stroke(bg, VIOLET, 2)
-	-- Thin top highlight, like the bevel on the reference panels.
-	frame({
-		Name = "Sheen",
-		Position = UDim2.new(0, radius, 0, 3),
-		Size = UDim2.new(1, -radius * 2, 0, 2),
-		BackgroundColor3 = LILAC,
-		BackgroundTransparency = 0.7,
-		ZIndex = 0,
-		Parent = root,
-	})
-	return root, glows
-end
-
-local function iconBox(parent: Instance, position: UDim2, size: number, accent: Color3): Frame
-	local box = frame({ Name = "IconBox", Position = position, Size = UDim2.fromOffset(size, size), BackgroundColor3 = NAVY, Parent = parent })
-	corner(box, 8)
-	stroke(box, accent, 2)
-	frame({ Name = "Bevel", Position = UDim2.fromOffset(4, 3), Size = UDim2.new(1, -8, 0, 2), BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Parent = box })
-	return box
-end
-
-local function emoji(parent: Instance, glyph: string, size: number): TextLabel
-	return text({
-		Name = "Glyph",
-		Size = UDim2.fromScale(1, 1),
-		Text = glyph,
-		TextSize = size,
-		FontFace = FONT_MEDIUM,
-		TextColor3 = WHITE,
-		TextXAlignment = Enum.TextXAlignment.Center,
-		Parent = parent,
-	})
-end
+local create, frame, text, corner, stroke, outline = UiKit.create, UiKit.frame, UiKit.text, UiKit.corner, UiKit.stroke, UiKit.outline
+local sizeLimit, bigText, setBigText, panel = UiKit.sizeLimit, UiKit.bigText, UiKit.setBigText, UiKit.panel
+local iconBox, emoji, slashes = UiKit.iconBox, UiKit.emoji, UiKit.slashes
 
 local function crosshairIcon(parent: Instance)
 	local ring = frame({ AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(28, 28), BackgroundTransparency = 1, Parent = parent })
@@ -294,36 +146,7 @@ local function crosshairIcon(parent: Instance)
 end
 
 -- Decorative "////" slashes from the reference panels.
-local function slashes(parent: Instance, position: UDim2, size: number, color: Color3)
-	text({
-		Name = "Slashes",
-		Position = position,
-		Size = UDim2.fromOffset(size * 2.2, size),
-		TextSize = size,
-		Text = "////",
-		TextColor3 = color,
-		TextTransparency = 0.75,
-		Parent = parent,
-	})
-end
 
--- Gold arc: a pill-shaped stroke whose middle is faded out, leaving two curved ends.
-local function swoosh(parent: Instance, position: UDim2, size: UDim2, thickness: number, rotation: number)
-	local ring = frame({ Name = "Swoosh", AnchorPoint = Vector2.new(0.5, 0.5), Position = position, Size = size, BackgroundTransparency = 1, ZIndex = 0, Parent = parent })
-	corner(ring)
-	local s = stroke(ring, WHITE, thickness)
-	create("UIGradient", {
-		Color = ColorSequence.new(GOLD_LIGHT, ORANGE),
-		Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0.1),
-			NumberSequenceKeypoint.new(0.3, 1),
-			NumberSequenceKeypoint.new(0.58, 1),
-			NumberSequenceKeypoint.new(1, 0),
-		}),
-		Rotation = rotation,
-		Parent = s,
-	})
-end
 
 local function logoImageId(): string?
 	if LOGO_IMAGE == "" then
@@ -643,84 +466,17 @@ function ShotHud:_buildCompleteMenu()
 	self.completeButton.button.Size = UDim2.fromOffset(212, 52)
 end
 
--- Gold primary button (or violet secondary): dark lip below, gradient face clipped by a
--- CanvasGroup with a moving shine. onActivated defaults to the result card's continue.
+-- Gold primary button (or violet secondary). onActivated defaults to the result card's continue.
 function ShotHud:_buildButton(parent: Instance, labelText: string, onActivated: (() -> ())?, secondary: boolean?)
-	local button = create("TextButton", {
-		Name = "Continue",
-		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 172),
-		Size = UDim2.fromOffset(280, 52),
-		BackgroundTransparency = 1,
-		AutoButtonColor = false,
-		Text = "",
-		Parent = parent,
-	})
-	local lip = frame({ Name = "Lip", Position = UDim2.fromOffset(0, 6), Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = if secondary then rgb(40, 16, 96) else LIP, Parent = button })
-	corner(lip, 9)
-	stroke(lip, INK, 2.5)
-
-	local body = frame({ Name = "Body", Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1, Parent = button })
-	local face = create("CanvasGroup", { Name = "Face", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, Parent = body })
-	corner(face, 9)
-	local fill = frame({ Name = "Fill", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = face })
-	create("UIGradient", { Color = if secondary then ColorSequence.new(rgb(150, 110, 255), VIOLET) else ColorSequence.new(rgb(255, 214, 74), ORANGE), Rotation = 90, Parent = fill })
-	frame({ Name = "Sheen", Position = UDim2.fromOffset(0, 0), Size = UDim2.new(1, 0, 0.42, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 0.72, Parent = face })
-	local shine = frame({
-		Name = "Shine",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(-0.3, 0.5),
-		Size = UDim2.new(0, 34, 2, 0),
-		Rotation = 22,
-		BackgroundColor3 = WHITE,
-		BackgroundTransparency = 0.45,
-		Parent = face,
-	})
-	local edge = frame({ Name = "Outline", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = body })
-	corner(edge, 9)
-	stroke(edge, INK, 2.5)
-	local label = text({ Name = "Label", Size = UDim2.fromScale(1, 1), Text = labelText, TextSize = 24, TextColor3 = if secondary then CREAM else INK, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
-	if secondary then
-		outline(label, 2)
-	else
-		outline(label, 1.5, GOLD_LIGHT).Transparency = 0.4
-	end
-
-	local shineTween = TweenService:Create(
-		shine,
-		TweenInfo.new(0.75, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, -1, false, 1.6),
-		{ Position = UDim2.fromScale(1.3, 0.5) }
-	)
-
-	local pressInfo = TweenInfo.new(0.07, Enum.EasingStyle.Quad)
-	local function setPressed(pressed: boolean)
-		TweenService:Create(body, pressInfo, { Position = UDim2.fromOffset(0, if pressed then 5 else 0) }):Play()
-	end
-	button.MouseButton1Down:Connect(function()
-		setPressed(true)
-	end)
-	button.MouseButton1Up:Connect(function()
-		setPressed(false)
-	end)
-	button.MouseLeave:Connect(function()
-		setPressed(false)
-	end)
-	button.Activated:Connect(function()
-		if onActivated then
-			onActivated()
-		else
-			self:_continue()
-		end
-	end)
-
-	return { button = button, body = body, shine = shine, label = label, shineTween = shineTween }
+	local parts = UiKit.button(parent, labelText, onActivated or function()
+		self:_continue()
+	end, if secondary then "violet" else "gold")
+	parts.button.Name = "Continue"
+	parts.button.Position = UDim2.new(0.5, 0, 0, 172)
+	return parts
 end
 
-local function playShine(parts)
-	parts.body.Position = UDim2.fromOffset(0, 0)
-	parts.shine.Position = UDim2.fromScale(-0.3, 0.5)
-	parts.shineTween:Play()
-end
+local playShine = UiKit.playShine
 
 function ShotHud:_buildCard()
 	local card = frame({
