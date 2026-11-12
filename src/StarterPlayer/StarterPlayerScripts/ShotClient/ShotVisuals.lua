@@ -302,6 +302,11 @@ function ShotVisuals:setCharging(on: boolean)
 	end
 end
 
+-- Settings: camera shake on goals and frame hits.
+function ShotVisuals:setShakeEnabled(enabled: boolean)
+	self.shakeEnabled = enabled
+end
+
 -- Per-frame: camera (with shake and kick) and the keeper.
 function ShotVisuals:update(dt: number)
 	self.clock += dt
@@ -313,7 +318,7 @@ function ShotVisuals:update(dt: number)
 		camera.CameraType = Enum.CameraType.Scriptable
 		local fov = ShotConfig.Camera.FieldOfView - self.fovKick
 		local base = CFrame.lookAt(ShotVisuals.cameraPosition(self.spot), ShotConfig.Camera.LookAt)
-		if self.shake > 0 then
+		if self.shake > 0 and self.shakeEnabled ~= false then
 			local t = self.clock * 25
 			local amount = self.shake * 0.3
 			base *= CFrame.new(math.noise(t, 1) * amount, math.noise(t, 2) * amount, 0)

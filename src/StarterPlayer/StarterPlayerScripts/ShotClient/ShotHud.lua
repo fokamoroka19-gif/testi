@@ -20,7 +20,7 @@ local TEXT = {
 	LogoBottom = "STAR",
 	Mode = 'ОБУЧЕНИЕ  •  <font color="#FFBF1F">УДАРЫ</font>',
 	ModePass = 'ОБУЧЕНИЕ  •  <font color="#FFBF1F">ПАС</font>',
-	Stage = "Этап %d из 3",
+	Stage = "Этап %d из 2",
 	StageFree = "Обучение пройдено",
 	Goals = "ГОЛЫ",
 	Power = "СИЛА %d%%",
@@ -53,8 +53,6 @@ local TEXT = {
 	GoalsTaskPass = "ЗАДАНИЕ: %d ТОЧНЫХ ПАСОВ",
 	PassTutorialDone = "Отличный пас! Теперь сделай %d точных пасов",
 	PassLeft = "Осталось пасов: %d",
-	GoalsFree = "ГОЛЫ / УДАРЫ",
-	ModeFree = 'СВОБОДНАЯ ИГРА  •  <font color="#FFBF1F">УДАРЫ</font>',
 	TutorialDone = "Так и бей! Теперь забей %d голов",
 	ToTask = "К ЗАДАНИЮ  ›",
 	TutorialRetry = "Попробуй ещё раз по подсказке",
@@ -63,9 +61,10 @@ local TEXT = {
 	CompleteSubtitle = "%d голов за %d ударов",
 	CompleteSubtitlePass = "%d точных пасов за %d попыток",
 	CompleteSpeed = "Лучший удар: %d км/ч",
-	CompleteStage = "Этап %d из 3 пройден",
+	CompleteStage = "Этап %d из 2 пройден",
 	PlayAgain = "ЕЩЁ РАЗ",
 	Next = "ДАЛЕЕ  ›",
+	Finish = "ГОТОВО  ›", -- after the last stage: back to the career menu
 	Outcomes = {
 		GOAL = { "ГОЛ!", "Отличное попадание в створ" },
 		POST_IN = { "ГОЛ!", "От штанги в сетку!" },
@@ -138,6 +137,7 @@ local PHONE_LOGO = 0.8 -- the logo panel is decoration; on phones it gives its r
 local PHONE_GOALS = 0.68 -- the goals panel sits over the pitch on phones, so it is drawn smaller
 local POWER_SEGMENTS = 20
 local POWER_WARN = 0.85
+local STAGE_COUNT = 2 -- training stages: shot, pass
 
 local function create(className: string, props: { [string]: any }): any
 	local inst = Instance.new(className)
@@ -355,6 +355,7 @@ function ShotHud.new()
 	self.onRetry = nil :: (() -> ())? -- completion menu buttons
 	self.onNext = nil :: (() -> ())?
 	self.scale = 1
+	self.uiBoost = 1 -- "large interface" setting
 
 	local gui = create("ScreenGui", {
 		Name = "ShotHud",
@@ -385,6 +386,10 @@ function ShotHud.new()
 			scale = math.min(scale * PHONE_BOOST, (size.X - 40) / PHONE_MIN_WIDTH, (size.Y - 20) / PHONE_MIN_HEIGHT)
 		end
 		scale = math.clamp(scale, 0.5, 1.3)
+		if self.uiBoost ~= 1 then
+			-- Bigger, but never past the edges the phone limits above protect.
+			scale = math.min(scale * self.uiBoost, (size.X - 40) / PHONE_MIN_WIDTH, (size.Y - 20) / PHONE_MIN_HEIGHT)
+		end
 		self.scale = scale
 		for _, uiScale in self.scales do
 			uiScale.Scale = scale
@@ -393,8 +398,19 @@ function ShotHud.new()
 		self.goalsScale.Scale = if phone then scale * PHONE_GOALS else scale
 	end
 	rescale()
+	self._rescale = rescale
 	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(rescale)
 	return self
+end
+
+-- Hidden while the career menus are open.
+function ShotHud:setVisible(visible: boolean)
+	self.gui.Enabled = visible
+end
+
+function ShotHud:setUiBoost(boost: number)
+	self.uiBoost = boost
+	self._rescale()
 end
 
 -- Viewport scale for a top-level panel. Pop animations use their own nested UIScale.
@@ -435,7 +451,7 @@ function ShotHud:_buildLogo()
 	outline(stage, 1.5)
 	self.stageText = stage
 	self.stageDots = {}
-	for i = 1, 3 do
+	for i = 1, STAGE_COUNT do
 		local current = i == 1
 		local dot = frame({
 			Name = "StageDot" .. i,
@@ -966,7 +982,7 @@ function ShotHud:hideCard()
 	self.retryButton.shineTween:Cancel()
 end
 
--- Stage dots: done = lime, current = gold and larger, still to come = dark. stage 4 = all done.
+-- Stage dots: done = lime, current = gold and larger, still to come = dark. STAGE_COUNT + 1 = all done.
 function ShotHud:_setStage(stage: number)
 	for i, dot in self.stageDots do
 		local done, current = i < stage, i == stage
@@ -974,25 +990,23 @@ function ShotHud:_setStage(stage: number)
 		dot.Size = if current then UDim2.fromOffset(13, 13) else UDim2.fromOffset(10, 10)
 		self.stageDotStrokes[i].Color = if done or current then INK else VIOLET
 	end
-	self.stageText.Text = if stage > 3 then TEXT.StageFree else string.format(TEXT.Stage, stage)
+	self.stageText.Text = if stage > STAGE_COUNT then TEXT.StageFree else string.format(TEXT.Stage, stage)
 end
 
--- Labels for the current part of the training. stage: SHOT | PASS | FREE; mode: TUTORIAL | TASK
--- | FREE (of the stage); kind: what the player is doing now, SHOT or PASS (power bar texts).
+-- Labels for the current part of the training. stage: SHOT | PASS; mode: TUTORIAL | TASK (of
+-- the stage); kind: what the player is doing now, SHOT or PASS (power bar texts).
 function ShotHud:setMode(stage: string, mode: string, taskGoals: number, kind: string)
 	local pass = stage == "PASS"
-	if stage == "FREE" then
-		self.goalsLabel.Text = TEXT.GoalsFree
-	elseif mode == "TUTORIAL" then
+	if mode == "TUTORIAL" then
 		self.goalsLabel.Text = TEXT.GoalsTutorial
 	else
 		self.goalsLabel.Text = string.format(if pass then TEXT.GoalsTaskPass else TEXT.GoalsTask, taskGoals)
 	end
-	self.modeText.Text = if stage == "FREE" then TEXT.ModeFree elseif pass then TEXT.ModePass else TEXT.Mode
+	self.modeText.Text = if pass then TEXT.ModePass else TEXT.Mode
 	local passing = kind == "PASS"
 	self.powerHint.Text = if passing then TEXT.PassPowerHint else TEXT.PowerHint
 	self.powerZoneLabel.Text = if passing then TEXT.PassPowerZone else TEXT.PowerZone
-	self:_setStage(if stage == "FREE" then 4 elseif pass then 2 else 1)
+	self:_setStage(if pass then 2 else 1)
 end
 
 -- Highlights the power range that the guided shot asks for (nil hides it).
@@ -1033,6 +1047,8 @@ function ShotHud:showComplete(stats: { kind: string, goals: number, shots: numbe
 		ball.Visible = i <= stats.goals
 	end
 	self:_setStage(stage + 1)
+	-- The pass task is the last stage: its primary button leaves the training.
+	self.completeButton.label.Text = if stage >= STAGE_COUNT then TEXT.Finish else TEXT.Next
 
 	self.complete.Visible = true
 	self.completeDim.BackgroundTransparency = 1

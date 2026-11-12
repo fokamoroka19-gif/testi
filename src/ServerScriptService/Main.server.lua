@@ -30,7 +30,7 @@ local function requireServerModule(name: string)
 end
 
 local shared = ReplicatedStorage:FindFirstChild("Shared")
-for _, name in { "ShotConfig", "ShotPhysics", "PassConfig", "PassPhysics", "FigureBuilder" } do
+for _, name in { "ShotConfig", "ShotPhysics", "PassConfig", "PassPhysics", "FigureBuilder", "CareerConfig" } do
 	if not (shared and shared:FindFirstChild(name)) then
 		error(string.format("[Main] ReplicatedStorage > Shared > %s (ModuleScript) is missing. See README > Setup.", name), 0)
 	end
@@ -56,12 +56,22 @@ for _, name in REMOTE_NAMES do
 	remotes[name] = remote
 end
 
+-- Menus talk to the career over a RemoteFunction: each request needs exactly one answer.
+local careerRequest = remotesFolder:FindFirstChild("CareerRequest")
+if not careerRequest then
+	careerRequest = Instance.new("RemoteFunction")
+	careerRequest.Name = "CareerRequest"
+	careerRequest.Parent = remotesFolder
+end
+
 local SceneBuilder = requireServerModule("SceneBuilder")
 local KeeperBuilder = requireServerModule("KeeperBuilder")
 local EpisodeService = requireServerModule("EpisodeService")
+local CareerService = requireServerModule("CareerService")
 
 local scene = SceneBuilder.build()
 KeeperBuilder.build(scene)
-EpisodeService.init(remotes)
+EpisodeService.init(remotes, { onStageCompleted = CareerService.onStageCompleted })
+CareerService.init(careerRequest, { beginTraining = EpisodeService.beginTraining, stopTraining = EpisodeService.stopTraining })
 
-print("[Main] Shot and pass training ready")
+print("[Main] Career menu, shot and pass training ready")

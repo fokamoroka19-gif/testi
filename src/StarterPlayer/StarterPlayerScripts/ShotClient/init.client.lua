@@ -1,6 +1,7 @@
--- Client entry point for the shot and pass training: wires input, both drills' 3D visuals, the
--- HUD and the finger hint to the server remotes. The client sends only its input; the server
--- decides outcomes and the training flow (shot: guided -> task, pass: guided -> task, free play).
+-- Client entry point: the career menus first (CareerMenu), then the shot and pass training, which
+-- wires input, both drills' 3D visuals, the HUD and the finger hint to the server remotes. The
+-- client sends only its input; the server decides outcomes and the training flow (shot: guided ->
+-- task, pass: guided -> task). After the pass task the player goes back to the career menu.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -8,12 +9,14 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
+local CareerConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CareerConfig"))
 local InputController = require(script:WaitForChild("InputController"))
 local ShotVisuals = require(script:WaitForChild("ShotVisuals"))
 local ShotHud = require(script:WaitForChild("ShotHud"))
 local ImageLoader = require(script:WaitForChild("ImageLoader"))
 local TutorialHint = require(script:WaitForChild("TutorialHint"))
 local PassVisuals = require(script:WaitForChild("PassVisuals"))
+local CareerMenu = require(script:WaitForChild("CareerMenu"))
 
 local CARD_DELAY = 0.55 -- let the player see the ball hit the net before the card covers the goal
 local FOLLOW_UP_DELAY = 0.75 -- after a good pass: the receiver controls it, then the shot camera
@@ -27,6 +30,7 @@ local RequestEpisode = Remotes:WaitForChild("RequestEpisode")
 local EpisodeStarted = Remotes:WaitForChild("EpisodeStarted")
 local SubmitEpisodeInput = Remotes:WaitForChild("SubmitEpisodeInput")
 local EpisodeResult = Remotes:WaitForChild("EpisodeResult")
+local CareerRequest = Remotes:WaitForChild("CareerRequest")
 
 -- Default movement controls are useless here and would cover the screen on phones.
 task.spawn(function()
@@ -42,19 +46,26 @@ task.spawn(function()
 end)
 
 local hud = ShotHud.new()
+hud:setVisible(false) -- the career menu comes first
 ImageLoader.watch() -- stadium banners, keeper kit and players' faces
 local visuals = ShotVisuals.new()
+visuals:setActive(false) -- the menu owns the camera until the training starts
 local passVisuals = PassVisuals.new()
 local input = InputController.new()
 local hint = TutorialHint.new()
 local currentEpisode = nil
-local currentScene = "SHOT" -- SHOT | PASS | FOLLOWUP (the shot after a good pass)
+local currentScene = nil -- SHOT | PASS | FOLLOWUP (the shot after a good pass); nil in the menus
 local SCENE_BLEND = 0.9 -- camera glide between scenes; input waits for it
 local waitingForEpisode = false
 local bestSpeed = 0 -- fastest goal in the current task attempt, for the completion menu
+local inTraining = false
+local lastCompletedStage = nil -- stage of the last completed task (SHOT | PASS)
 
 -- choice: "RETRY" or "NEXT" from the completion menu, otherwise nil.
 local function requestEpisode(choice: string?)
+	if not inTraining then
+		return
+	end
 	waitingForEpisode = true
 	RequestEpisode:FireServer(choice)
 end
@@ -73,31 +84,27 @@ end
 hud.onRetry = function()
 	continueWith("RETRY")
 end
-hud.onNext = function()
-	continueWith("NEXT")
-end
 
--- Goals panel: in a task, one pip per goal / good pass still needed; in free play, the last results.
+-- Goals panel: one pip per goal / good pass still needed in the task.
 local function showProgress(info)
-	if info.stage == "FREE" then
-		hud:setSeries(info.goals, 10, info.history, info.shots)
-	else
-		local done = {}
-		for _ = 1, info.goals do
-			table.insert(done, if info.stage == "PASS" then "GOOD" else "GOAL")
-		end
-		hud:setSeries(info.goals, info.taskGoals, done)
+	local done = {}
+	for _ = 1, info.goals do
+		table.insert(done, if info.stage == "PASS" then "GOOD" else "GOAL")
 	end
+	hud:setSeries(info.goals, info.taskGoals, done)
 end
 
 -- Switches the 3D scene: SHOT (shot drill), PASS (pass drill), FOLLOWUP (pass drill's players,
--- shot drill's camera and ball). Returns whether the camera moves.
-local function setScene(scene: string): boolean
+-- shot drill's camera and ball), nil (menus: both drills put away). Returns whether the camera moves.
+local function setScene(scene: string?): boolean
 	if scene == currentScene then
 		return false
 	end
 	currentScene = scene
-	if scene == "PASS" then
+	if scene == nil then
+		visuals:setActive(false)
+		passVisuals:exit()
+	elseif scene == "PASS" then
 		visuals:setActive(false)
 		passVisuals:enter()
 	elseif scene == "FOLLOWUP" then
@@ -132,7 +139,7 @@ input.onShoot = function(a, b, power)
 end
 
 EpisodeStarted.OnClientEvent:Connect(function(episode)
-	if typeof(episode) ~= "table" or (episode.kind ~= "SHOT" and episode.kind ~= "PASS") then
+	if not inTraining or typeof(episode) ~= "table" or (episode.kind ~= "SHOT" and episode.kind ~= "PASS") then
 		return
 	end
 	waitingForEpisode = false
@@ -202,6 +209,7 @@ local function showOutcome(result)
 	local key = if result.kind == "PASS" then "PASS_" .. result.detail else result.detail
 	local speed = result.speedKmh
 	if status == "COMPLETED" then
+		lastCompletedStage = result.stage
 		hud:showComplete({ kind = result.stage, goals = result.goals, shots = result.shots, bestSpeed = bestSpeed, bonusGoals = result.bonusGoals })
 	elseif status == "TUTORIAL_DONE" then
 		hud:showResult(key, {
@@ -241,7 +249,7 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	end
 
 	local function onDecisive()
-		if result.mode == "TASK" or result.mode == "FREE" then
+		if result.mode == "TASK" then
 			showProgress(result)
 			if result.outcome == (if pass then "GOOD" else "GOAL") then
 				hud:bumpGoals()
@@ -271,6 +279,46 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	end
 end)
 
+-- Career menu: main menu -> club -> player -> training. It owns the camera while open.
+local menu = CareerMenu.new(CareerRequest)
+menu.onSettingsChanged = function(settings)
+	visuals:setShakeEnabled(settings.shake)
+	hud:setUiBoost(if settings.bigUi then 1.15 else 1)
+end
+menu.onStartTraining = function(career)
+	local club = CareerConfig.club(career.clubId)
+	if club then
+		passVisuals:setTeamKit(CareerConfig.kit(club))
+	end
+	inTraining = true
+	lastCompletedStage = nil
+	bestSpeed = 0
+	hud:setVisible(true)
+	requestEpisode()
+end
+
+-- After the pass task: put the drills away and go back to the career menu.
+local function leaveTraining()
+	inTraining = false
+	currentEpisode = nil
+	waitingForEpisode = false
+	input:setEnabled(false)
+	hint:hide()
+	hud:hideCard()
+	hud:setPowerZone(nil)
+	hud:setVisible(false)
+	setScene(nil)
+	menu:open(true)
+end
+
+hud.onNext = function()
+	if lastCompletedStage == "PASS" then
+		leaveTraining()
+	else
+		continueWith("NEXT")
+	end
+end
+
 -- Space / Enter / gamepad A press the card button.
 UserInputService.InputBegan:Connect(function(inputObject, gameProcessed)
 	if gameProcessed or not hud:isCardVisible() then
@@ -284,6 +332,7 @@ end)
 
 local wasHolding = false
 RunService.RenderStepped:Connect(function(dt)
+	menu:update(dt) -- camera, blur and the player preview while the menu is open
 	local pass = currentScene == "PASS"
 	visuals:update(dt) -- keeper (and the camera while the shot drill is active)
 	passVisuals:update(dt)
@@ -312,5 +361,4 @@ RunService.RenderStepped:Connect(function(dt)
 	end
 end)
 
-requestEpisode()
 print("[ShotClient] ready")

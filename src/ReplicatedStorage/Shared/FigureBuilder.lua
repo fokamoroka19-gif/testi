@@ -89,13 +89,8 @@ local function addDecal(part: BasePart, face: string, image: string)
 	decal.Parent = part
 end
 
--- textures: "kit" paints the whole character sheet on (the goalkeeper), "head" only the face
--- and hair (outfield players in plain kit colours). Returns the model, standing on y = 0 and
--- facing -Z, and the height of its root above the ground.
-function FigureBuilder.build(name: string, kit: Kit, scale: number, textures: string): (Model, number)
-	local model = Instance.new("Model")
-	model.Name = name
-	local colors = {
+local function kitColors(kit: Kit): { [string]: Color3 }
+	return {
 		skin = kit.skin,
 		shirt = kit.shirt,
 		sleeves = kit.sleeves or kit.skin,
@@ -104,6 +99,15 @@ function FigureBuilder.build(name: string, kit: Kit, scale: number, textures: st
 		boots = kit.boots,
 		hands = kit.hands or kit.skin,
 	}
+end
+
+-- textures: "kit" paints the whole character sheet on (the goalkeeper), "head" only the face
+-- and hair (outfield players in plain kit colours). Returns the model, standing on y = 0 and
+-- facing -Z, and the height of its root above the ground.
+function FigureBuilder.build(name: string, kit: Kit, scale: number, textures: string): (Model, number)
+	local model = Instance.new("Model")
+	model.Name = name
+	local colors = kitColors(kit)
 
 	local root = makePart(model, "HumanoidRootPart", Vector3.new(2, 2, 1), Vector3.new(0, 3, 0), kit.shirt)
 	root.Transparency = 1
@@ -150,6 +154,21 @@ function FigureBuilder.build(name: string, kit: Kit, scale: number, textures: st
 	local rootHeight = root.Position.Y - (box.Position.Y - size.Y / 2)
 	model:PivotTo(CFrame.new(0, rootHeight, 0))
 	return model, rootHeight
+end
+
+-- Recolours a model made by build() (e.g. the training team in the player's club kit).
+function FigureBuilder.applyKit(model: Model, kit: Kit)
+	local colors = kitColors(kit)
+	for _, spec in PARTS do
+		local part = model:FindFirstChild(spec[1])
+		if part and part:IsA("BasePart") then
+			part.Color = colors[spec[4]]
+		end
+	end
+	local hair = model:FindFirstChild("Hair")
+	if hair and hair:IsA("BasePart") then
+		hair.Color = kit.hair
+	end
 end
 
 return FigureBuilder

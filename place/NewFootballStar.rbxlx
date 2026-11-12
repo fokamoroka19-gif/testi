@@ -9,6 +9,176 @@
       </Properties>
       <Item class="ModuleScript" referent="2">
         <Properties>
+          <string name="Name">CareerConfig</string>
+          <string name="Source"><![CDATA[-- Career data shared by the server (validation, saves) and the client (menus, kit preview):
+-- the league's eight fictional clubs, which of them a new player can join, and the rules for
+-- the player's name and shirt number.
+
+local CareerConfig = {}
+
+local rgb = Color3.fromRGB
+
+CareerConfig.League = {
+	Name = "ЛИГА ЗВЁЗД",
+	Clubs = 8,
+}
+
+CareerConfig.StartOvr = 40 -- GDD: a new player starts around OVR 40
+
+-- Same skin and hair as the training players (PassVisuals), so the preview matches the pitch.
+CareerConfig.Skin = rgb(214, 132, 82)
+CareerConfig.Hair = rgb(52, 32, 26)
+CareerConfig.Boots = rgb(20, 14, 30)
+
+export type Club = {
+	id: string,
+	name: string,
+	short: string, -- crest letters
+	ovr: number,
+	stars: number, -- 0.5 steps, 5 = top club
+	open: boolean, -- can be picked for a new career
+	unlockOvr: number?, -- player rating at which a locked club starts to take interest
+	shirt: Color3,
+	shorts: Color3,
+	socks: Color3,
+	print: Color3, -- name and number on the shirt
+}
+
+-- Strongest first. Only the three weakest clubs sign a 40-rated newcomer; the rest show what
+-- the player can grow into.
+CareerConfig.Clubs = {
+	{ id = "WESTPORT", name = "Westport City", short = "WC", ovr = 66, stars = 5, open = false, unlockOvr = 75,
+		shirt = rgb(92, 170, 255), shorts = rgb(245, 245, 250), socks = rgb(92, 170, 255), print = rgb(18, 11, 36) },
+	{ id = "NORTHVALE", name = "Northvale FC", short = "NV", ovr = 65, stars = 4.5, open = false, unlockOvr = 70,
+		shirt = rgb(240, 240, 248), shorts = rgb(24, 28, 52), socks = rgb(240, 240, 248), print = rgb(24, 28, 52) },
+	{ id = "EASTBRIDGE", name = "Eastbridge United", short = "EU", ovr = 64, stars = 4, open = false, unlockOvr = 65,
+		shirt = rgb(214, 36, 56), shorts = rgb(245, 245, 250), socks = rgb(214, 36, 56), print = rgb(255, 255, 255) },
+	{ id = "REDMONT", name = "Redmont Athletic", short = "RA", ovr = 63, stars = 3.5, open = false, unlockOvr = 60,
+		shirt = rgb(128, 26, 52), shorts = rgb(250, 214, 120), socks = rgb(128, 26, 52), print = rgb(250, 214, 120) },
+	{ id = "SOUTHGATE", name = "Southgate FC", short = "SG", ovr = 62, stars = 3, open = false, unlockOvr = 55,
+		shirt = rgb(34, 150, 84), shorts = rgb(245, 245, 250), socks = rgb(34, 150, 84), print = rgb(255, 255, 255) },
+	{ id = "NEWFORD", name = "Newford FC", short = "NF", ovr = 61, stars = 2.5, open = true,
+		shirt = rgb(255, 136, 36), shorts = rgb(26, 20, 34), socks = rgb(255, 136, 36), print = rgb(26, 20, 34) },
+	{ id = "RIVERSIDE", name = "Riverside Rovers", short = "RR", ovr = 60, stars = 2, open = true,
+		shirt = rgb(18, 168, 170), shorts = rgb(20, 36, 70), socks = rgb(20, 36, 70), print = rgb(255, 255, 255) },
+	{ id = "ASHFORD", name = "Ashford Town", short = "AT", ovr = 59, stars = 2, open = true,
+		shirt = rgb(250, 210, 40), shorts = rgb(26, 20, 34), socks = rgb(250, 210, 40), print = rgb(26, 20, 34) },
+} :: { Club }
+
+CareerConfig.Name = {
+	MinLength = 2,
+	MaxLength = 14,
+}
+
+CareerConfig.Number = {
+	Min = 1,
+	Max = 99,
+	Default = 10,
+	Picks = { 7, 9, 10, 11, 17, 99 },
+}
+
+local clubsById: { [string]: Club } = {}
+for _, club in CareerConfig.Clubs do
+	clubsById[club.id] = club
+end
+
+function CareerConfig.club(id: any): Club?
+	return if typeof(id) == "string" then clubsById[id] else nil
+end
+
+-- FigureBuilder kit for a player of this club.
+function CareerConfig.kit(club: Club)
+	return {
+		skin = CareerConfig.Skin,
+		hair = CareerConfig.Hair,
+		boots = CareerConfig.Boots,
+		shirt = club.shirt,
+		shorts = club.shorts,
+		socks = club.socks,
+	}
+end
+
+-- First opponent of the season: the next club below in the table (wrapping round).
+function CareerConfig.firstOpponent(club: Club): Club
+	for i, other in CareerConfig.Clubs do
+		if other == club then
+			return CareerConfig.Clubs[i % #CareerConfig.Clubs + 1]
+		end
+	end
+	return CareerConfig.Clubs[1]
+end
+
+local function isLetter(code: number): boolean
+	return (code >= 65 and code <= 90) -- A-Z
+		or (code >= 97 and code <= 122) -- a-z
+		or (code >= 0x400 and code <= 0x45F) -- Cyrillic, incl. Ё/ё
+end
+
+-- Trims and checks a first or last name. Letters (Latin or Cyrillic), single inner spaces,
+-- hyphens and apostrophes. Returns the cleaned name, or nil and an error code:
+-- EMPTY | TOO_SHORT | TOO_LONG | BAD_CHARS
+function CareerConfig.cleanName(raw: any): (string?, string?)
+	if typeof(raw) ~= "string" then
+		return nil, "EMPTY"
+	end
+	if not utf8.len(raw) then
+		return nil, "BAD_CHARS"
+	end
+	local name = string.gsub(string.gsub(raw, "^%s+", ""), "%s+$", "")
+	name = string.gsub(name, "%s+", " ")
+	local length = utf8.len(name) or 0
+	if length == 0 then
+		return nil, "EMPTY"
+	end
+	local letters = 0
+	for _, code in utf8.codes(name) do
+		if isLetter(code) then
+			letters += 1
+		elseif code ~= 32 and code ~= 45 and code ~= 39 then -- space, hyphen, apostrophe
+			return nil, "BAD_CHARS"
+		end
+	end
+	if letters < CareerConfig.Name.MinLength then
+		return nil, "TOO_SHORT"
+	end
+	if length > CareerConfig.Name.MaxLength then
+		return nil, "TOO_LONG"
+	end
+	return name, nil
+end
+
+function CareerConfig.validNumber(value: any): boolean
+	return typeof(value) == "number"
+		and value == math.floor(value)
+		and value >= CareerConfig.Number.Min
+		and value <= CareerConfig.Number.Max
+end
+
+-- string.upper only handles ASCII; shirts print surnames in capitals, Cyrillic included.
+function CareerConfig.upper(text: string): string
+	if not utf8.len(text) then
+		return string.upper(text)
+	end
+	local out = {}
+	for _, code in utf8.codes(text) do
+		if code >= 97 and code <= 122 then
+			code -= 32
+		elseif code >= 0x430 and code <= 0x44F then
+			code -= 0x20
+		elseif code >= 0x450 and code <= 0x45F then
+			code -= 0x50
+		end
+		table.insert(out, utf8.char(code))
+	end
+	return table.concat(out)
+end
+
+return CareerConfig
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
           <string name="Name">FigureBuilder</string>
           <string name="Source"><![CDATA[-- Blocky R15-style footballer, in the proportions of the character sheet
 -- (tools/assets/source/keeper_sheet.png). Used for the goalkeeper (server) and the pass
@@ -101,13 +271,8 @@ local function addDecal(part: BasePart, face: string, image: string)
 	decal.Parent = part
 end
 
--- textures: "kit" paints the whole character sheet on (the goalkeeper), "head" only the face
--- and hair (outfield players in plain kit colours). Returns the model, standing on y = 0 and
--- facing -Z, and the height of its root above the ground.
-function FigureBuilder.build(name: string, kit: Kit, scale: number, textures: string): (Model, number)
-	local model = Instance.new("Model")
-	model.Name = name
-	local colors = {
+local function kitColors(kit: Kit): { [string]: Color3 }
+	return {
 		skin = kit.skin,
 		shirt = kit.shirt,
 		sleeves = kit.sleeves or kit.skin,
@@ -116,6 +281,15 @@ function FigureBuilder.build(name: string, kit: Kit, scale: number, textures: st
 		boots = kit.boots,
 		hands = kit.hands or kit.skin,
 	}
+end
+
+-- textures: "kit" paints the whole character sheet on (the goalkeeper), "head" only the face
+-- and hair (outfield players in plain kit colours). Returns the model, standing on y = 0 and
+-- facing -Z, and the height of its root above the ground.
+function FigureBuilder.build(name: string, kit: Kit, scale: number, textures: string): (Model, number)
+	local model = Instance.new("Model")
+	model.Name = name
+	local colors = kitColors(kit)
 
 	local root = makePart(model, "HumanoidRootPart", Vector3.new(2, 2, 1), Vector3.new(0, 3, 0), kit.shirt)
 	root.Transparency = 1
@@ -164,15 +338,30 @@ function FigureBuilder.build(name: string, kit: Kit, scale: number, textures: st
 	return model, rootHeight
 end
 
+-- Recolours a model made by build() (e.g. the training team in the player's club kit).
+function FigureBuilder.applyKit(model: Model, kit: Kit)
+	local colors = kitColors(kit)
+	for _, spec in PARTS do
+		local part = model:FindFirstChild(spec[1])
+		if part and part:IsA("BasePart") then
+			part.Color = colors[spec[4]]
+		end
+	end
+	local hair = model:FindFirstChild("Hair")
+	if hair and hair:IsA("BasePart") then
+		hair.Color = kit.hair
+	end
+end
+
 return FigureBuilder
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="3">
+      <Item class="Folder" referent="4">
         <Properties>
           <string name="Name">Images</string>
         </Properties>
-        <Item class="ModuleScript" referent="4">
+        <Item class="ModuleScript" referent="5">
           <Properties>
             <string name="Name">Banners</string>
             <string name="Source"><![CDATA[-- Generated by tools/assets/build_images.py. Do not edit by hand.
@@ -1330,7 +1519,7 @@ AJyIoJdSAJAYAIN/AYLBppZRAJUYAII/AIkWnYdFAIQ5A4M1oYluAJDxnImPAKoMAIMbkQAvgKmf0wIA
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="5">
+        <Item class="ModuleScript" referent="6">
           <Properties>
             <string name="Name">Keeper</string>
             <string name="Source"><![CDATA[-- Generated by tools/assets/build_images.py. Do not edit by hand.
@@ -1969,7 +2158,7 @@ sgEAf4B8AINeAIAvAIB8AIBXAYItCoE+AIBQBgAehz4AARcEgXwAgkECgEcCAQoFiD4Ag20AAAqAPgAB
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="6">
+        <Item class="ModuleScript" referent="7">
           <Properties>
             <string name="Name">Logo</string>
             <string name="Source"><![CDATA[-- Generated by tools/assets/build_images.py. Do not edit by hand.
@@ -2635,7 +2824,7 @@ AP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAOoYAA==
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="7">
+        <Item class="ModuleScript" referent="8">
           <Properties>
             <string name="Name">Ui</string>
             <string name="Source"><![CDATA[-- Generated by tools/assets/build_images.py. Do not edit by hand.
@@ -2693,7 +2882,7 @@ nAAEgACyAQoM4QKy
           </Properties>
         </Item>
       </Item>
-      <Item class="ModuleScript" referent="8">
+      <Item class="ModuleScript" referent="9">
         <Properties>
           <string name="Name">PassConfig</string>
           <string name="Source"><![CDATA[-- Tuning for the Stage 2 pass, shared by the server (outcome) and the client (visuals).
@@ -2777,7 +2966,7 @@ return PassConfig
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="9">
+      <Item class="ModuleScript" referent="10">
         <Properties>
           <string name="Name">PassPhysics</string>
           <string name="Source"><![CDATA[-- Ground pass simulation, shared by the server (decides the outcome) and the client (layouts,
@@ -3026,7 +3215,7 @@ return PassPhysics
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="10">
+      <Item class="ModuleScript" referent="11">
         <Properties>
           <string name="Name">ShotConfig</string>
           <string name="Source"><![CDATA[-- Tuning values for the Stage 1 shot, shared by the server (outcome) and the client (visuals)
@@ -3112,7 +3301,7 @@ ShotConfig.Goalkeeper = {
 ShotConfig.DefaultShooting = 42
 
 -- Shot training: one guided shot that always scores, then the task (score TaskGoals in any number
--- of shots), then free play (until the next training stage exists).
+-- of shots). The pass training (PassConfig) follows; after it the career goes on to the first match.
 ShotConfig.Training = {
 	TutorialAim = { X = 0.62, Y = 0.62 }, -- where the finger shows to press (aim coordinates)
 	TutorialRingRadius = 2.6, -- studs, the ring drawn on the goal
@@ -3125,7 +3314,7 @@ ShotConfig.Training = {
 	-- Training keeper: still saves central shots, beatable in the corners.
 	TaskKeeperSkill = 15,
 	TaskKeeperDelay = 0.12, -- good corner shots score ~90-97%, central ones are still saved
-	-- Where a new player starts: "SHOT" (shot training), "PASS" (pass training) or "FREE".
+	-- Where a new career's training starts: "SHOT" (shot training) or "PASS" (pass training).
 	-- Set "PASS" to test the pass stage without replaying the shot training.
 	StartStage = "SHOT",
 }
@@ -3153,7 +3342,7 @@ return ShotConfig
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="11">
+      <Item class="ModuleScript" referent="12">
         <Properties>
           <string name="Name">ShotPhysics</string>
           <string name="Source"><![CDATA[-- Shot geometry and ball physics, shared by server and client.
@@ -3516,11 +3705,11 @@ return ShotPhysics
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="12">
+  <Item class="ServerScriptService" referent="13">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="ModuleScript" referent="13">
+    <Item class="ModuleScript" referent="14">
       <Properties>
         <string name="Name">KeeperBuilder</string>
         <string name="Source"><![CDATA[-- Builds the goalkeeper on the server: the blocky footballer (Shared/FigureBuilder) with the
@@ -3567,7 +3756,7 @@ return KeeperBuilder
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Script" referent="14">
+    <Item class="Script" referent="15">
       <Properties>
         <string name="Name">Main</string>
         <token name="RunContext">0</token>
@@ -3603,7 +3792,7 @@ local function requireServerModule(name: string)
 end
 
 local shared = ReplicatedStorage:FindFirstChild("Shared")
-for _, name in { "ShotConfig", "ShotPhysics", "PassConfig", "PassPhysics", "FigureBuilder" } do
+for _, name in { "ShotConfig", "ShotPhysics", "PassConfig", "PassPhysics", "FigureBuilder", "CareerConfig" } do
 	if not (shared and shared:FindFirstChild(name)) then
 		error(string.format("[Main] ReplicatedStorage > Shared > %s (ModuleScript) is missing. See README > Setup.", name), 0)
 	end
@@ -3629,19 +3818,29 @@ for _, name in REMOTE_NAMES do
 	remotes[name] = remote
 end
 
+-- Menus talk to the career over a RemoteFunction: each request needs exactly one answer.
+local careerRequest = remotesFolder:FindFirstChild("CareerRequest")
+if not careerRequest then
+	careerRequest = Instance.new("RemoteFunction")
+	careerRequest.Name = "CareerRequest"
+	careerRequest.Parent = remotesFolder
+end
+
 local SceneBuilder = requireServerModule("SceneBuilder")
 local KeeperBuilder = requireServerModule("KeeperBuilder")
 local EpisodeService = requireServerModule("EpisodeService")
+local CareerService = requireServerModule("CareerService")
 
 local scene = SceneBuilder.build()
 KeeperBuilder.build(scene)
-EpisodeService.init(remotes)
+EpisodeService.init(remotes, { onStageCompleted = CareerService.onStageCompleted })
+CareerService.init(careerRequest, { beginTraining = EpisodeService.beginTraining, stopTraining = EpisodeService.stopTraining })
 
-print("[Main] Shot and pass training ready")
+print("[Main] Career menu, shot and pass training ready")
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="15">
+    <Item class="ModuleScript" referent="16">
       <Properties>
         <string name="Name">SceneBuilder</string>
         <string name="Source"><![CDATA[-- Builds the evening stadium at runtime: striped pitch and markings, goal with net, LED boards,
@@ -4562,11 +4761,393 @@ return SceneBuilder
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Folder" referent="16">
+    <Item class="Folder" referent="17">
       <Properties>
         <string name="Name">Services</string>
       </Properties>
-      <Item class="ModuleScript" referent="17">
+      <Item class="ModuleScript" referent="18">
+        <Properties>
+          <string name="Name">CareerService</string>
+          <string name="Source"><![CDATA[-- Owns each player's career: loads and saves it (DataStore), validates new careers and settings,
+-- and hands the player to EpisodeService for training. The client asks through the CareerRequest
+-- RemoteFunction: (action, payload) -> { ok = true, ... } or { ok = false, error = CODE }.
+--
+-- Actions:
+--   GET             -> career?, settings, persistent (false: progress won't survive this session)
+--   CREATE          { clubId, firstName, lastName, number, replace } -> career
+--   START_TRAINING  -> stage; puts the player into training at the career's saved stage
+--   SETTINGS        { shake, bigUi } -> settings
+--   DELETE          -> removes the career
+--
+-- Training progress (career.training: SHOT -> PASS -> DONE) only moves forward, and only when
+-- EpisodeService reports a completed task, so the client can't skip it.
+
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TextService = game:GetService("TextService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local CareerConfig = require(Shared:WaitForChild("CareerConfig"))
+local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
+
+local STORE_NAME = "NfsCareer_v1"
+local DATA_VERSION = 1
+local LOAD_ATTEMPTS = 3
+local LOAD_WAIT = 15 -- seconds a request waits for the player's save to load
+local MIN_REQUEST_INTERVAL = 0.2
+local TRAINING_ORDER = { SHOT = 1, PASS = 2, DONE = 3 }
+
+type Career = {
+	clubId: string,
+	firstName: string,
+	lastName: string,
+	number: number,
+	ovr: number,
+	level: number,
+	training: string, -- SHOT | PASS | DONE
+	createdAt: number,
+}
+type Settings = { shake: boolean, bigUi: boolean }
+type Profile = {
+	loaded: boolean,
+	persistent: boolean,
+	career: Career?,
+	settings: Settings,
+	lastRequestAt: number,
+	busy: boolean,
+	saving: boolean,
+	dirty: boolean,
+}
+
+local CareerService = {}
+
+local profiles: { [Player]: Profile } = {}
+local hooks = nil :: { beginTraining: (Player, string) -> (), stopTraining: (Player) -> () }?
+
+local store: DataStore? = nil
+do
+	local ok, result = pcall(function()
+		return DataStoreService:GetDataStore(STORE_NAME)
+	end)
+	if ok then
+		store = result
+	else
+		warn("[CareerService] DataStore unavailable, careers last for this session only:", result)
+	end
+end
+
+local function defaultSettings(): Settings
+	return { shake = true, bigUi = false }
+end
+
+local function key(player: Player): string
+	return "player_" .. player.UserId
+end
+
+-- Saved data comes back exactly as stored, but is checked anyway so a bad record can't break
+-- the menus or the training.
+local function readCareer(data: any): Career?
+	if typeof(data) ~= "table" then
+		return nil
+	end
+	local club = CareerConfig.club(data.clubId)
+	local first = CareerConfig.cleanName(data.firstName)
+	local last = CareerConfig.cleanName(data.lastName)
+	if not (club and first and last and CareerConfig.validNumber(data.number) and TRAINING_ORDER[data.training]) then
+		return nil
+	end
+	return {
+		clubId = club.id,
+		firstName = first,
+		lastName = last,
+		number = data.number,
+		ovr = if typeof(data.ovr) == "number" then data.ovr else CareerConfig.StartOvr,
+		level = if typeof(data.level) == "number" then data.level else 1,
+		training = data.training,
+		createdAt = if typeof(data.createdAt) == "number" then data.createdAt else 0,
+	}
+end
+
+local function readSettings(data: any): Settings
+	local settings = defaultSettings()
+	if typeof(data) == "table" then
+		if typeof(data.shake) == "boolean" then
+			settings.shake = data.shake
+		end
+		if typeof(data.bigUi) == "boolean" then
+			settings.bigUi = data.bigUi
+		end
+	end
+	return settings
+end
+
+local function save(player: Player, profile: Profile)
+	if not (store and profile.persistent) then
+		return
+	end
+	if profile.saving then
+		profile.dirty = true
+		return
+	end
+	profile.saving = true
+	repeat
+		profile.dirty = false
+		local data = { version = DATA_VERSION, career = profile.career, settings = profile.settings }
+		local ok, err = pcall(function()
+			(store :: DataStore):SetAsync(key(player), data, { player.UserId })
+		end)
+		if not ok then
+			warn(string.format("[CareerService] %s: save failed: %s", player.Name, tostring(err)))
+		end
+	until not profile.dirty
+	profile.saving = false
+end
+
+local function queueSave(player: Player, profile: Profile)
+	task.spawn(save, player, profile)
+end
+
+local function load(player: Player)
+	local profile: Profile = {
+		loaded = false,
+		persistent = false,
+		career = nil,
+		settings = defaultSettings(),
+		lastRequestAt = -math.huge,
+		busy = false,
+		saving = false,
+		dirty = false,
+	}
+	profiles[player] = profile
+	if store then
+		for attempt = 1, LOAD_ATTEMPTS do
+			local ok, data = pcall(function()
+				return (store :: DataStore):GetAsync(key(player))
+			end)
+			if ok then
+				-- Only a successful load may be saved over; otherwise an outage would wipe the career.
+				profile.persistent = true
+				if typeof(data) == "table" then
+					profile.career = readCareer(data.career)
+					profile.settings = readSettings(data.settings)
+				end
+				break
+			end
+			warn(string.format("[CareerService] %s: load attempt %d failed: %s", player.Name, attempt, tostring(data)))
+			if attempt < LOAD_ATTEMPTS then
+				task.wait(attempt)
+			end
+		end
+	end
+	profile.loaded = true
+	print(string.format(
+		"[CareerService] %s: profile loaded (%s, %s)",
+		player.Name, if profile.career then "career at " .. profile.career.clubId else "no career", if profile.persistent then "saved" else "session only"
+	))
+end
+
+local function publicCareer(career: Career?)
+	if not career then
+		return nil
+	end
+	return table.clone(career)
+end
+
+-- Returns the name as other players would see it, or nil and an error code.
+local function filterName(player: Player, name: string): (string?, string?)
+	local ok, result = pcall(function()
+		local filtered = TextService:FilterStringAsync(name, player.UserId, Enum.TextFilterContext.PublicChat)
+		return filtered:GetNonChatStringForBroadcastAsync()
+	end)
+	if not ok then
+		warn(string.format("[CareerService] %s: text filter failed: %s", player.Name, tostring(result)))
+		return nil, "FILTER_FAILED"
+	end
+	if result ~= name then
+		return nil, "NAME_FILTERED"
+	end
+	return result, nil
+end
+
+local function createCareer(player: Player, profile: Profile, payload: any)
+	if typeof(payload) ~= "table" then
+		return { ok = false, error = "BAD_REQUEST" }
+	end
+	if profile.career and payload.replace ~= true then
+		return { ok = false, error = "CAREER_EXISTS" }
+	end
+	local club = CareerConfig.club(payload.clubId)
+	if not club then
+		return { ok = false, error = "BAD_REQUEST" }
+	end
+	if not club.open then
+		return { ok = false, error = "CLUB_LOCKED" }
+	end
+	local first, firstError = CareerConfig.cleanName(payload.firstName)
+	if not first then
+		return { ok = false, error = "FIRST_" .. tostring(firstError) }
+	end
+	local last, lastError = CareerConfig.cleanName(payload.lastName)
+	if not last then
+		return { ok = false, error = "LAST_" .. tostring(lastError) }
+	end
+	if not CareerConfig.validNumber(payload.number) then
+		return { ok = false, error = "BAD_NUMBER" }
+	end
+	local filteredFirst, filterError = filterName(player, first)
+	if not filteredFirst then
+		return { ok = false, error = filterError }
+	end
+	local filteredLast
+	filteredLast, filterError = filterName(player, last)
+	if not filteredLast then
+		return { ok = false, error = filterError }
+	end
+	if profiles[player] ~= profile then
+		return { ok = false, error = "NOT_LOADED" } -- left while the filter was running
+	end
+
+	if hooks then
+		hooks.stopTraining(player)
+	end
+	profile.career = {
+		clubId = club.id,
+		firstName = filteredFirst,
+		lastName = filteredLast,
+		number = payload.number,
+		ovr = CareerConfig.StartOvr,
+		level = 1,
+		training = if ShotConfig.Training.StartStage == "PASS" then "PASS" else "SHOT",
+		createdAt = os.time(),
+	}
+	queueSave(player, profile)
+	print(string.format("[CareerService] %s: new career at %s, #%d", player.Name, club.id, payload.number))
+	return { ok = true, career = publicCareer(profile.career) }
+end
+
+local function handle(player: Player, profile: Profile, action: string, payload: any)
+	if action == "GET" then
+		return { ok = true, career = publicCareer(profile.career), settings = table.clone(profile.settings), persistent = profile.persistent }
+	elseif action == "CREATE" then
+		return createCareer(player, profile, payload)
+	elseif action == "START_TRAINING" then
+		local career = profile.career
+		if not career then
+			return { ok = false, error = "NO_CAREER" }
+		end
+		if career.training == "DONE" then
+			return { ok = false, error = "TRAINING_DONE" }
+		end
+		if hooks then
+			hooks.beginTraining(player, career.training)
+		end
+		return { ok = true, stage = career.training }
+	elseif action == "SETTINGS" then
+		if typeof(payload) ~= "table" then
+			return { ok = false, error = "BAD_REQUEST" }
+		end
+		profile.settings = readSettings({
+			shake = if typeof(payload.shake) == "boolean" then payload.shake else profile.settings.shake,
+			bigUi = if typeof(payload.bigUi) == "boolean" then payload.bigUi else profile.settings.bigUi,
+		})
+		queueSave(player, profile)
+		return { ok = true, settings = table.clone(profile.settings) }
+	elseif action == "DELETE" then
+		if hooks then
+			hooks.stopTraining(player)
+		end
+		profile.career = nil
+		queueSave(player, profile)
+		return { ok = true }
+	end
+	return { ok = false, error = "BAD_REQUEST" }
+end
+
+local function onInvoke(player: Player, action: any, payload: any)
+	local profile = profiles[player]
+	local waited = 0
+	while profile and not profile.loaded and waited < LOAD_WAIT do
+		waited += task.wait(0.1)
+		profile = profiles[player]
+	end
+	if not (profile and profile.loaded) then
+		return { ok = false, error = "NOT_LOADED" }
+	end
+	if typeof(action) ~= "string" then
+		return { ok = false, error = "BAD_REQUEST" }
+	end
+	local now = os.clock()
+	if profile.busy or now - profile.lastRequestAt < MIN_REQUEST_INTERVAL then
+		return { ok = false, error = "BUSY" }
+	end
+	profile.lastRequestAt = now
+	profile.busy = true
+	local ok, result = pcall(handle, player, profile, action, payload)
+	profile.busy = false
+	if not ok then
+		warn(string.format("[CareerService] %s: %s failed: %s", player.Name, action, tostring(result)))
+		return { ok = false, error = "SERVER_ERROR" }
+	end
+	return result
+end
+
+-- EpisodeService: the player finished a training task (stage SHOT or PASS).
+function CareerService.onStageCompleted(player: Player, stage: string)
+	local profile = profiles[player]
+	local career = profile and profile.career
+	if not (profile and career) then
+		return
+	end
+	local nextStage = if stage == "SHOT" then "PASS" elseif stage == "PASS" then "DONE" else nil
+	if nextStage and TRAINING_ORDER[nextStage] > TRAINING_ORDER[career.training] then
+		career.training = nextStage
+		queueSave(player, profile)
+		print(string.format("[CareerService] %s: training stage %s done -> %s", player.Name, stage, nextStage))
+	end
+end
+
+function CareerService.init(remote: RemoteFunction, trainingHooks)
+	if hooks then
+		warn("[CareerService] init called twice; ignoring")
+		return
+	end
+	hooks = trainingHooks
+	remote.OnServerInvoke = onInvoke
+	Players.PlayerAdded:Connect(load)
+	for _, player in Players:GetPlayers() do
+		task.spawn(load, player)
+	end
+	Players.PlayerRemoving:Connect(function(player)
+		local profile = profiles[player]
+		profiles[player] = nil
+		if profile and profile.loaded then
+			save(player, profile)
+		end
+	end)
+	game:BindToClose(function()
+		local pending = 0
+		for player, profile in profiles do
+			if profile.loaded then
+				pending += 1
+				task.spawn(function()
+					save(player, profile)
+					pending -= 1
+				end)
+			end
+		end
+		local started = os.clock()
+		while pending > 0 and os.clock() - started < 25 do
+			task.wait(0.1)
+		end
+	end)
+end
+
+return CareerService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="19">
         <Properties>
           <string name="Name">EpisodeService</string>
           <string name="Source"><![CDATA[-- Owns interactive episodes: hands them out, validates client input and sends back results.
@@ -4576,11 +5157,12 @@ return SceneBuilder
 --   stage SHOT  TUTORIAL (one guided shot that always scores) -> TASK (score Training.TaskGoals)
 --   stage PASS  TUTORIAL (one guided pass that always arrives) -> TASK (PassConfig.Training.TaskPasses good passes)
 --   After a TASK the phase is DONE and the menu asks for "RETRY" (task again) or "NEXT" (next stage).
+--   "NEXT" after the PASS task ends the training: no more episodes, the client goes back to the menu.
 --   A good pass is followed by a SHOT episode (mode FOLLOWUP) from where the receiver took the ball;
 --   the pass already counted, the shot only adds to `bonusGoals`. The pass's status (TUTORIAL_DONE,
 --   CONTINUE, COMPLETED) is reported with the shot's result.
---   stage FREE  free shooting against the normal keeper (placeholder until a full match exists)
--- Misses never reset task progress.
+-- Misses never reset task progress. Only players put into training by CareerService (beginTraining)
+-- get episodes; each completed task is reported back through hooks.onStageCompleted.
 --
 -- Input per episode kind (SubmitEpisodeInput):
 --   SHOT  (episodeId, aimX -1..1, aimY 0..1, power 0..1)
@@ -4600,13 +5182,12 @@ local PassResolver = require(script.Parent.PassResolver)
 local Training = ShotConfig.Training
 local PassTraining = PassConfig.Training
 local MAX_LAG = 0.6 -- seconds a pass's clientTime may trail the server clock
-local FREE_HISTORY = 10
-local STAGES = { SHOT = true, PASS = true, FREE = true }
+local STAGES = { SHOT = true, PASS = true }
 
 type Episode = {
 	id: number,
 	kind: string, -- SHOT | PASS
-	mode: string, -- TUTORIAL | TASK | FREE | FOLLOWUP
+	mode: string, -- TUTORIAL | TASK | FOLLOWUP
 	seed: number,
 	startedAt: number,
 	layout: PassPhysics.Layout?,
@@ -4622,11 +5203,11 @@ type PlayerState = {
 	nextEpisodeId: number,
 	active: Episode?,
 	lastRemoteAt: number,
-	stage: string, -- SHOT | PASS | FREE
-	phase: string, -- TUTORIAL | TASK | DONE (ignored in FREE)
-	shots: number, -- attempts in the current task (or in free play)
+	stage: string, -- SHOT | PASS
+	phase: string, -- TUTORIAL | TASK | DONE
+	shots: number, -- attempts in the current task
 	goals: number, -- goals / good passes
-	history: { string }, -- outcome of each attempt, most recent last (free play keeps the last 10)
+	history: { string }, -- outcome of each attempt, most recent last
 	bonusGoals: number, -- pass stage: goals scored after good passes in this task attempt
 	followUp: FollowUp?, -- a good pass waiting for its shot
 }
@@ -4634,31 +5215,13 @@ type PlayerState = {
 local EpisodeService = {}
 
 local states: { [Player]: PlayerState } = {}
+local nextIds: { [Player]: number } = {} -- episode ids keep counting across training sessions
 local seedSource = Random.new()
 local remotes
+local hooks = nil :: { onStageCompleted: (Player, string) -> () }?
 
 local function resetCounters(state: PlayerState)
 	state.shots, state.goals, state.history, state.bonusGoals = 0, 0, {}, 0
-end
-
-local function getState(player: Player): PlayerState
-	local state = states[player]
-	if not state then
-		local stage = if STAGES[Training.StartStage] then Training.StartStage else "SHOT"
-		state = {
-			nextEpisodeId = 1,
-			active = nil,
-			lastRemoteAt = -math.huge,
-			stage = stage,
-			phase = "TUTORIAL",
-			shots = 0,
-			goals = 0,
-			history = {},
-			bonusGoals = 0,
-		}
-		states[player] = state
-	end
-	return state
 end
 
 local function passesRateLimit(state: PlayerState): boolean
@@ -4777,7 +5340,10 @@ local function startEpisode(player: Player, state: PlayerState, choice: string?)
 	end
 	if state.phase == "DONE" then
 		if choice == "NEXT" then
-			state.stage = if state.stage == "SHOT" then "PASS" else "FREE"
+			if state.stage ~= "SHOT" then
+				return -- the pass task was the last one: training is over
+			end
+			state.stage = "PASS"
 			state.phase = "TUTORIAL"
 		else
 			state.phase = "TASK"
@@ -4786,7 +5352,7 @@ local function startEpisode(player: Player, state: PlayerState, choice: string?)
 	end
 	local seed = seedSource:NextInteger(1, 2 ^ 31 - 1)
 	local kind = if state.stage == "PASS" then "PASS" else "SHOT"
-	local mode = if state.stage == "FREE" then "FREE" else state.phase
+	local mode = state.phase
 	local layout
 	if kind == "PASS" then
 		-- The situation is picked from the seed too, so (seed, input) reproduces the whole pass.
@@ -4814,8 +5380,8 @@ local function reject(player: Player, episodeId: any, reason: string)
 end
 
 local function onRequestEpisode(player: Player, choice: any)
-	local state = getState(player)
-	if not passesRateLimit(state) then
+	local state = states[player]
+	if not state or not passesRateLimit(state) then
 		return
 	end
 
@@ -4845,12 +5411,6 @@ local function advance(state: PlayerState, mode: string, success: boolean, outco
 		state.goals += 1
 	end
 	table.insert(state.history, outcome)
-	if mode == "FREE" then
-		if #state.history > FREE_HISTORY then
-			table.remove(state.history, 1)
-		end
-		return "CONTINUE"
-	end
 	if state.goals >= taskGoal(state.stage) then
 		state.phase = "DONE"
 		return "COMPLETED"
@@ -4877,10 +5437,8 @@ local function resolveShot(active: Episode, aimX: number, aimY: number, power: n
 	elseif active.mode == "TUTORIAL" then
 		local guideX, guideY = guidedAim(nil)
 		options = { guided = { aimX = guideX, aimY = guideY } }
-	elseif active.mode == "TASK" then
-		options = { keeperDelay = Training.TaskKeeperDelay }
 	else
-		stats.keeperSkill = ShotConfig.Goalkeeper.Skill
+		options = { keeperDelay = Training.TaskKeeperDelay }
 	end
 	local result = ShotResolver.resolve(input, stats, Random.new(active.seed), options)
 	local used = result.input
@@ -4936,8 +5494,8 @@ local function resolvePass(active: Episode, dirX: number, dirZ: number, power: n
 end
 
 local function onSubmitEpisodeInput(player: Player, episodeId: any, a: any, b: any, power: any, clientTime: any)
-	local state = getState(player)
-	if not passesRateLimit(state) then
+	local state = states[player]
+	if not state or not passesRateLimit(state) then
 		return
 	end
 
@@ -4985,6 +5543,9 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, a: any, b: a
 		end
 	else
 		status = advance(state, active.mode, success, outcome)
+		if status == "COMPLETED" and hooks then
+			hooks.onStageCompleted(player, state.stage)
+		end
 		if active.kind == "PASS" and success and payload.receiver and payload.receiverTrack then
 			-- The receiver takes it towards goal and shoots next.
 			local meet = payload.receiverTrack[#payload.receiverTrack]
@@ -5019,16 +5580,47 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, a: any, b: a
 	remotes.EpisodeResult:FireClient(player, payload)
 end
 
-function EpisodeService.init(remoteEvents)
+-- Starts (or restarts) the training at `stage` (SHOT | PASS), from its guided attempt.
+function EpisodeService.beginTraining(player: Player, stage: string)
+	local old = states[player]
+	if old then
+		nextIds[player] = old.nextEpisodeId
+	end
+	states[player] = {
+		nextEpisodeId = nextIds[player] or 1,
+		active = nil,
+		lastRemoteAt = -math.huge,
+		stage = if STAGES[stage] then stage else "SHOT",
+		phase = "TUTORIAL",
+		shots = 0,
+		goals = 0,
+		history = {},
+		bonusGoals = 0,
+	}
+end
+
+-- Back to the menus: any open episode is dropped and further requests are ignored.
+function EpisodeService.stopTraining(player: Player)
+	local state = states[player]
+	if state then
+		nextIds[player] = state.nextEpisodeId
+		states[player] = nil
+	end
+end
+
+-- trainingHooks.onStageCompleted(player, stage) runs when a SHOT or PASS task is completed.
+function EpisodeService.init(remoteEvents, trainingHooks)
 	if remotes then
 		warn("[EpisodeService] init called twice; ignoring")
 		return
 	end
 	remotes = remoteEvents
+	hooks = trainingHooks
 	remotes.RequestEpisode.OnServerEvent:Connect(onRequestEpisode)
 	remotes.SubmitEpisodeInput.OnServerEvent:Connect(onSubmitEpisodeInput)
 	Players.PlayerRemoving:Connect(function(player)
 		states[player] = nil
+		nextIds[player] = nil
 	end)
 end
 
@@ -5036,7 +5628,7 @@ return EpisodeService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="18">
+      <Item class="ModuleScript" referent="20">
         <Properties>
           <string name="Name">PassResolver</string>
           <string name="Source"><![CDATA[-- Server-only: turns validated pass input into a simulated pass. Never runs on the client.
@@ -5110,7 +5702,7 @@ return PassResolver
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="19">
+      <Item class="ModuleScript" referent="21">
         <Properties>
           <string name="Name">ShotResolver</string>
           <string name="Source"><![CDATA[-- Server-only: turns validated shot input into a fully simulated shot. Never runs on the client.
@@ -5312,20 +5904,21 @@ return ShotResolver
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="20">
+  <Item class="StarterPlayer" referent="22">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="21">
+    <Item class="StarterPlayerScripts" referent="23">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="LocalScript" referent="22">
+      <Item class="LocalScript" referent="24">
         <Properties>
           <string name="Name">ShotClient</string>
-          <string name="Source"><![CDATA[-- Client entry point for the shot and pass training: wires input, both drills' 3D visuals, the
--- HUD and the finger hint to the server remotes. The client sends only its input; the server
--- decides outcomes and the training flow (shot: guided -> task, pass: guided -> task, free play).
+          <string name="Source"><![CDATA[-- Client entry point: the career menus first (CareerMenu), then the shot and pass training, which
+-- wires input, both drills' 3D visuals, the HUD and the finger hint to the server remotes. The
+-- client sends only its input; the server decides outcomes and the training flow (shot: guided ->
+-- task, pass: guided -> task). After the pass task the player goes back to the career menu.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -5333,12 +5926,14 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
+local CareerConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CareerConfig"))
 local InputController = require(script:WaitForChild("InputController"))
 local ShotVisuals = require(script:WaitForChild("ShotVisuals"))
 local ShotHud = require(script:WaitForChild("ShotHud"))
 local ImageLoader = require(script:WaitForChild("ImageLoader"))
 local TutorialHint = require(script:WaitForChild("TutorialHint"))
 local PassVisuals = require(script:WaitForChild("PassVisuals"))
+local CareerMenu = require(script:WaitForChild("CareerMenu"))
 
 local CARD_DELAY = 0.55 -- let the player see the ball hit the net before the card covers the goal
 local FOLLOW_UP_DELAY = 0.75 -- after a good pass: the receiver controls it, then the shot camera
@@ -5352,6 +5947,7 @@ local RequestEpisode = Remotes:WaitForChild("RequestEpisode")
 local EpisodeStarted = Remotes:WaitForChild("EpisodeStarted")
 local SubmitEpisodeInput = Remotes:WaitForChild("SubmitEpisodeInput")
 local EpisodeResult = Remotes:WaitForChild("EpisodeResult")
+local CareerRequest = Remotes:WaitForChild("CareerRequest")
 
 -- Default movement controls are useless here and would cover the screen on phones.
 task.spawn(function()
@@ -5367,19 +5963,26 @@ task.spawn(function()
 end)
 
 local hud = ShotHud.new()
+hud:setVisible(false) -- the career menu comes first
 ImageLoader.watch() -- stadium banners, keeper kit and players' faces
 local visuals = ShotVisuals.new()
+visuals:setActive(false) -- the menu owns the camera until the training starts
 local passVisuals = PassVisuals.new()
 local input = InputController.new()
 local hint = TutorialHint.new()
 local currentEpisode = nil
-local currentScene = "SHOT" -- SHOT | PASS | FOLLOWUP (the shot after a good pass)
+local currentScene = nil -- SHOT | PASS | FOLLOWUP (the shot after a good pass); nil in the menus
 local SCENE_BLEND = 0.9 -- camera glide between scenes; input waits for it
 local waitingForEpisode = false
 local bestSpeed = 0 -- fastest goal in the current task attempt, for the completion menu
+local inTraining = false
+local lastCompletedStage = nil -- stage of the last completed task (SHOT | PASS)
 
 -- choice: "RETRY" or "NEXT" from the completion menu, otherwise nil.
 local function requestEpisode(choice: string?)
+	if not inTraining then
+		return
+	end
 	waitingForEpisode = true
 	RequestEpisode:FireServer(choice)
 end
@@ -5398,31 +6001,27 @@ end
 hud.onRetry = function()
 	continueWith("RETRY")
 end
-hud.onNext = function()
-	continueWith("NEXT")
-end
 
--- Goals panel: in a task, one pip per goal / good pass still needed; in free play, the last results.
+-- Goals panel: one pip per goal / good pass still needed in the task.
 local function showProgress(info)
-	if info.stage == "FREE" then
-		hud:setSeries(info.goals, 10, info.history, info.shots)
-	else
-		local done = {}
-		for _ = 1, info.goals do
-			table.insert(done, if info.stage == "PASS" then "GOOD" else "GOAL")
-		end
-		hud:setSeries(info.goals, info.taskGoals, done)
+	local done = {}
+	for _ = 1, info.goals do
+		table.insert(done, if info.stage == "PASS" then "GOOD" else "GOAL")
 	end
+	hud:setSeries(info.goals, info.taskGoals, done)
 end
 
 -- Switches the 3D scene: SHOT (shot drill), PASS (pass drill), FOLLOWUP (pass drill's players,
--- shot drill's camera and ball). Returns whether the camera moves.
-local function setScene(scene: string): boolean
+-- shot drill's camera and ball), nil (menus: both drills put away). Returns whether the camera moves.
+local function setScene(scene: string?): boolean
 	if scene == currentScene then
 		return false
 	end
 	currentScene = scene
-	if scene == "PASS" then
+	if scene == nil then
+		visuals:setActive(false)
+		passVisuals:exit()
+	elseif scene == "PASS" then
 		visuals:setActive(false)
 		passVisuals:enter()
 	elseif scene == "FOLLOWUP" then
@@ -5457,7 +6056,7 @@ input.onShoot = function(a, b, power)
 end
 
 EpisodeStarted.OnClientEvent:Connect(function(episode)
-	if typeof(episode) ~= "table" or (episode.kind ~= "SHOT" and episode.kind ~= "PASS") then
+	if not inTraining or typeof(episode) ~= "table" or (episode.kind ~= "SHOT" and episode.kind ~= "PASS") then
 		return
 	end
 	waitingForEpisode = false
@@ -5527,6 +6126,7 @@ local function showOutcome(result)
 	local key = if result.kind == "PASS" then "PASS_" .. result.detail else result.detail
 	local speed = result.speedKmh
 	if status == "COMPLETED" then
+		lastCompletedStage = result.stage
 		hud:showComplete({ kind = result.stage, goals = result.goals, shots = result.shots, bestSpeed = bestSpeed, bonusGoals = result.bonusGoals })
 	elseif status == "TUTORIAL_DONE" then
 		hud:showResult(key, {
@@ -5566,7 +6166,7 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	end
 
 	local function onDecisive()
-		if result.mode == "TASK" or result.mode == "FREE" then
+		if result.mode == "TASK" then
 			showProgress(result)
 			if result.outcome == (if pass then "GOOD" else "GOAL") then
 				hud:bumpGoals()
@@ -5596,6 +6196,46 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	end
 end)
 
+-- Career menu: main menu -> club -> player -> training. It owns the camera while open.
+local menu = CareerMenu.new(CareerRequest)
+menu.onSettingsChanged = function(settings)
+	visuals:setShakeEnabled(settings.shake)
+	hud:setUiBoost(if settings.bigUi then 1.15 else 1)
+end
+menu.onStartTraining = function(career)
+	local club = CareerConfig.club(career.clubId)
+	if club then
+		passVisuals:setTeamKit(CareerConfig.kit(club))
+	end
+	inTraining = true
+	lastCompletedStage = nil
+	bestSpeed = 0
+	hud:setVisible(true)
+	requestEpisode()
+end
+
+-- After the pass task: put the drills away and go back to the career menu.
+local function leaveTraining()
+	inTraining = false
+	currentEpisode = nil
+	waitingForEpisode = false
+	input:setEnabled(false)
+	hint:hide()
+	hud:hideCard()
+	hud:setPowerZone(nil)
+	hud:setVisible(false)
+	setScene(nil)
+	menu:open(true)
+end
+
+hud.onNext = function()
+	if lastCompletedStage == "PASS" then
+		leaveTraining()
+	else
+		continueWith("NEXT")
+	end
+end
+
 -- Space / Enter / gamepad A press the card button.
 UserInputService.InputBegan:Connect(function(inputObject, gameProcessed)
 	if gameProcessed or not hud:isCardVisible() then
@@ -5609,6 +6249,7 @@ end)
 
 local wasHolding = false
 RunService.RenderStepped:Connect(function(dt)
+	menu:update(dt) -- camera, blur and the player preview while the menu is open
 	local pass = currentScene == "PASS"
 	visuals:update(dt) -- keeper (and the camera while the shot drill is active)
 	passVisuals:update(dt)
@@ -5637,11 +6278,1014 @@ RunService.RenderStepped:Connect(function(dt)
 	end
 end)
 
-requestEpisode()
 print("[ShotClient] ready")
 ]]></string>
         </Properties>
-        <Item class="ModuleScript" referent="23">
+        <Item class="ModuleScript" referent="25">
+          <Properties>
+            <string name="Name">CareerMenu</string>
+            <string name="Source"><![CDATA[-- Career menus, shown before any training: main menu (new career / continue / settings), the
+-- league's club picker (3 of 8 clubs open), player creation with the 3D preview in the club's kit,
+-- the signed-contract card that leads to training, and the "next match" card after training.
+-- The 3D stadium stays behind every screen; this module owns the camera while it is open.
+--
+-- Server calls go through the CareerRequest RemoteFunction (see CareerService); the server
+-- validates and filters everything, the checks here only give instant feedback.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local CareerConfig = require(Shared:WaitForChild("CareerConfig"))
+local UiKit = require(script.Parent:WaitForChild("UiKit"))
+local ImageLoader = require(script.Parent:WaitForChild("ImageLoader"))
+local PlayerPreview = require(script.Parent:WaitForChild("PlayerPreview"))
+
+local create, frame, text, corner, stroke, outline = UiKit.create, UiKit.frame, UiKit.text, UiKit.corner, UiKit.stroke, UiKit.outline
+local NAVY, VIOLET, GLOW, LILAC, GOLD, LIME, RED, RED_LIGHT = UiKit.NAVY, UiKit.VIOLET, UiKit.GLOW, UiKit.LILAC, UiKit.GOLD, UiKit.LIME, UiKit.RED, UiKit.RED_LIGHT
+local INK, CREAM, WHITE = UiKit.INK, UiKit.CREAM, UiKit.WHITE
+local FONT_BOLD, FONT_MEDIUM = UiKit.FONT_BOLD, UiKit.FONT_MEDIUM
+
+-- All player-facing text in one place.
+local TEXT = {
+	Tagline = 'КАРЬЕРА ФУТБОЛИСТА  •  <font color="#FFBF1F">ОТ НОВИЧКА ДО ЗВЕЗДЫ</font>',
+	NewCareer = "НОВАЯ КАРЬЕРА",
+	NewCareerSub = "Выбери клуб и создай игрока",
+	Continue = "ПРОДОЛЖИТЬ КАРЬЕРУ",
+	ContinueNone = "Нет сохранённой карьеры",
+	ContinueSub = "%s  ·  №%d %s",
+	Settings = "НАСТРОЙКИ",
+	Loading = "Загрузка профиля…",
+	SessionOnly = "Сохранения недоступны: прогресс останется только до выхода",
+	LoadFailed = "Нет связи с сервером. Попробуй перезайти",
+	-- Club picker
+	ClubsTitle = "ВЫБЕРИ КЛУБ",
+	League = "🏆 %s  ·  %d КЛУБОВ",
+	ClubsInfo = "Твой рейтинг — %d. Пока контракт предлагают только %d клуба из %d. Расти — и топ-клубы заметят тебя!",
+	ClubOpen = "ДОСТУПЕН",
+	ClubPicked = "✓ ВЫБРАН",
+	ClubLocked = "🔒 OVR %d+",
+	ClubLockedHint = "%s пока не смотрит в твою сторону. Нужен рейтинг %d+",
+	ClubPickHint = "Выбери один из доступных клубов",
+	ClubChosenHint = "%s ждёт тебя!",
+	Ovr = "OVR %d",
+	Back = "‹  НАЗАД",
+	Next = "ДАЛЕЕ  ›",
+	-- Player creation
+	PlayerTitle = "ТВОЙ ИГРОК",
+	FirstName = "ИМЯ",
+	LastName = "ФАМИЛИЯ",
+	Number = "НОМЕР НА ФУТБОЛКЕ",
+	FirstPlaceholder = "Например, Алекс",
+	LastPlaceholder = "Например, Иванов",
+	Confirm = "ПОДТВЕРДИТЬ  ›",
+	Saving = "СОХРАНЯЕМ…",
+	PreviewHint = "👕  Так тебя увидят на поле",
+	-- Signed contract
+	SignedTitle = "КОНТРАКТ\nПОДПИСАН!",
+	SignedPlayer = "%s %s  ·  №%d",
+	SignedInfo = "Перед первым матчем — короткая тренировка: удар и пас.",
+	Level = "УРОВЕНЬ %d",
+	ToTraining = "НА ТРЕНИРОВКУ  ›",
+	-- After training / career with training done
+	TrainedTitle = "ОБУЧЕНИЕ\nПРОЙДЕНО!",
+	CareerTitle = "ТВОЯ\nКАРЬЕРА",
+	CareerLine = "%s %s  ·  №%d  ·  %s",
+	FirstMatch = "ПЕРВЫЙ МАТЧ СЕЗОНА",
+	Soon = "⏳  СКОРО: матчи появятся в следующем обновлении",
+	ToMenu = "В ГЛАВНОЕ МЕНЮ",
+	-- Settings and confirmations
+	SettingsTitle = "НАСТРОЙКИ",
+	Shake = "Тряска камеры при ударе",
+	BigUi = "Крупный интерфейс",
+	DeleteCareer = "УДАЛИТЬ КАРЬЕРУ",
+	Done = "ГОТОВО",
+	ReplaceTitle = "НОВАЯ КАРЬЕРА?",
+	ReplaceBody = "Текущая карьера (%s, №%d %s) будет удалена, когда ты подпишешь новый контракт.",
+	ReplaceYes = "НАЧАТЬ",
+	DeleteTitle = "УДАЛИТЬ КАРЬЕРУ?",
+	DeleteBody = "Карьеру в %s нельзя будет вернуть.",
+	DeleteYes = "УДАЛИТЬ",
+	Cancel = "ОТМЕНА",
+	Errors = {
+		FIRST_EMPTY = "Введи имя",
+		FIRST_TOO_SHORT = "Имя слишком короткое",
+		FIRST_TOO_LONG = "Имя — не длиннее %d символов",
+		FIRST_BAD_CHARS = "В имени можно только буквы, пробел и дефис",
+		LAST_EMPTY = "Введи фамилию — она будет на футболке",
+		LAST_TOO_SHORT = "Фамилия слишком короткая",
+		LAST_TOO_LONG = "Фамилия — не длиннее %d символов",
+		LAST_BAD_CHARS = "В фамилии можно только буквы, пробел и дефис",
+		BAD_NUMBER = "Номер — от 1 до 99",
+		NAME_FILTERED = "Такое имя использовать нельзя. Попробуй другое",
+		FILTER_FAILED = "Не удалось проверить имя. Попробуй ещё раз",
+		CLUB_LOCKED = "Этот клуб пока закрыт",
+		CAREER_EXISTS = "Карьера уже есть. Начни новую из главного меню",
+		BUSY = "Секунду…",
+		NOT_LOADED = "Профиль ещё загружается…",
+		NETWORK = "Нет связи с сервером",
+		Other = "Что-то пошло не так (%s)",
+	},
+}
+
+local LAYOUT_SIZE = Vector2.new(920, 456) -- the biggest screen (club picker) must fit on phones
+local SCREEN_SIZE = Vector2.new(900, 436)
+local CARD_SIZE = Vector2.new(216, 142)
+local CARD_GAP = 12
+local CARD_TOP = 84
+
+-- Camera framings over the training stadium (the goal is at z = 0, see ShotConfig).
+local MENU_CAMERA = { from = Vector3.new(0, 10, 96), to = Vector3.new(0, 6, 0), fov = 34 }
+local CLUBS_CAMERA = { from = Vector3.new(6, 8, 86), to = Vector3.new(0, 5.5, 0), fov = 36 }
+local BLUR = { MENU = 10, CLUBS = 16, PLAYER = 0 }
+
+local CareerMenu = {}
+CareerMenu.__index = CareerMenu
+
+local function errorText(code: string?): string
+	local message = TEXT.Errors[code or "NETWORK"]
+	if not message then
+		return string.format(TEXT.Errors.Other, tostring(code))
+	end
+	if string.find(message, "%%d") then
+		return string.format(message, CareerConfig.Name.MaxLength)
+	end
+	return message
+end
+
+-- Keeps a TextBox to `max` characters (UTF-8 aware).
+local function limitLength(box: TextBox, max: number)
+	local value = box.Text
+	local length = utf8.len(value)
+	if length and length > max then
+		box.Text = string.sub(value, 1, (utf8.offset(value, max + 1) or (#value + 1)) - 1)
+	end
+end
+
+function CareerMenu.new(remote: RemoteFunction)
+	local self = setmetatable({}, CareerMenu)
+	self.remote = remote
+	self.career = nil
+	self.settings = { shake = true, bigUi = false }
+	self.persistent = true
+	self.loaded = false
+	self.active = true
+	self.busy = false
+	self.replace = false
+	self.selectedClub = nil
+	self.onStartTraining = nil :: ((any) -> ())?
+	self.onSettingsChanged = nil :: ((any) -> ())?
+	self.cameraMode = "MENU"
+	self.clock = 0
+	self.preview = PlayerPreview.new()
+
+	local gui = UiKit.screenGui("CareerMenu", 5)
+	self.gui = gui
+	self.scaler = UiKit.scaler(gui, LAYOUT_SIZE)
+
+	-- Darker on the left where the menus sit; the stadium shows through on the right.
+	local shade = frame({ Name = "Shade", Position = UDim2.fromOffset(-200, -120), Size = UDim2.new(1, 400, 1, 240), BackgroundColor3 = INK, Parent = gui })
+	create("UIGradient", {
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.12),
+			NumberSequenceKeypoint.new(0.45, 0.55),
+			NumberSequenceKeypoint.new(1, 0.85),
+		}),
+		Parent = shade,
+	})
+	self.shade = shade
+
+	self.screens = {}
+	self:_buildMain()
+	self:_buildClubs()
+	self:_buildPlayer()
+	self:_buildNextMatch()
+	self:_buildOverlay()
+
+	local camera = workspace.CurrentCamera
+	self.blur = create("BlurEffect", { Name = "MenuBlur", Size = BLUR.MENU, Parent = camera })
+	self.camCFrame = CFrame.lookAt(MENU_CAMERA.from, MENU_CAMERA.to)
+	self.camFov = MENU_CAMERA.fov
+
+	self:_show("MAIN")
+	task.spawn(function()
+		self:_load()
+	end)
+	return self
+end
+
+function CareerMenu:_request(action: string, payload: any?): { [string]: any }
+	local ok, result = pcall(function()
+		return self.remote:InvokeServer(action, payload)
+	end)
+	if not ok or typeof(result) ~= "table" then
+		warn("[CareerMenu]", action, "failed:", if ok then "bad reply" else result)
+		return { ok = false, error = "NETWORK" }
+	end
+	return result
+end
+
+-- Every screen: a full-size root, a centred holder at viewport scale and a nested pop scale.
+function CareerMenu:_screen(name: string, size: Vector2, anchor: Vector2?, position: UDim2?)
+	local root = frame({ Name = name, Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = self.gui })
+	local holder = frame({
+		Name = "Holder",
+		AnchorPoint = anchor or Vector2.new(0.5, 0.5),
+		Position = position or UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(size.X, size.Y),
+		BackgroundTransparency = 1,
+		Parent = root,
+	})
+	self.scaler:add(holder)
+	local content = frame({ Name = "Content", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = holder })
+	local pop = create("UIScale", { Parent = content })
+	local screen = { root = root, content = content, pop = pop }
+	self.screens[name] = screen
+	return screen
+end
+
+---------------------------------------------------------------- main menu
+
+function CareerMenu:_buildMain()
+	local screen = self:_screen("MAIN", Vector2.new(460, 456), Vector2.new(0, 0.5), UDim2.new(0, 48, 0.5, 0))
+	local c = screen.content
+
+	local logo = frame({ Name = "Logo", Size = UDim2.fromOffset(420, 168), BackgroundTransparency = 1, Parent = c })
+	local embedded = ImageLoader.get("Logo/Logo")
+	if embedded then
+		create("ImageLabel", { Name = "LogoImage", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ImageContent = embedded, ScaleType = Enum.ScaleType.Fit, Parent = logo })
+	else
+		UiKit.bigText({ Name = "Wordmark", Text = 'NEW FOOTBALL <font color="#FF2D55">STAR</font> <font color="#FFBF1F">★</font>', TextSize = 46, Position = UDim2.fromOffset(4, 50), Size = UDim2.fromOffset(410, 60), Parent = logo }, 4, Vector2.new(3, 4))
+	end
+
+	local tagline = frame({ Name = "Tagline", Position = UDim2.fromOffset(8, 176), Size = UDim2.fromOffset(392, 30), BackgroundColor3 = NAVY, BackgroundTransparency = 0.1, Parent = c })
+	corner(tagline, 6)
+	stroke(tagline, VIOLET, 2)
+	local accent = frame({ AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), Size = UDim2.fromOffset(6, 14), BackgroundColor3 = RED, Parent = tagline })
+	corner(accent, 1)
+	local taglineText = text({ Position = UDim2.fromOffset(24, 0), Size = UDim2.new(1, -30, 1, 0), Text = TEXT.Tagline, TextSize = 13, Parent = tagline })
+	outline(taglineText, 1.5)
+
+	self.newButton = UiKit.button(c, { Name = "NewCareer", Position = UDim2.fromOffset(0, 222), Size = UDim2.fromOffset(400, 68) }, TEXT.NewCareer, function()
+		self:_onNewCareer()
+	end, "primary", TEXT.NewCareerSub)
+	self.continueButton = UiKit.button(c, { Name = "Continue", Position = UDim2.fromOffset(0, 300), Size = UDim2.fromOffset(400, 68) }, TEXT.Continue, function()
+		self:_onContinue()
+	end, "secondary", TEXT.ContinueNone)
+	self.settingsButton = UiKit.button(c, { Name = "Settings", Position = UDim2.fromOffset(0, 378), Size = UDim2.fromOffset(400, 52) }, "⚙  " .. TEXT.Settings, function()
+		self:_openSettings()
+	end, "secondary")
+
+	self.status = text({ Name = "Status", Position = UDim2.fromOffset(4, 434), Size = UDim2.fromOffset(400, 20), Text = TEXT.Loading, TextSize = 13, FontFace = FONT_MEDIUM, TextColor3 = LILAC, Parent = c })
+	outline(self.status, 1)
+	self.newButton:setEnabled(false)
+	self.continueButton:setEnabled(false)
+end
+
+function CareerMenu:_refreshMain()
+	local career = self.career
+	local club = career and CareerConfig.club(career.clubId)
+	self.newButton:setEnabled(self.loaded)
+	self.continueButton:setEnabled(club ~= nil)
+	if career and club then
+		self.continueButton:setText(TEXT.Continue, string.format(TEXT.ContinueSub, club.name, career.number, career.lastName))
+	else
+		self.continueButton:setText(TEXT.Continue, TEXT.ContinueNone)
+	end
+	if not self.loaded then
+		self.status.Text = TEXT.Loading
+	elseif not self.persistent then
+		self.status.Text = TEXT.SessionOnly
+	else
+		self.status.Text = ""
+	end
+	self.deleteButton.button.Visible = career ~= nil
+	if self.loaded then
+		self.newButton:playShine()
+	end
+end
+
+function CareerMenu:_load()
+	local result
+	for attempt = 1, 3 do
+		result = self:_request("GET")
+		if result.ok or result.error ~= "BUSY" then
+			break
+		end
+		task.wait(attempt * 0.5)
+	end
+	if not result.ok then
+		self.status.Text = TEXT.LoadFailed
+		return
+	end
+	self.loaded = true
+	self.career = result.career
+	self.persistent = result.persistent ~= false
+	if typeof(result.settings) == "table" then
+		self:_applySettings(result.settings)
+	end
+	self:_refreshMain()
+end
+
+function CareerMenu:_onNewCareer()
+	if not self.loaded then
+		return
+	end
+	local career = self.career
+	local club = career and CareerConfig.club(career.clubId)
+	if career and club then
+		self:_confirm(TEXT.ReplaceTitle, string.format(TEXT.ReplaceBody, club.name, career.number, career.lastName), TEXT.ReplaceYes, false, function()
+			self:_startNew(true)
+		end)
+	else
+		self:_startNew(false)
+	end
+end
+
+function CareerMenu:_startNew(replace: boolean)
+	self.replace = replace
+	self.selectedClub = nil
+	self:_refreshCards()
+	self:_show("CLUBS")
+end
+
+function CareerMenu:_onContinue()
+	local career = self.career
+	if not career or self.busy then
+		return
+	end
+	if career.training == "DONE" then
+		self:_showNext(false)
+	else
+		self:_startTraining(self.continueButton)
+	end
+end
+
+---------------------------------------------------------------- club picker
+
+function CareerMenu:_buildClubs()
+	local screen = self:_screen("CLUBS", SCREEN_SIZE)
+	local c = screen.content
+	UiKit.bigText({ Name = "Title", Text = TEXT.ClubsTitle, TextSize = 38, Position = UDim2.fromOffset(0, 0), Size = UDim2.fromOffset(520, 44), Parent = c }, 3.5, Vector2.new(3, 4))
+	local league = UiKit.chip(c, { Name = "League", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 8) }, string.format(TEXT.League, CareerConfig.League.Name, #CareerConfig.Clubs), GOLD)
+	league.Size = UDim2.fromOffset(0, 32)
+
+	local openCount = 0
+	for _, club in CareerConfig.Clubs do
+		if club.open then
+			openCount += 1
+		end
+	end
+	local info = text({
+		Name = "Info",
+		Position = UDim2.fromOffset(2, 48),
+		Size = UDim2.fromOffset(SCREEN_SIZE.X, 30),
+		Text = string.format(TEXT.ClubsInfo, CareerConfig.StartOvr, openCount, #CareerConfig.Clubs),
+		TextSize = 15,
+		FontFace = FONT_BOLD,
+		TextWrapped = true,
+		Parent = c,
+	})
+	outline(info, 1.5)
+
+	self.cards = {}
+	for i, club in CareerConfig.Clubs do
+		local col, row = (i - 1) % 4, (i - 1) // 4
+		self.cards[club.id] = self:_buildCard(c, club, Vector2.new(col * (CARD_SIZE.X + CARD_GAP), CARD_TOP + row * (CARD_SIZE.Y + CARD_GAP)))
+	end
+
+	local footerY = CARD_TOP + 2 * CARD_SIZE.Y + CARD_GAP + 12
+	UiKit.button(c, { Name = "Back", Position = UDim2.fromOffset(0, footerY), Size = UDim2.fromOffset(170, 50) }, TEXT.Back, function()
+		self:_show("MAIN")
+	end, "secondary")
+	self.clubHint = text({
+		Name = "Hint",
+		Position = UDim2.fromOffset(186, footerY),
+		Size = UDim2.fromOffset(SCREEN_SIZE.X - 186 - 226, 44),
+		Text = TEXT.ClubPickHint,
+		TextSize = 15,
+		FontFace = FONT_BOLD,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = c,
+	})
+	outline(self.clubHint, 1.5)
+	self.clubNext = UiKit.button(c, { Name = "Next", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, footerY), Size = UDim2.fromOffset(210, 50) }, TEXT.Next, function()
+		if self.selectedClub then
+			self:_enterPlayer()
+		end
+	end, "primary")
+end
+
+function CareerMenu:_buildCard(parent: Instance, club, position: Vector2)
+	local button = create("TextButton", {
+		Name = club.id,
+		Position = UDim2.fromOffset(position.X, position.Y),
+		Size = UDim2.fromOffset(CARD_SIZE.X, CARD_SIZE.Y),
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = "",
+		Parent = parent,
+	})
+	local body, glows, border = UiKit.panel({ Name = "Card", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), Parent = button }, 12)
+	local pop = create("UIScale", { Parent = body })
+
+	UiKit.crest(body, { Name = "Crest", Position = UDim2.fromOffset(12, 12), Size = UDim2.fromOffset(52, 52) }, club)
+	local name = text({ Name = "ClubName", Position = UDim2.fromOffset(74, 10), Size = UDim2.fromOffset(CARD_SIZE.X - 84, 56), Text = club.name, TextSize = 18, TextWrapped = true, Parent = body })
+	outline(name, 1.5)
+	UiKit.stars(body, { Name = "Stars", Position = UDim2.fromOffset(12, 74) }, club.stars, 20)
+	UiKit.chip(body, { Name = "Ovr", Position = UDim2.fromOffset(12, 104) }, string.format(TEXT.Ovr, club.ovr), LILAC)
+
+	local lock = nil
+	if not club.open then
+		lock = frame({ Name = "Locked", Size = UDim2.fromScale(1, 1), BackgroundColor3 = INK, BackgroundTransparency = 0.42, ZIndex = 4, Parent = body })
+		corner(lock, 12)
+	end
+	local tag = frame({
+		Name = "Tag",
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, -10, 1, -10),
+		Size = UDim2.fromOffset(0, 26),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = if club.open then LIME else NAVY,
+		ZIndex = 6,
+		Parent = body,
+	})
+	corner(tag, 7)
+	stroke(tag, if club.open then INK else LILAC, 2)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = tag })
+	local tagText = text({
+		Size = UDim2.fromScale(0, 1),
+		AutomaticSize = Enum.AutomaticSize.X,
+		Text = if club.open then TEXT.ClubOpen else string.format(TEXT.ClubLocked, club.unlockOvr or 99),
+		TextSize = 13,
+		TextColor3 = if club.open then INK else LILAC,
+		Parent = tag,
+	})
+
+	button.Activated:Connect(function()
+		if club.open then
+			self.selectedClub = club
+			self:_refreshCards()
+			UiKit.pop(pop, 0.92)
+		else
+			self.clubHint.Text = string.format(TEXT.ClubLockedHint, club.name, club.unlockOvr or 99)
+			self.clubHint.TextColor3 = RED_LIGHT
+			body.Rotation = 4
+			TweenService:Create(body, TweenInfo.new(0.45, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out), { Rotation = 0 }):Play()
+		end
+	end)
+	return { club = club, glows = glows, border = border, tag = tag, tagText = tagText }
+end
+
+function CareerMenu:_refreshCards()
+	local selected = self.selectedClub
+	for _, card in self.cards do
+		local picked = card.club == selected
+		for _, glow in card.glows do
+			glow.Color = if picked then GOLD else GLOW
+			glow.Enabled = card.club.open
+		end
+		card.border.Color = if picked then GOLD else VIOLET
+		card.border.Thickness = if picked then 3 else 2
+		if card.club.open then
+			card.tagText.Text = if picked then TEXT.ClubPicked else TEXT.ClubOpen
+			card.tag.BackgroundColor3 = if picked then GOLD else LIME
+		end
+	end
+	self.clubNext:setEnabled(selected ~= nil)
+	self.clubHint.TextColor3 = CREAM
+	self.clubHint.Text = if selected then string.format(TEXT.ClubChosenHint, selected.name) else TEXT.ClubPickHint
+	if selected then
+		self.clubNext:playShine()
+	end
+end
+
+---------------------------------------------------------------- player creation
+
+function CareerMenu:_buildPlayer()
+	local screen = self:_screen("PLAYER", SCREEN_SIZE)
+	local c = screen.content
+	local hint = UiKit.chip(c, { Name = "PreviewHint", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0) }, TEXT.PreviewHint, GLOW)
+	hint.Size = UDim2.fromOffset(0, 32)
+
+	-- Form
+	local form = UiKit.panel({ Name = "Form", Size = UDim2.fromOffset(400, SCREEN_SIZE.Y), Parent = c }, 16)
+	self.form = form
+	UiKit.slashes(form, UDim2.new(1, -66, 0, 14), 22, GLOW)
+	UiKit.bigText({ Name = "Title", Text = TEXT.PlayerTitle, TextSize = 30, Position = UDim2.fromOffset(20, 12), Size = UDim2.fromOffset(300, 38), Parent = form }, 3, Vector2.new(2, 3))
+	self.formCrestHolder = frame({ Name = "Club", Position = UDim2.fromOffset(20, 56), Size = UDim2.fromOffset(360, 32), BackgroundTransparency = 1, Parent = form })
+
+	local function label(y: number, value: string)
+		local l = text({ Position = UDim2.fromOffset(20, y), Size = UDim2.fromOffset(360, 18), Text = value, TextSize = 14, FontFace = FONT_BOLD, TextColor3 = LILAC, Parent = form })
+		outline(l, 1)
+	end
+	label(96, TEXT.FirstName)
+	self.firstBox = UiKit.textBox(form, { Name = "FirstName", Position = UDim2.fromOffset(20, 116), Size = UDim2.fromOffset(360, 42) }, TEXT.FirstPlaceholder)
+	label(166, TEXT.LastName)
+	self.lastBox = UiKit.textBox(form, { Name = "LastName", Position = UDim2.fromOffset(20, 186), Size = UDim2.fromOffset(360, 42) }, TEXT.LastPlaceholder)
+	label(236, TEXT.Number)
+
+	UiKit.button(form, { Name = "Minus", Position = UDim2.fromOffset(20, 256), Size = UDim2.fromOffset(46, 46), TextSize = 26 }, "−", function()
+		self:_setNumber(((self.number or CareerConfig.Number.Default) - 2) % CareerConfig.Number.Max + 1)
+	end, "secondary")
+	self.numberBox = UiKit.textBox(form, { Name = "Number", Position = UDim2.fromOffset(74, 256), Size = UDim2.fromOffset(78, 42), TextSize = 24, TextXAlignment = Enum.TextXAlignment.Center }, "10")
+	UiKit.button(form, { Name = "Plus", Position = UDim2.fromOffset(160, 256), Size = UDim2.fromOffset(46, 46), TextSize = 26 }, "+", function()
+		self:_setNumber((self.number or CareerConfig.Number.Default) % CareerConfig.Number.Max + 1)
+	end, "secondary")
+
+	self.picks = {}
+	for i, value in CareerConfig.Number.Picks do
+		local pick = create("TextButton", {
+			Name = "Pick" .. value,
+			Position = UDim2.fromOffset(20 + (i - 1) * 61, 310),
+			Size = UDim2.fromOffset(52, 32),
+			BackgroundColor3 = NAVY,
+			AutoButtonColor = false,
+			Text = tostring(value),
+			TextSize = 17,
+			FontFace = UiKit.FONT_HEAVY,
+			TextColor3 = CREAM,
+			BorderSizePixel = 0,
+			Parent = form,
+		})
+		corner(pick, 8)
+		self.picks[value] = stroke(pick, VIOLET, 2)
+		pick.Activated:Connect(function()
+			self:_setNumber(value)
+		end)
+	end
+
+	self.formError = text({ Name = "Error", Position = UDim2.fromOffset(20, 348), Size = UDim2.fromOffset(360, 20), Text = "", TextSize = 14, FontFace = FONT_BOLD, TextColor3 = RED_LIGHT, TextWrapped = true, Parent = form })
+	outline(self.formError, 1)
+
+	UiKit.button(form, { Name = "Back", Position = UDim2.fromOffset(20, 376), Size = UDim2.fromOffset(124, 52) }, TEXT.Back, function()
+		if not self.busy then
+			self:_show("CLUBS")
+		end
+	end, "secondary")
+	self.confirmButton = UiKit.button(form, { Name = "Confirm", Position = UDim2.fromOffset(156, 376), Size = UDim2.fromOffset(224, 52) }, TEXT.Confirm, function()
+		self:_submit()
+	end, "primary")
+
+	self.firstBox:GetPropertyChangedSignal("Text"):Connect(function()
+		limitLength(self.firstBox, CareerConfig.Name.MaxLength)
+		self.formError.Text = ""
+	end)
+	self.lastBox:GetPropertyChangedSignal("Text"):Connect(function()
+		limitLength(self.lastBox, CareerConfig.Name.MaxLength)
+		self.formError.Text = ""
+		self.preview:setIdentity(self.lastBox.Text, self.number)
+	end)
+	self.numberBox:GetPropertyChangedSignal("Text"):Connect(function()
+		local digits = string.sub(string.gsub(self.numberBox.Text, "%D", ""), 1, 2)
+		if digits ~= self.numberBox.Text then
+			self.numberBox.Text = digits -- fires this handler again with the clean text
+			return
+		end
+		local value = tonumber(digits)
+		self.number = if value and CareerConfig.validNumber(value) then value else nil
+		self:_refreshPicks()
+		self.formError.Text = ""
+		self.preview:setIdentity(self.lastBox.Text, self.number)
+	end)
+	self.firstBox.FocusLost:Connect(function(enterPressed)
+		if enterPressed then
+			self.lastBox:CaptureFocus()
+		end
+	end)
+
+	self:_buildSigned(c)
+end
+
+-- Same spot as the form: replaces it once the server has accepted the player.
+function CareerMenu:_buildSigned(parent: Instance)
+	local signed = UiKit.panel({ Name = "Signed", Size = UDim2.fromOffset(400, SCREEN_SIZE.Y), Visible = false, Parent = parent }, 16, GOLD)
+	self.signed = signed
+	self.signedPop = create("UIScale", { Parent = signed })
+	UiKit.slashes(signed, UDim2.fromOffset(16, 12), 22, GLOW)
+	UiKit.slashes(signed, UDim2.new(1, -66, 0, 12), 22, GLOW)
+	local title = UiKit.bigText({ Name = "Title", Text = TEXT.SignedTitle, TextSize = 40, TextColor3 = WHITE, TextXAlignment = Enum.TextXAlignment.Center, Position = UDim2.fromOffset(20, 34), Size = UDim2.fromOffset(360, 96), Parent = signed }, 4, Vector2.new(0, 4), 40)
+	create("UIGradient", { Rotation = 90, Color = ColorSequence.new(CREAM, GOLD), Parent = title })
+	self.signedCrestHolder = frame({ Name = "CrestHolder", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 140), Size = UDim2.fromOffset(64, 64), BackgroundTransparency = 1, Parent = signed })
+	self.signedClub = text({ Name = "Club", Position = UDim2.fromOffset(20, 210), Size = UDim2.fromOffset(360, 28), Text = "", TextSize = 22, TextXAlignment = Enum.TextXAlignment.Center, Parent = signed })
+	outline(self.signedClub, 2)
+	self.signedPlayer = text({ Name = "Player", Position = UDim2.fromOffset(20, 240), Size = UDim2.fromOffset(360, 24), Text = "", TextSize = 18, FontFace = FONT_BOLD, TextXAlignment = Enum.TextXAlignment.Center, Parent = signed })
+	outline(self.signedPlayer, 1.5)
+
+	local chips = frame({ Name = "Chips", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 274), Size = UDim2.fromOffset(360, 28), BackgroundTransparency = 1, Parent = signed })
+	create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Center, Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = chips })
+	local _, ovr = UiKit.chip(chips, { LayoutOrder = 1 }, "", LIME)
+	local _, level = UiKit.chip(chips, { LayoutOrder = 2 }, "", GOLD)
+	self.signedOvr, self.signedLevel = ovr, level
+
+	local info = text({ Name = "Info", Position = UDim2.fromOffset(24, 312), Size = UDim2.fromOffset(352, 44), Text = TEXT.SignedInfo, TextSize = 15, FontFace = FONT_MEDIUM, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, Parent = signed })
+	outline(info, 1)
+	self.trainingButton = UiKit.button(signed, { Name = "ToTraining", Position = UDim2.fromOffset(20, 376), Size = UDim2.fromOffset(360, 52) }, TEXT.ToTraining, function()
+		self:_startTraining(self.trainingButton)
+	end, "primary")
+end
+
+function CareerMenu:_setNumber(value: number)
+	self.numberBox.Text = tostring(value) -- the Text handler updates the preview
+end
+
+function CareerMenu:_refreshPicks()
+	for value, pickStroke in self.picks do
+		local on = value == self.number
+		pickStroke.Color = if on then GOLD else VIOLET
+		pickStroke.Thickness = if on then 3 else 2
+	end
+end
+
+function CareerMenu:_enterPlayer()
+	local club = self.selectedClub
+	for _, child in self.formCrestHolder:GetChildren() do
+		child:Destroy()
+	end
+	UiKit.crest(self.formCrestHolder, { Size = UDim2.fromOffset(32, 32) }, club)
+	local clubName = text({ Position = UDim2.fromOffset(42, 0), Size = UDim2.new(1, -42, 1, 0), Text = club.name, TextSize = 18, FontFace = FONT_BOLD, Parent = self.formCrestHolder })
+	outline(clubName, 1.5)
+
+	self.form.Visible = true
+	self.signed.Visible = false
+	self.formError.Text = ""
+	self.confirmButton:setText(TEXT.Confirm)
+	self.confirmButton:setEnabled(true)
+	self:_show("PLAYER")
+	self.preview:show(club, self.lastBox.Text, nil)
+	if self.numberBox.Text == "" then
+		self:_setNumber(CareerConfig.Number.Default)
+	else
+		self.preview:setIdentity(self.lastBox.Text, self.number, true)
+	end
+	self.confirmButton:playShine()
+end
+
+function CareerMenu:_submit()
+	if self.busy then
+		return
+	end
+	local _, firstError = CareerConfig.cleanName(self.firstBox.Text)
+	local _, lastError = CareerConfig.cleanName(self.lastBox.Text)
+	local problem = if firstError then "FIRST_" .. firstError elseif lastError then "LAST_" .. lastError elseif not self.number then "BAD_NUMBER" else nil
+	if problem then
+		self.formError.Text = errorText(problem)
+		return
+	end
+
+	self.busy = true
+	self.confirmButton:setText(TEXT.Saving)
+	self.confirmButton:setEnabled(false)
+	task.spawn(function()
+		local result = self:_request("CREATE", {
+			clubId = self.selectedClub.id,
+			firstName = self.firstBox.Text,
+			lastName = self.lastBox.Text,
+			number = self.number,
+			replace = self.replace,
+		})
+		self.busy = false
+		self.confirmButton:setText(TEXT.Confirm)
+		self.confirmButton:setEnabled(true)
+		if not result.ok then
+			self.formError.Text = errorText(result.error)
+			return
+		end
+		self.career = result.career
+		self.replace = false
+		self:_refreshMain()
+		self:_showSigned()
+	end)
+end
+
+function CareerMenu:_showSigned()
+	local career = self.career
+	local club = CareerConfig.club(career.clubId)
+	for _, child in self.signedCrestHolder:GetChildren() do
+		child:Destroy()
+	end
+	UiKit.crest(self.signedCrestHolder, { Size = UDim2.fromOffset(64, 64) }, club)
+	self.signedClub.Text = club.name
+	self.signedPlayer.Text = string.format(TEXT.SignedPlayer, career.firstName, career.lastName, career.number)
+	self.signedOvr.Text = string.format(TEXT.Ovr, career.ovr)
+	self.signedLevel.Text = string.format(TEXT.Level, career.level)
+	self.form.Visible = false
+	self.signed.Visible = true
+	UiKit.pop(self.signedPop, 0.6)
+	self.trainingButton:setEnabled(true)
+	self.trainingButton:playShine()
+	-- The shirt shows the name exactly as the server saved it.
+	self.preview:setIdentity(career.lastName, career.number, true)
+	self.preview:celebrate()
+end
+
+function CareerMenu:_startTraining(button)
+	if self.busy then
+		return
+	end
+	self.busy = true
+	button:setEnabled(false)
+	task.spawn(function()
+		local result = self:_request("START_TRAINING")
+		self.busy = false
+		button:setEnabled(true)
+		if result.ok then
+			self:close()
+			if self.onStartTraining then
+				self.onStartTraining(self.career)
+			end
+		elseif result.error == "TRAINING_DONE" then
+			self.career.training = "DONE"
+			self:_showNext(false)
+		else
+			self.status.Text = errorText(result.error)
+			self:_show("MAIN")
+		end
+	end)
+end
+
+---------------------------------------------------------------- next match (after training)
+
+function CareerMenu:_buildNextMatch()
+	local screen = self:_screen("NEXT", SCREEN_SIZE)
+	local body = UiKit.panel({ Name = "Card", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(540, 384), Parent = screen.content }, 16, GOLD)
+	UiKit.slashes(body, UDim2.fromOffset(16, 12), 24, GLOW)
+	UiKit.slashes(body, UDim2.new(1, -66, 0, 12), 24, GLOW)
+	local title, titleShadow = UiKit.bigText({ Name = "Title", Text = TEXT.TrainedTitle, TextSize = 40, TextColor3 = WHITE, TextXAlignment = Enum.TextXAlignment.Center, Position = UDim2.fromOffset(20, 22), Size = UDim2.new(1, -40, 0, 96), Parent = body }, 4, Vector2.new(0, 4), 40)
+	create("UIGradient", { Rotation = 90, Color = ColorSequence.new(CREAM, GOLD), Parent = title })
+	self.nextTitle = title
+	self.nextTitleShadow = titleShadow
+	self.nextPlayer = text({ Name = "Player", Position = UDim2.fromOffset(20, 124), Size = UDim2.new(1, -40, 0, 22), Text = "", TextSize = 16, FontFace = FONT_BOLD, TextXAlignment = Enum.TextXAlignment.Center, TextTruncate = Enum.TextTruncate.AtEnd, Parent = body })
+	outline(self.nextPlayer, 1.5)
+
+	local fixture = frame({ Name = "Fixture", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 156), Size = UDim2.fromOffset(480, 128), BackgroundColor3 = NAVY, Parent = body })
+	corner(fixture, 12)
+	stroke(fixture, VIOLET, 2)
+	local heading = text({ Position = UDim2.fromOffset(0, 8), Size = UDim2.new(1, 0, 0, 20), Text = TEXT.FirstMatch, TextSize = 15, TextColor3 = GOLD, TextXAlignment = Enum.TextXAlignment.Center, Parent = fixture })
+	outline(heading, 1.5)
+	local versus = UiKit.bigText({ Name = "Vs", Text = "VS", TextSize = 34, TextColor3 = RED, TextXAlignment = Enum.TextXAlignment.Center, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 46), Size = UDim2.fromOffset(80, 40), Parent = fixture }, 3, Vector2.new(2, 3))
+	versus.ZIndex = 2
+	self.fixtureSides = {}
+	for i, x in { 0.25, 0.75 } do
+		local side = frame({ Name = "Side" .. i, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(x, 0, 0, 32), Size = UDim2.fromOffset(200, 90), BackgroundTransparency = 1, Parent = fixture })
+		local crestHolder = frame({ Name = "CrestHolder", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromScale(0.5, 0), Size = UDim2.fromOffset(56, 56), BackgroundTransparency = 1, Parent = side })
+		local name = text({ Name = "ClubName", Position = UDim2.fromOffset(0, 62), Size = UDim2.new(1, 0, 0, 22), Text = "", TextSize = 16, TextXAlignment = Enum.TextXAlignment.Center, Parent = side })
+		outline(name, 1.5)
+		self.fixtureSides[i] = { crest = crestHolder, name = name }
+	end
+
+	local soon = text({ Name = "Soon", Position = UDim2.fromOffset(20, 292), Size = UDim2.new(1, -40, 0, 20), Text = TEXT.Soon, TextSize = 14, FontFace = FONT_BOLD, TextColor3 = LILAC, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
+	outline(soon, 1)
+	self.menuButton = UiKit.button(body, { Name = "ToMenu", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 322), Size = UDim2.fromOffset(300, 52) }, TEXT.ToMenu, function()
+		self:_show("MAIN")
+	end, "primary")
+end
+
+function CareerMenu:_showNext(justTrained: boolean)
+	local career = self.career
+	local club = career and CareerConfig.club(career.clubId)
+	if not (career and club) then
+		self:_show("MAIN")
+		return
+	end
+	local title = if justTrained then TEXT.TrainedTitle else TEXT.CareerTitle
+	self.nextTitle.Text = title
+	if self.nextTitleShadow then
+		self.nextTitleShadow.Text = title
+	end
+	self.nextPlayer.Text = string.format(TEXT.CareerLine, career.firstName, career.lastName, career.number, club.name)
+	for i, side in { club, CareerConfig.firstOpponent(club) } do
+		local slot = self.fixtureSides[i]
+		for _, child in slot.crest:GetChildren() do
+			child:Destroy()
+		end
+		UiKit.crest(slot.crest, { Size = UDim2.fromOffset(56, 56) }, side)
+		slot.name.Text = side.name
+	end
+	self:_show("NEXT")
+	self.menuButton:playShine()
+end
+
+---------------------------------------------------------------- settings and confirmations
+
+function CareerMenu:_buildOverlay()
+	local overlay = frame({ Name = "Overlay", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, ZIndex = 30, Parent = self.gui })
+	self.overlay = overlay
+	self.overlayDim = frame({ Name = "Dim", Position = UDim2.fromOffset(-200, -120), Size = UDim2.new(1, 400, 1, 240), BackgroundColor3 = INK, BackgroundTransparency = 0.45, Parent = overlay })
+
+	local function modal(name: string, size: Vector2)
+		local holder = frame({ Name = name, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(size.X, size.Y), BackgroundTransparency = 1, Visible = false, Parent = overlay })
+		self.scaler:add(holder)
+		local body = UiKit.panel({ Name = "Body", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), Parent = holder }, 16)
+		return holder, body, create("UIScale", { Parent = body })
+	end
+
+	-- Settings
+	local settings, sBody, sPop = modal("Settings", Vector2.new(460, 330))
+	self.settingsModal, self.settingsPop = settings, sPop
+	UiKit.bigText({ Name = "Title", Text = TEXT.SettingsTitle, TextSize = 32, TextXAlignment = Enum.TextXAlignment.Center, Position = UDim2.fromOffset(20, 16), Size = UDim2.new(1, -40, 0, 40), Parent = sBody }, 3, Vector2.new(2, 3))
+	local function row(y: number, label: string, key: string)
+		local l = text({ Position = UDim2.fromOffset(24, y), Size = UDim2.fromOffset(300, 34), Text = label, TextSize = 17, FontFace = FONT_BOLD, Parent = sBody })
+		outline(l, 1.5)
+		return UiKit.toggle(sBody, { Name = key, Position = UDim2.new(1, -100, 0, y) }, self.settings[key], function(value)
+			self:_changeSetting(key, value)
+		end)
+	end
+	self.toggles = { shake = row(80, TEXT.Shake, "shake"), bigUi = row(128, TEXT.BigUi, "bigUi") }
+	self.deleteButton = UiKit.button(sBody, { Name = "Delete", Position = UDim2.fromOffset(24, 188), Size = UDim2.fromOffset(412, 48) }, TEXT.DeleteCareer, function()
+		self:_askDelete()
+	end, "danger")
+	self.deleteButton.button.Visible = false
+	UiKit.button(sBody, { Name = "Done", Position = UDim2.fromOffset(24, 260), Size = UDim2.fromOffset(412, 52) }, TEXT.Done, function()
+		self:_closeOverlay()
+	end, "primary")
+
+	-- Yes / no
+	local confirm, cBody, cPop = modal("Confirm", Vector2.new(480, 256))
+	self.confirmModal, self.confirmPop = confirm, cPop
+	self.confirmTitle, self.confirmTitleShadow = UiKit.bigText({ Name = "Title", Text = "", TextSize = 30, TextXAlignment = Enum.TextXAlignment.Center, Position = UDim2.fromOffset(20, 18), Size = UDim2.new(1, -40, 0, 38), Parent = cBody }, 3, Vector2.new(2, 3))
+	self.confirmBody = text({ Name = "Body", Position = UDim2.fromOffset(24, 70), Size = UDim2.new(1, -48, 0, 90), Text = "", TextSize = 17, FontFace = FONT_MEDIUM, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, Parent = cBody })
+	outline(self.confirmBody, 1)
+	UiKit.button(cBody, { Name = "Cancel", Position = UDim2.fromOffset(24, 184), Size = UDim2.fromOffset(204, 52) }, TEXT.Cancel, function()
+		self:_closeOverlay()
+	end, "secondary")
+	local function yes()
+		local action = self.confirmAction
+		self:_closeOverlay()
+		if action then
+			action()
+		end
+	end
+	self.confirmYes = UiKit.button(cBody, { Name = "Yes", Position = UDim2.fromOffset(252, 184), Size = UDim2.fromOffset(204, 52) }, "", yes, "primary")
+	self.confirmDanger = UiKit.button(cBody, { Name = "YesDanger", Position = UDim2.fromOffset(252, 184), Size = UDim2.fromOffset(204, 52) }, "", yes, "danger")
+end
+
+function CareerMenu:_openOverlay(modal: Frame, pop: UIScale)
+	self.overlay.Visible = true
+	self.settingsModal.Visible = modal == self.settingsModal
+	self.confirmModal.Visible = modal == self.confirmModal
+	UiKit.pop(pop, 0.6)
+end
+
+function CareerMenu:_closeOverlay()
+	self.overlay.Visible = false
+	self.confirmAction = nil
+end
+
+function CareerMenu:_openSettings()
+	for key, toggle in self.toggles do
+		toggle:set(self.settings[key])
+	end
+	self.deleteButton.button.Visible = self.career ~= nil
+	self:_openOverlay(self.settingsModal, self.settingsPop)
+end
+
+function CareerMenu:_confirm(title: string, body: string, yesText: string, danger: boolean, action: () -> ())
+	self.confirmTitle.Text = title
+	if self.confirmTitleShadow then
+		self.confirmTitleShadow.Text = title
+	end
+	self.confirmBody.Text = body
+	self.confirmYes.button.Visible = not danger
+	self.confirmDanger.button.Visible = danger
+	local button = if danger then self.confirmDanger else self.confirmYes
+	button:setText(yesText)
+	self.confirmAction = action
+	self:_openOverlay(self.confirmModal, self.confirmPop)
+end
+
+function CareerMenu:_askDelete()
+	local club = self.career and CareerConfig.club(self.career.clubId)
+	if not club then
+		return
+	end
+	self:_confirm(TEXT.DeleteTitle, string.format(TEXT.DeleteBody, club.name), TEXT.DeleteYes, true, function()
+		task.spawn(function()
+			local result = self:_request("DELETE")
+			if result.ok then
+				self.career = nil
+			else
+				self.status.Text = errorText(result.error)
+			end
+			self:_refreshMain()
+		end)
+	end)
+end
+
+function CareerMenu:_applySettings(settings)
+	self.settings = { shake = settings.shake ~= false, bigUi = settings.bigUi == true }
+	self.scaler:setBoost(if self.settings.bigUi then 1.15 else 1)
+	if self.onSettingsChanged then
+		self.onSettingsChanged(self.settings)
+	end
+end
+
+function CareerMenu:_changeSetting(key: string, value: boolean)
+	local settings = table.clone(self.settings)
+	settings[key] = value
+	self:_applySettings(settings)
+	-- Applied at once, saved once the toggling stops (the server rate-limits requests).
+	self.settingsToken = (self.settingsToken or 0) + 1
+	local token = self.settingsToken
+	task.delay(0.6, function()
+		if token ~= self.settingsToken then
+			return
+		end
+		local result = self:_request("SETTINGS", self.settings)
+		if not result.ok then
+			warn("[CareerMenu] settings not saved:", result.error)
+		end
+	end)
+end
+
+---------------------------------------------------------------- screens, camera, open / close
+
+function CareerMenu:_show(name: string)
+	for key, screen in self.screens do
+		screen.root.Visible = key == name
+	end
+	local screen = self.screens[name]
+	UiKit.pop(screen.pop, 0.94)
+	self.current = name
+	self.cameraMode = if name == "CLUBS" then "CLUBS" elseif name == "PLAYER" then "PLAYER" else "MENU"
+	self.shade.Visible = name ~= "NEXT"
+	if name ~= "PLAYER" then
+		self.preview:hide()
+	end
+	if name == "MAIN" then
+		self:_refreshMain()
+	end
+end
+
+-- Back from the training. justTrained: the pass task was just completed.
+function CareerMenu:open(justTrained: boolean?)
+	self.active = true
+	self.gui.Enabled = true
+	self.blur.Enabled = true
+	self.camCFrame = workspace.CurrentCamera.CFrame -- glide from wherever the training left it
+	self.camFov = workspace.CurrentCamera.FieldOfView
+	if justTrained and self.career then
+		self.career.training = "DONE" -- the server marked it when the task was completed
+		self:_showNext(true)
+	else
+		self:_show("MAIN")
+	end
+	task.spawn(function()
+		local result = self:_request("GET")
+		if result.ok then
+			self.career = result.career
+			if self.current == "MAIN" then
+				self:_refreshMain()
+			end
+		end
+	end)
+end
+
+function CareerMenu:close()
+	self.active = false
+	self.gui.Enabled = false
+	self.blur.Enabled = false
+	self.overlay.Visible = false
+	self.preview:hide()
+end
+
+function CareerMenu:isOpen(): boolean
+	return self.active
+end
+
+-- Per-frame while open: camera glide between framings, blur and the player preview.
+function CareerMenu:update(dt: number)
+	if not self.active then
+		return
+	end
+	self.clock += dt
+	self.preview:update(dt)
+
+	local target, fov
+	if self.cameraMode == "PLAYER" then
+		target, fov = PlayerPreview.cameraTarget()
+	else
+		local framing = if self.cameraMode == "CLUBS" then CLUBS_CAMERA else MENU_CAMERA
+		local t = self.clock
+		local sway = Vector3.new(math.sin(t * 0.13) * 6, math.sin(t * 0.09) * 1.2, 0)
+		target, fov = CFrame.lookAt(framing.from + sway, framing.to), framing.fov
+	end
+	local k = 1 - math.exp(-3 * dt)
+	self.camCFrame = self.camCFrame:Lerp(target, k)
+	self.camFov += (fov - self.camFov) * k
+	local camera = workspace.CurrentCamera
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.CFrame = self.camCFrame
+	camera.FieldOfView = self.camFov
+	self.blur.Size += ((BLUR[self.cameraMode] or 0) - self.blur.Size) * k
+end
+
+return CareerMenu
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="26">
           <Properties>
             <string name="Name">FigureAnimator</string>
             <string name="Source"><![CDATA[-- Procedural animation for the outfield players of the pass drill (FigureBuilder rigs).
@@ -5832,7 +7476,7 @@ return FigureAnimator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="24">
+        <Item class="ModuleScript" referent="27">
           <Properties>
             <string name="Name">ImageLoader</string>
             <string name="Source"><![CDATA[-- Turns the packed images in ReplicatedStorage.Shared.Images (made by tools/assets/build_images.py)
@@ -6040,7 +7684,7 @@ return ImageLoader
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="25">
+        <Item class="ModuleScript" referent="28">
           <Properties>
             <string name="Name">InputController</string>
             <string name="Source"><![CDATA[-- Turns mouse or touch into shot or pass input.
@@ -6265,7 +7909,7 @@ return InputController
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="26">
+        <Item class="ModuleScript" referent="29">
           <Properties>
             <string name="Name">KeeperAnimator</string>
             <string name="Source"><![CDATA[-- Procedural goalkeeper animation for the R15 rig (no animation assets needed).
@@ -6594,7 +8238,7 @@ return KeeperAnimator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="27">
+        <Item class="ModuleScript" referent="30">
           <Properties>
             <string name="Name">PassVisuals</string>
             <string name="Source"><![CDATA[-- 3D side of the pass drill: camera, the four players, ball, ground markers, the aiming line,
@@ -6775,6 +8419,13 @@ function PassVisuals.new()
 		})
 	end
 	return self
+end
+
+-- The passer and his teammates wear the player's club kit.
+function PassVisuals:setTeamKit(kit)
+	for _, animator in { self.passer, self.mates[1], self.mates[2] } do
+		FigureBuilder.applyKit(animator.model, kit)
+	end
 end
 
 -- Shows the drill (parents everything into the workspace) and moves the camera over.
@@ -7128,7 +8779,304 @@ return PassVisuals
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="28">
+        <Item class="ModuleScript" referent="31">
+          <Properties>
+            <string name="Name">PlayerPreview</string>
+            <string name="Source"><![CDATA[-- The player's footballer on the pitch during career creation: built in the chosen club's kit,
+-- he appears facing the camera (gold flash, sparkles), then turns round to show the surname and
+-- number on his back. Name or number changes turn him to the back again and pop the print.
+-- Everything here is local to this client; CareerMenu drives it and owns the camera.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
+local CareerConfig = require(Shared:WaitForChild("CareerConfig"))
+local FigureBuilder = require(Shared:WaitForChild("FigureBuilder"))
+local FigureAnimator = require(script.Parent:WaitForChild("FigureAnimator"))
+local UiKit = require(script.Parent:WaitForChild("UiKit"))
+
+local SCALE = ShotConfig.Goalkeeper.ModelScale -- same size as the training players
+-- He stands between the shot spot and the camera, the goal and the stand behind him. The camera
+-- is shifted left so he sits in the right half of the screen, next to the creation panel.
+local STAGE = Vector3.new(0, 0, 56)
+local CAMERA_OFFSET = Vector3.new(-4.6, 4.4, 17)
+local LOOK_OFFSET = Vector3.new(-4.6, 3.7, 0)
+local FOV = 40
+local FADE_IN = 0.55
+local FRONT_HOLD = 1.5 -- seconds facing the camera before the first turn
+local TURN_TIME = 0.9
+local PRINT_PIXELS = 60 -- SurfaceGui pixels per stud on the shirt
+
+local VERTICAL = CFrame.Angles(0, 0, math.pi / 2) -- cylinder parts are long along X
+
+local PlayerPreview = {}
+PlayerPreview.__index = PlayerPreview
+
+local function smooth(t: number): number
+	t = math.clamp(t, 0, 1)
+	return t * t * (3 - 2 * t)
+end
+
+local function facingFor(angle: number): Vector3
+	return Vector3.new(math.sin(angle), 0, math.cos(angle))
+end
+
+local FRONT_ANGLE = math.atan2(CAMERA_OFFSET.X, CAMERA_OFFSET.Z) -- facing the camera
+
+local function makePart(props: { [string]: any }): Part
+	props.Anchored = true
+	props.CanCollide = false
+	props.CanQuery = false
+	props.CanTouch = false
+	props.CastShadow = props.CastShadow or false
+	props.TopSurface = Enum.SurfaceType.Smooth
+	props.BottomSurface = Enum.SurfaceType.Smooth
+	return UiKit.create("Part", props)
+end
+
+function PlayerPreview.new()
+	local self = setmetatable({}, PlayerPreview)
+	self.folder = UiKit.create("Folder", { Name = "CareerPreview" })
+	self.visible = false
+	self.clock = 0
+	self.club = nil
+	self.animator = nil
+	self.angle = FRONT_ANGLE
+	self.turnFrom, self.turnTo, self.turnStart = FRONT_ANGLE, FRONT_ANGLE, -math.huge
+	self.facingBack = false
+	self.introAt = nil :: number?
+
+	-- Showcase lighting: warm key light from the camera side, violet rim from behind.
+	local key = makePart({ Name = "KeyLight", Size = Vector3.one * 0.2, Transparency = 1, Position = STAGE + Vector3.new(-3, 7, 8), Parent = self.folder })
+	UiKit.create("PointLight", { Color = UiKit.rgb(255, 232, 200), Brightness = 1.6, Range = 16, Shadows = false, Parent = key })
+	local rim = makePart({ Name = "RimLight", Size = Vector3.one * 0.2, Transparency = 1, Position = STAGE + Vector3.new(2.5, 7, -4), Parent = self.folder })
+	UiKit.create("PointLight", { Color = UiKit.GLOW, Brightness = 3, Range = 12, Shadows = false, Parent = rim })
+
+	-- Podium ring under his feet and the flash ring that bursts out when he appears.
+	self.podium = makePart({
+		Name = "Podium",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.06, 6.4, 6.4),
+		CFrame = CFrame.new(STAGE + Vector3.new(0, 0.04, 0)) * VERTICAL,
+		Color = UiKit.GLOW,
+		Material = Enum.Material.Neon,
+		Transparency = 0.55,
+		Parent = self.folder,
+	})
+	self.flash = makePart({
+		Name = "Flash",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.05, 2, 2),
+		CFrame = CFrame.new(STAGE + Vector3.new(0, 0.07, 0)) * VERTICAL,
+		Color = UiKit.GOLD,
+		Material = Enum.Material.Neon,
+		Transparency = 1,
+		Parent = self.folder,
+	})
+	local sparkleCarrier = makePart({ Name = "Sparkles", Size = Vector3.one * 0.2, Transparency = 1, Position = STAGE + Vector3.new(0, 3.6, 0), Parent = self.folder })
+	self.sparkles = UiKit.create("ParticleEmitter", {
+		Enabled = false,
+		Color = ColorSequence.new(UiKit.GOLD_LIGHT, UiKit.GOLD),
+		LightEmission = 1,
+		Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.45), NumberSequenceKeypoint.new(1, 0) }),
+		Transparency = NumberSequence.new(0.1),
+		Lifetime = NumberRange.new(0.6, 1.1),
+		Speed = NumberRange.new(7, 14),
+		SpreadAngle = Vector2.new(180, 180),
+		Acceleration = Vector3.new(0, -10, 0),
+		Drag = 2,
+		Parent = sparkleCarrier,
+	})
+	return self
+end
+
+-- Where the camera looks at him from.
+function PlayerPreview.cameraTarget(): (CFrame, number)
+	return CFrame.lookAt(STAGE + CAMERA_OFFSET, STAGE + LOOK_OFFSET), FOV
+end
+
+-- Shirt print: surname and big number on the back, the club badge on the chest.
+function PlayerPreview:_dressShirt(model: Model, club)
+	local torso = model:FindFirstChild("UpperTorso") :: BasePart
+	local back = UiKit.create("SurfaceGui", {
+		Name = "BackPrint",
+		Face = Enum.NormalId.Back,
+		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
+		PixelsPerStud = PRINT_PIXELS,
+		LightInfluence = 1,
+		Parent = torso,
+	})
+	self.backName = UiKit.text({
+		Name = "Surname",
+		Position = UDim2.fromScale(0.06, 0.07),
+		Size = UDim2.fromScale(0.88, 0.22),
+		Text = "",
+		FontFace = UiKit.FONT_PRINT,
+		TextColor3 = club.print,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = back,
+	})
+	UiKit.sizeLimit(self.backName, 40)
+	local numberHolder = UiKit.frame({ Name = "NumberHolder", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.62), Size = UDim2.fromScale(0.8, 0.64), BackgroundTransparency = 1, Parent = back })
+	self.numberPop = UiKit.create("UIScale", { Parent = numberHolder })
+	self.backNumber = UiKit.text({
+		Name = "Number",
+		Size = UDim2.fromScale(1, 1),
+		Text = "",
+		FontFace = UiKit.FONT_PRINT,
+		TextColor3 = club.print,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextScaled = true,
+		Parent = numberHolder,
+	})
+
+	local front = UiKit.create("SurfaceGui", {
+		Name = "FrontPrint",
+		Face = Enum.NormalId.Front,
+		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
+		PixelsPerStud = PRINT_PIXELS,
+		LightInfluence = 1,
+		Parent = torso,
+	})
+	UiKit.crest(front, { Name = "Badge", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.72, 0.3), Size = UDim2.fromOffset(34, 34) }, club)
+	self.prints = { back, front }
+end
+
+function PlayerPreview:_build(club)
+	if self.animator then
+		self.animator.model:Destroy()
+	end
+	local model, rootHeight = FigureBuilder.build("CareerPlayer", CareerConfig.kit(club), SCALE, "head")
+	self.fadeParts = {}
+	for _, d in model:GetDescendants() do
+		if d:IsA("BasePart") then
+			d.CastShadow = true
+			table.insert(self.fadeParts, d)
+		elseif d:IsA("Decal") then
+			table.insert(self.fadeParts, d)
+		end
+	end
+	self:_dressShirt(model, club)
+	model.Parent = self.folder
+	self.animator = FigureAnimator.new(model, rootHeight, SCALE)
+	self.club = club
+end
+
+function PlayerPreview:_setFade(amount: number)
+	for _, part in self.fadeParts do
+		part.LocalTransparencyModifier = amount
+	end
+	for _, gui in self.prints do
+		gui.Enabled = amount < 0.5
+	end
+end
+
+function PlayerPreview:_turn(delta: number)
+	self.turnFrom = self.angle
+	self.turnTo += delta
+	self.turnStart = self.clock
+end
+
+function PlayerPreview:showBack()
+	if not self.facingBack then
+		self.facingBack = true
+		self:_turn(math.pi)
+	end
+end
+
+function PlayerPreview:showFront()
+	if self.facingBack then
+		self.facingBack = false
+		self:_turn(math.pi)
+	end
+end
+
+-- Appears in the club's kit facing the camera, then turns to show the back.
+function PlayerPreview:show(club, lastName: string, number: number?)
+	if club ~= self.club then
+		self:_build(club)
+	end
+	self.folder.Parent = workspace
+	self.visible = true
+	self.angle, self.turnFrom, self.turnTo, self.turnStart = FRONT_ANGLE, FRONT_ANGLE, FRONT_ANGLE, -math.huge
+	self.facingBack = false
+	self.animator:place(STAGE, facingFor(FRONT_ANGLE))
+	self.animator:play(nil)
+	self.appearStart = self.clock
+	self.introAt = self.clock + FRONT_HOLD
+	self:_setFade(1)
+	self:setIdentity(lastName, number, true)
+
+	self.flash.Size = Vector3.new(0.05, 2, 2)
+	self.flash.Transparency = 0.1
+	TweenService:Create(self.flash, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = Vector3.new(0.05, 15, 15), Transparency = 1 }):Play()
+	task.delay(0.12, function()
+		if self.visible then
+			self.sparkles:Emit(36)
+		end
+	end)
+end
+
+-- Updates the shirt print. Unless `quiet`, he turns to show the back and the number pops.
+function PlayerPreview:setIdentity(lastName: string, number: number?, quiet: boolean?)
+	if not self.animator then
+		return
+	end
+	local surname = CareerConfig.upper(lastName)
+	local digits = if number then tostring(number) else ""
+	local changed = self.backName.Text ~= surname or self.backNumber.Text ~= digits
+	self.backName.Text = surname
+	self.backNumber.Text = digits
+	if quiet or not changed or self.introAt then
+		return
+	end
+	self:showBack()
+	self.numberPop.Scale = 1.3
+	TweenService:Create(self.numberPop, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+end
+
+-- Contract signed: turns to the camera and celebrates.
+function PlayerPreview:celebrate()
+	self.introAt = nil
+	self:showFront()
+	if self.animator then
+		self.animator:play("CHEER")
+	end
+	self.sparkles:Emit(24)
+end
+
+function PlayerPreview:hide()
+	self.visible = false
+	self.folder.Parent = nil
+	if self.animator then
+		self.animator:play(nil)
+	end
+end
+
+function PlayerPreview:update(dt: number)
+	if not (self.visible and self.animator) then
+		return
+	end
+	self.clock += dt
+	self:_setFade(1 - smooth((self.clock - self.appearStart) / FADE_IN))
+	if self.introAt and self.clock >= self.introAt then
+		self.introAt = nil
+		self:showBack()
+	end
+	self.angle = self.turnFrom + (self.turnTo - self.turnFrom) * smooth((self.clock - self.turnStart) / TURN_TIME)
+	self.animator:place(STAGE, facingFor(self.angle))
+	self.animator:update(dt)
+	local pulse = 0.5 + 0.5 * math.sin(self.clock * 2.4)
+	self.podium.Transparency = 0.5 + 0.2 * pulse
+end
+
+return PlayerPreview
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="32">
           <Properties>
             <string name="Name">ShotHud</string>
             <string name="Source"><![CDATA[-- Screen UI for the shot drill in the purple "pixel UI kit" style: logo + stage, goals counter,
@@ -7153,7 +9101,7 @@ local TEXT = {
 	LogoBottom = "STAR",
 	Mode = 'ОБУЧЕНИЕ  •  <font color="#FFBF1F">УДАРЫ</font>',
 	ModePass = 'ОБУЧЕНИЕ  •  <font color="#FFBF1F">ПАС</font>',
-	Stage = "Этап %d из 3",
+	Stage = "Этап %d из 2",
 	StageFree = "Обучение пройдено",
 	Goals = "ГОЛЫ",
 	Power = "СИЛА %d%%",
@@ -7186,8 +9134,6 @@ local TEXT = {
 	GoalsTaskPass = "ЗАДАНИЕ: %d ТОЧНЫХ ПАСОВ",
 	PassTutorialDone = "Отличный пас! Теперь сделай %d точных пасов",
 	PassLeft = "Осталось пасов: %d",
-	GoalsFree = "ГОЛЫ / УДАРЫ",
-	ModeFree = 'СВОБОДНАЯ ИГРА  •  <font color="#FFBF1F">УДАРЫ</font>',
 	TutorialDone = "Так и бей! Теперь забей %d голов",
 	ToTask = "К ЗАДАНИЮ  ›",
 	TutorialRetry = "Попробуй ещё раз по подсказке",
@@ -7196,9 +9142,10 @@ local TEXT = {
 	CompleteSubtitle = "%d голов за %d ударов",
 	CompleteSubtitlePass = "%d точных пасов за %d попыток",
 	CompleteSpeed = "Лучший удар: %d км/ч",
-	CompleteStage = "Этап %d из 3 пройден",
+	CompleteStage = "Этап %d из 2 пройден",
 	PlayAgain = "ЕЩЁ РАЗ",
 	Next = "ДАЛЕЕ  ›",
+	Finish = "ГОТОВО  ›", -- after the last stage: back to the career menu
 	Outcomes = {
 		GOAL = { "ГОЛ!", "Отличное попадание в створ" },
 		POST_IN = { "ГОЛ!", "От штанги в сетку!" },
@@ -7271,6 +9218,7 @@ local PHONE_LOGO = 0.8 -- the logo panel is decoration; on phones it gives its r
 local PHONE_GOALS = 0.68 -- the goals panel sits over the pitch on phones, so it is drawn smaller
 local POWER_SEGMENTS = 20
 local POWER_WARN = 0.85
+local STAGE_COUNT = 2 -- training stages: shot, pass
 
 local function create(className: string, props: { [string]: any }): any
 	local inst = Instance.new(className)
@@ -7488,6 +9436,7 @@ function ShotHud.new()
 	self.onRetry = nil :: (() -> ())? -- completion menu buttons
 	self.onNext = nil :: (() -> ())?
 	self.scale = 1
+	self.uiBoost = 1 -- "large interface" setting
 
 	local gui = create("ScreenGui", {
 		Name = "ShotHud",
@@ -7518,6 +9467,10 @@ function ShotHud.new()
 			scale = math.min(scale * PHONE_BOOST, (size.X - 40) / PHONE_MIN_WIDTH, (size.Y - 20) / PHONE_MIN_HEIGHT)
 		end
 		scale = math.clamp(scale, 0.5, 1.3)
+		if self.uiBoost ~= 1 then
+			-- Bigger, but never past the edges the phone limits above protect.
+			scale = math.min(scale * self.uiBoost, (size.X - 40) / PHONE_MIN_WIDTH, (size.Y - 20) / PHONE_MIN_HEIGHT)
+		end
 		self.scale = scale
 		for _, uiScale in self.scales do
 			uiScale.Scale = scale
@@ -7526,8 +9479,19 @@ function ShotHud.new()
 		self.goalsScale.Scale = if phone then scale * PHONE_GOALS else scale
 	end
 	rescale()
+	self._rescale = rescale
 	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(rescale)
 	return self
+end
+
+-- Hidden while the career menus are open.
+function ShotHud:setVisible(visible: boolean)
+	self.gui.Enabled = visible
+end
+
+function ShotHud:setUiBoost(boost: number)
+	self.uiBoost = boost
+	self._rescale()
 end
 
 -- Viewport scale for a top-level panel. Pop animations use their own nested UIScale.
@@ -7568,7 +9532,7 @@ function ShotHud:_buildLogo()
 	outline(stage, 1.5)
 	self.stageText = stage
 	self.stageDots = {}
-	for i = 1, 3 do
+	for i = 1, STAGE_COUNT do
 		local current = i == 1
 		local dot = frame({
 			Name = "StageDot" .. i,
@@ -8099,7 +10063,7 @@ function ShotHud:hideCard()
 	self.retryButton.shineTween:Cancel()
 end
 
--- Stage dots: done = lime, current = gold and larger, still to come = dark. stage 4 = all done.
+-- Stage dots: done = lime, current = gold and larger, still to come = dark. STAGE_COUNT + 1 = all done.
 function ShotHud:_setStage(stage: number)
 	for i, dot in self.stageDots do
 		local done, current = i < stage, i == stage
@@ -8107,25 +10071,23 @@ function ShotHud:_setStage(stage: number)
 		dot.Size = if current then UDim2.fromOffset(13, 13) else UDim2.fromOffset(10, 10)
 		self.stageDotStrokes[i].Color = if done or current then INK else VIOLET
 	end
-	self.stageText.Text = if stage > 3 then TEXT.StageFree else string.format(TEXT.Stage, stage)
+	self.stageText.Text = if stage > STAGE_COUNT then TEXT.StageFree else string.format(TEXT.Stage, stage)
 end
 
--- Labels for the current part of the training. stage: SHOT | PASS | FREE; mode: TUTORIAL | TASK
--- | FREE (of the stage); kind: what the player is doing now, SHOT or PASS (power bar texts).
+-- Labels for the current part of the training. stage: SHOT | PASS; mode: TUTORIAL | TASK (of
+-- the stage); kind: what the player is doing now, SHOT or PASS (power bar texts).
 function ShotHud:setMode(stage: string, mode: string, taskGoals: number, kind: string)
 	local pass = stage == "PASS"
-	if stage == "FREE" then
-		self.goalsLabel.Text = TEXT.GoalsFree
-	elseif mode == "TUTORIAL" then
+	if mode == "TUTORIAL" then
 		self.goalsLabel.Text = TEXT.GoalsTutorial
 	else
 		self.goalsLabel.Text = string.format(if pass then TEXT.GoalsTaskPass else TEXT.GoalsTask, taskGoals)
 	end
-	self.modeText.Text = if stage == "FREE" then TEXT.ModeFree elseif pass then TEXT.ModePass else TEXT.Mode
+	self.modeText.Text = if pass then TEXT.ModePass else TEXT.Mode
 	local passing = kind == "PASS"
 	self.powerHint.Text = if passing then TEXT.PassPowerHint else TEXT.PowerHint
 	self.powerZoneLabel.Text = if passing then TEXT.PassPowerZone else TEXT.PowerZone
-	self:_setStage(if stage == "FREE" then 4 elseif pass then 2 else 1)
+	self:_setStage(if pass then 2 else 1)
 end
 
 -- Highlights the power range that the guided shot asks for (nil hides it).
@@ -8166,6 +10128,8 @@ function ShotHud:showComplete(stats: { kind: string, goals: number, shots: numbe
 		ball.Visible = i <= stats.goals
 	end
 	self:_setStage(stage + 1)
+	-- The pass task is the last stage: its primary button leaves the training.
+	self.completeButton.label.Text = if stage >= STAGE_COUNT then TEXT.Finish else TEXT.Next
 
 	self.complete.Visible = true
 	self.completeDim.BackgroundTransparency = 1
@@ -8187,7 +10151,7 @@ return ShotHud
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="29">
+        <Item class="ModuleScript" referent="33">
           <Properties>
             <string name="Name">ShotVisuals</string>
             <string name="Source"><![CDATA[-- Client-only 3D visuals: camera, ball replay, goalkeeper animation, aim crosshair, trajectory
@@ -8494,6 +10458,11 @@ function ShotVisuals:setCharging(on: boolean)
 	end
 end
 
+-- Settings: camera shake on goals and frame hits.
+function ShotVisuals:setShakeEnabled(enabled: boolean)
+	self.shakeEnabled = enabled
+end
+
 -- Per-frame: camera (with shake and kick) and the keeper.
 function ShotVisuals:update(dt: number)
 	self.clock += dt
@@ -8505,7 +10474,7 @@ function ShotVisuals:update(dt: number)
 		camera.CameraType = Enum.CameraType.Scriptable
 		local fov = ShotConfig.Camera.FieldOfView - self.fovKick
 		local base = CFrame.lookAt(ShotVisuals.cameraPosition(self.spot), ShotConfig.Camera.LookAt)
-		if self.shake > 0 then
+		if self.shake > 0 and self.shakeEnabled ~= false then
 			local t = self.clock * 25
 			local amount = self.shake * 0.3
 			base *= CFrame.new(math.noise(t, 1) * amount, math.noise(t, 2) * amount, 0)
@@ -8673,7 +10642,7 @@ return ShotVisuals
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="30">
+        <Item class="ModuleScript" referent="34">
           <Properties>
             <string name="Name">TutorialHint</string>
             <string name="Source"><![CDATA[-- Finger hint for the guided first shot and first pass.
@@ -9163,6 +11132,491 @@ function TutorialHint:update(dt: number, holding: boolean, power: number, uiScal
 end
 
 return TutorialHint
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="35">
+          <Properties>
+            <string name="Name">UiKit</string>
+            <string name="Source"><![CDATA[-- Building blocks for the career menus in the same purple "pixel UI kit" style as ShotHud:
+-- palette, fonts, glowing panels, gold/violet buttons, club crests, star ratings, text fields,
+-- toggles and the viewport scaler. Layouts are designed at 1280x720 like the HUD.
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+
+local UiKit = {}
+
+local rgb = Color3.fromRGB
+UiKit.rgb = rgb
+UiKit.NAVY = rgb(18, 11, 36)
+UiKit.PANEL_TOP = rgb(43, 18, 80)
+UiKit.PANEL_BOTTOM = rgb(27, 15, 51)
+UiKit.VIOLET = rgb(90, 47, 194)
+UiKit.GLOW = rgb(123, 77, 255)
+UiKit.LILAC = rgb(190, 168, 255)
+UiKit.RED = rgb(255, 45, 85)
+UiKit.RED_LIGHT = rgb(255, 150, 170)
+UiKit.GOLD = rgb(255, 191, 31)
+UiKit.GOLD_LIGHT = rgb(255, 226, 120)
+UiKit.LIME = rgb(170, 240, 40)
+UiKit.ORANGE = rgb(255, 159, 10)
+UiKit.LIP = rgb(178, 84, 0)
+UiKit.CREAM = rgb(247, 236, 214)
+UiKit.INK = rgb(18, 6, 31)
+UiKit.SHADOW = rgb(46, 16, 92)
+UiKit.WHITE = Color3.new(1, 1, 1)
+
+local MONTSERRAT = "rbxasset://fonts/families/Montserrat.json"
+UiKit.FONT_HEAVY = Font.new(MONTSERRAT, Enum.FontWeight.Heavy, Enum.FontStyle.Italic)
+UiKit.FONT_BOLD = Font.new(MONTSERRAT, Enum.FontWeight.Bold, Enum.FontStyle.Italic)
+UiKit.FONT_MEDIUM = Font.new(MONTSERRAT, Enum.FontWeight.Medium)
+UiKit.FONT_PRINT = Font.new(MONTSERRAT, Enum.FontWeight.Heavy) -- shirt lettering
+
+local NAVY, VIOLET, GLOW, LILAC, GOLD, GOLD_LIGHT = UiKit.NAVY, UiKit.VIOLET, UiKit.GLOW, UiKit.LILAC, UiKit.GOLD, UiKit.GOLD_LIGHT
+local INK, CREAM, WHITE, SHADOW, ORANGE, LIP, RED = UiKit.INK, UiKit.CREAM, UiKit.WHITE, UiKit.SHADOW, UiKit.ORANGE, UiKit.LIP, UiKit.RED
+
+-- Same fit rules as ShotHud: design size on desktop, bigger on phones while it still fits.
+local DESIGN_SIZE = Vector2.new(1280, 720)
+local PHONE_HEIGHT = 500
+local PHONE_BOOST = 1.7
+
+function UiKit.create(className: string, props: { [string]: any }): any
+	local inst = Instance.new(className)
+	local parent = props.Parent
+	for key, value in props do
+		if key ~= "Parent" then
+			inst[key] = value
+		end
+	end
+	inst.Parent = parent
+	return inst
+end
+local create = UiKit.create
+
+function UiKit.frame(props: { [string]: any }): Frame
+	props.BorderSizePixel = 0
+	if props.BackgroundTransparency == nil then
+		props.BackgroundTransparency = 0
+	end
+	return create("Frame", props)
+end
+local frame = UiKit.frame
+
+function UiKit.text(props: { [string]: any }): TextLabel
+	props.BackgroundTransparency = 1
+	props.RichText = true
+	props.FontFace = props.FontFace or UiKit.FONT_HEAVY
+	props.TextColor3 = props.TextColor3 or CREAM
+	props.TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Left
+	return create("TextLabel", props)
+end
+local text = UiKit.text
+
+function UiKit.corner(parent: Instance, radius: number?)
+	create("UICorner", { CornerRadius = if radius then UDim.new(0, radius) else UDim.new(1, 0), Parent = parent })
+end
+local corner = UiKit.corner
+
+function UiKit.stroke(parent: Instance, color: Color3, thickness: number, transparency: number?): UIStroke
+	return create("UIStroke", {
+		Color = color,
+		Thickness = thickness,
+		Transparency = transparency or 0,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		Parent = parent,
+	})
+end
+local stroke = UiKit.stroke
+
+-- Text outline; mitred joins keep the chunky pixel-kit corners.
+function UiKit.outline(label: TextLabel | TextBox, thickness: number, color: Color3?): UIStroke
+	return create("UIStroke", {
+		Color = color or INK,
+		Thickness = thickness,
+		LineJoinMode = Enum.LineJoinMode.Miter,
+		Parent = label,
+	})
+end
+local outline = UiKit.outline
+
+function UiKit.sizeLimit(label: TextLabel, maxSize: number)
+	label.TextScaled = true
+	create("UITextSizeConstraint", { MaxTextSize = maxSize, MinTextSize = 8, Parent = label })
+end
+
+-- Outlined title with a hard drop shadow (a sibling label underneath).
+function UiKit.bigText(props: { [string]: any }, thickness: number, offset: Vector2, maxSize: number?): (TextLabel, TextLabel)
+	local shadowProps = table.clone(props)
+	shadowProps.Name = (props.Name or "Text") .. "Shadow"
+	shadowProps.TextColor3 = SHADOW
+	shadowProps.Position = (props.Position or UDim2.new()) + UDim2.fromOffset(offset.X, offset.Y)
+	shadowProps.Text = string.gsub(props.Text or "", "<[^>]+>", "")
+	local shadow = text(shadowProps)
+	outline(shadow, thickness)
+	local main = text(table.clone(props))
+	outline(main, thickness)
+	if maxSize then
+		UiKit.sizeLimit(shadow, maxSize)
+		UiKit.sizeLimit(main, maxSize)
+	end
+	return main, shadow
+end
+
+-- Dark purple panel: vertical gradient, violet border and a soft glow from stacked strokes.
+function UiKit.panel(props: { [string]: any }, radius: number, glowColor: Color3?): (Frame, { UIStroke }, UIStroke)
+	props.BackgroundTransparency = 1
+	local root = frame(props)
+	local glows = {}
+	for _, layer in { { 4, 0.7 }, { 9, 0.84 }, { 16, 0.93 } } do
+		local halo = frame({ Name = "Glow", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = root })
+		corner(halo, radius)
+		table.insert(glows, stroke(halo, glowColor or GLOW, layer[1], layer[2]))
+	end
+	local bg = frame({ Name = "Background", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 0.04, ZIndex = 0, Parent = root })
+	corner(bg, radius)
+	create("UIGradient", { Color = ColorSequence.new(UiKit.PANEL_TOP, UiKit.PANEL_BOTTOM), Rotation = 90, Parent = bg })
+	local border = stroke(bg, VIOLET, 2)
+	frame({
+		Name = "Sheen",
+		Position = UDim2.new(0, radius, 0, 3),
+		Size = UDim2.new(1, -radius * 2, 0, 2),
+		BackgroundColor3 = LILAC,
+		BackgroundTransparency = 0.7,
+		ZIndex = 0,
+		Parent = root,
+	})
+	return root, glows, border
+end
+
+-- Decorative "////" slashes from the reference panels.
+function UiKit.slashes(parent: Instance, position: UDim2, size: number, color: Color3)
+	text({ Name = "Slashes", Position = position, Size = UDim2.fromOffset(size * 2.2, size), TextSize = size, Text = "////", TextColor3 = color, TextTransparency = 0.75, Parent = parent })
+end
+
+-- Small rounded tag: icon + text on navy with a coloured border.
+function UiKit.chip(parent: Instance, props: { [string]: any }, value: string, color: Color3): (Frame, TextLabel)
+	props.Size = props.Size or UDim2.fromOffset(0, 28)
+	props.AutomaticSize = props.AutomaticSize or Enum.AutomaticSize.X
+	props.BackgroundColor3 = props.BackgroundColor3 or NAVY
+	props.Parent = parent
+	local c = frame(props)
+	corner(c, 8)
+	stroke(c, color, 2)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = c })
+	local label = text({ Name = "Label", Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = value, TextSize = 14, Parent = c })
+	outline(label, 1.5)
+	return c, label
+end
+
+export type Button = {
+	button: TextButton,
+	body: Frame,
+	label: TextLabel,
+	sub: TextLabel?,
+	shine: Frame,
+	shineTween: Tween,
+	setText: (Button, string, string?) -> (),
+	setEnabled: (Button, boolean) -> (),
+	playShine: (Button) -> (),
+	enabled: boolean,
+}
+
+local STYLES = {
+	primary = { face = { rgb(255, 214, 74), ORANGE }, lip = LIP, text = INK },
+	secondary = { face = { rgb(150, 110, 255), VIOLET }, lip = rgb(40, 16, 96), text = CREAM },
+	danger = { face = { rgb(255, 120, 140), RED }, lip = rgb(120, 10, 40), text = CREAM },
+}
+
+-- Gold primary / violet secondary / red danger button: dark lip below, gradient face clipped by
+-- a CanvasGroup with a moving shine. `sub` adds a small second line under the label.
+function UiKit.button(parent: Instance, props: { [string]: any }, labelText: string, onActivated: () -> (), style: string?, sub: string?): Button
+	local look = STYLES[style or "primary"]
+	local height = props.Size and props.Size.Y.Offset or 52
+	local faceHeight = height - 6
+	props.BackgroundTransparency = 1
+	props.AutoButtonColor = false
+	props.Text = ""
+	props.Parent = parent
+	local button = create("TextButton", props)
+
+	local lip = frame({ Name = "Lip", Position = UDim2.fromOffset(0, 6), Size = UDim2.new(1, 0, 0, faceHeight), BackgroundColor3 = look.lip, Parent = button })
+	corner(lip, 9)
+	stroke(lip, INK, 2.5)
+	local body = frame({ Name = "Body", Size = UDim2.new(1, 0, 0, faceHeight), BackgroundTransparency = 1, Parent = button })
+	local face = create("CanvasGroup", { Name = "Face", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, Parent = body })
+	corner(face, 9)
+	local fill = frame({ Name = "Fill", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = face })
+	create("UIGradient", { Color = ColorSequence.new(look.face[1], look.face[2]), Rotation = 90, Parent = fill })
+	frame({ Name = "Sheen", Size = UDim2.new(1, 0, 0.42, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 0.72, Parent = face })
+	local shine = frame({
+		Name = "Shine",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(-0.3, 0.5),
+		Size = UDim2.new(0, 34, 2, 0),
+		Rotation = 22,
+		BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0.45,
+		Parent = face,
+	})
+	local edge = frame({ Name = "Outline", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = body })
+	corner(edge, 9)
+	stroke(edge, INK, 2.5)
+
+	local labelSize = if sub then UDim2.new(1, -20, 0.62, 0) else UDim2.new(1, -16, 1, 0)
+	local label = text({
+		Name = "Label",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.fromScale(0.5, if sub then 0.06 else 0),
+		Size = labelSize,
+		Text = labelText,
+		TextSize = props.TextSize or (if faceHeight >= 46 then 24 else 20),
+		TextColor3 = look.text,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = body,
+	})
+	if look.text == INK then
+		outline(label, 1.5, GOLD_LIGHT).Transparency = 0.4
+	else
+		outline(label, 2)
+	end
+	local subLabel = nil
+	if sub then
+		subLabel = text({
+			Name = "Sub",
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.fromScale(0.5, 0.6),
+			Size = UDim2.new(1, -20, 0.32, 0),
+			Text = sub,
+			TextSize = 14,
+			FontFace = UiKit.FONT_BOLD,
+			TextColor3 = look.text,
+			TextTransparency = 0.15,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			Parent = body,
+		})
+	end
+	local dim = frame({ Name = "Disabled", Size = UDim2.new(1, 0, 1, 6), BackgroundColor3 = INK, BackgroundTransparency = 0.45, Visible = false, ZIndex = 5, Parent = button })
+	corner(dim, 9)
+
+	local self = {
+		button = button,
+		body = body,
+		label = label,
+		sub = subLabel,
+		shine = shine,
+		enabled = true,
+		shineTween = TweenService:Create(shine, TweenInfo.new(0.75, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, -1, false, 1.6), { Position = UDim2.fromScale(1.3, 0.5) }),
+	}
+
+	function self.setText(_, value: string, subValue: string?)
+		label.Text = value
+		if subLabel and subValue then
+			subLabel.Text = subValue
+		end
+	end
+	function self.setEnabled(_, enabled: boolean)
+		self.enabled = enabled
+		dim.Visible = not enabled
+		if not enabled then
+			self.shineTween:Cancel()
+			shine.Position = UDim2.fromScale(-0.3, 0.5)
+		end
+	end
+	function self.playShine(_)
+		if self.enabled then
+			shine.Position = UDim2.fromScale(-0.3, 0.5)
+			self.shineTween:Play()
+		end
+	end
+
+	local pressInfo = TweenInfo.new(0.07, Enum.EasingStyle.Quad)
+	local function setPressed(pressed: boolean)
+		TweenService:Create(body, pressInfo, { Position = UDim2.fromOffset(0, if pressed and self.enabled then 5 else 0) }):Play()
+	end
+	button.MouseButton1Down:Connect(function()
+		setPressed(true)
+	end)
+	button.MouseButton1Up:Connect(function()
+		setPressed(false)
+	end)
+	button.MouseLeave:Connect(function()
+		setPressed(false)
+	end)
+	button.Activated:Connect(function()
+		if self.enabled then
+			onActivated()
+		end
+	end)
+	return self :: any
+end
+
+-- Round club badge: shirt-to-shorts gradient, ink rim and the club's letters.
+function UiKit.crest(parent: Instance, props: { [string]: any }, club): Frame
+	local size = props.Size and props.Size.X.Offset or 56
+	props.BackgroundColor3 = WHITE
+	props.Parent = parent
+	local badge = frame(props)
+	corner(badge)
+	create("UIGradient", { Color = ColorSequence.new(club.shirt, club.shorts), Rotation = 125, Parent = badge })
+	stroke(badge, INK, 2.5)
+	local ring = frame({ Name = "Ring", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, -8, 1, -8), BackgroundTransparency = 1, Parent = badge })
+	corner(ring)
+	stroke(ring, WHITE, 1.5, 0.45)
+	local letters = text({
+		Name = "Letters",
+		Size = UDim2.fromScale(1, 1),
+		Text = club.short,
+		TextSize = math.floor(size * 0.36),
+		TextColor3 = WHITE,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = badge,
+	})
+	outline(letters, 2)
+	return badge
+end
+
+-- Five stars filled in half steps (rating 0..5).
+function UiKit.stars(parent: Instance, props: { [string]: any }, rating: number, starSize: number): Frame
+	props.BackgroundTransparency = 1
+	props.Size = props.Size or UDim2.fromOffset(starSize * 5 + 4 * 2, starSize)
+	props.Parent = parent
+	local row = frame(props)
+	create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder, Parent = row })
+	for i = 1, 5 do
+		local slot = frame({ Name = "Star" .. i, LayoutOrder = i, Size = UDim2.fromOffset(starSize, starSize), BackgroundTransparency = 1, Parent = row })
+		local back = text({ Size = UDim2.fromScale(1, 1), Text = "★", TextSize = starSize, TextColor3 = SHADOW, TextXAlignment = Enum.TextXAlignment.Center, Parent = slot })
+		outline(back, 1.5)
+		local fill = math.clamp(rating - (i - 1), 0, 1)
+		if fill > 0 then
+			local clip = frame({ Name = "Fill", Size = UDim2.fromScale(fill, 1), BackgroundTransparency = 1, ClipsDescendants = true, Parent = slot })
+			local gold = text({ Size = UDim2.fromOffset(starSize, starSize), Text = "★", TextSize = starSize, TextColor3 = GOLD, TextXAlignment = Enum.TextXAlignment.Center, Parent = clip })
+			outline(gold, 1.5)
+		end
+	end
+	return row
+end
+
+-- Navy input field; the border turns gold while typing.
+function UiKit.textBox(parent: Instance, props: { [string]: any }, placeholder: string): TextBox
+	local holder = frame({ Name = (props.Name or "Field") .. "Holder", Position = props.Position, Size = props.Size, BackgroundColor3 = NAVY, Parent = parent })
+	corner(holder, 8)
+	local border = stroke(holder, VIOLET, 2)
+	frame({ Name = "Bevel", Position = UDim2.fromOffset(6, 3), Size = UDim2.new(1, -12, 0, 2), BackgroundColor3 = WHITE, BackgroundTransparency = 0.9, Parent = holder })
+	local box = create("TextBox", {
+		Name = props.Name or "Field",
+		Position = UDim2.fromOffset(12, 0),
+		Size = UDim2.new(1, -24, 1, 0),
+		BackgroundTransparency = 1,
+		ClearTextOnFocus = false,
+		Text = "",
+		PlaceholderText = placeholder,
+		PlaceholderColor3 = LILAC,
+		TextColor3 = CREAM,
+		TextSize = props.TextSize or 20,
+		FontFace = UiKit.FONT_BOLD,
+		TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Left,
+		Parent = holder,
+	})
+	box.Focused:Connect(function()
+		border.Color = GOLD
+	end)
+	box.FocusLost:Connect(function()
+		border.Color = VIOLET
+	end)
+	return box
+end
+
+-- On/off pill. onChanged(value) fires on taps; set(value) updates without firing.
+function UiKit.toggle(parent: Instance, props: { [string]: any }, value: boolean, onChanged: (boolean) -> ())
+	props.Size = props.Size or UDim2.fromOffset(76, 34)
+	props.BackgroundColor3 = NAVY
+	props.AutoButtonColor = false
+	props.Text = ""
+	props.BorderSizePixel = 0
+	props.Parent = parent
+	local pill = create("TextButton", props)
+	corner(pill)
+	local border = stroke(pill, VIOLET, 2)
+	local knob = frame({ Name = "Knob", AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(26, 26), BackgroundColor3 = CREAM, Parent = pill })
+	corner(knob)
+	stroke(knob, INK, 2)
+	local state = text({ Name = "State", Size = UDim2.fromScale(1, 1), TextSize = 12, TextXAlignment = Enum.TextXAlignment.Center, Parent = pill })
+	outline(state, 1.5)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = state })
+	local toggle = { value = value }
+	function toggle.set(_, on: boolean)
+		toggle.value = on
+		pill.BackgroundColor3 = if on then rgb(92, 150, 20) else NAVY
+		border.Color = if on then UiKit.LIME else VIOLET
+		state.Text = if on then "ВКЛ" else "ВЫКЛ"
+		state.TextXAlignment = if on then Enum.TextXAlignment.Left else Enum.TextXAlignment.Right
+		TweenService:Create(knob, TweenInfo.new(0.15, Enum.EasingStyle.Quad), { Position = if on then UDim2.new(1, -30, 0.5, 0) else UDim2.new(0, 4, 0.5, 0) }):Play()
+	end
+	pill.Activated:Connect(function()
+		toggle:set(not toggle.value)
+		onChanged(toggle.value)
+	end)
+	toggle:set(value)
+	return toggle
+end
+
+-- Keeps every registered UIScale at the viewport scale. layoutSize: the area (design units) the
+-- largest screen needs, so it is never scaled past the edges. boost: the "large interface" setting.
+function UiKit.scaler(gui: ScreenGui, layoutSize: Vector2)
+	local scaler = { scales = {} :: { UIScale }, boost = 1, scale = 1 }
+	function scaler.rescale(_)
+		local size = gui.AbsoluteSize
+		if size.X < 1 or size.Y < 1 then
+			return
+		end
+		local scale = math.min(size.X / DESIGN_SIZE.X, size.Y / DESIGN_SIZE.Y)
+		if math.min(size.X, size.Y) < PHONE_HEIGHT then
+			scale *= PHONE_BOOST
+		end
+		scale = math.min(math.clamp(scale, 0.5, 1.3) * scaler.boost, (size.X - 20) / layoutSize.X, (size.Y - 16) / layoutSize.Y)
+		scaler.scale = scale
+		for _, uiScale in scaler.scales do
+			uiScale.Scale = scale
+		end
+	end
+	function scaler.add(_, target: GuiObject): UIScale
+		local uiScale = create("UIScale", { Parent = target })
+		table.insert(scaler.scales, uiScale)
+		uiScale.Scale = scaler.scale
+		return uiScale
+	end
+	function scaler.setBoost(_, boost: number)
+		scaler.boost = boost
+		scaler:rescale()
+	end
+	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		scaler:rescale()
+	end)
+	scaler:rescale()
+	return scaler
+end
+
+function UiKit.screenGui(name: string, displayOrder: number): ScreenGui
+	return create("ScreenGui", {
+		Name = name,
+		ResetOnSpawn = false,
+		IgnoreGuiInset = false,
+		ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		DisplayOrder = displayOrder,
+		Parent = Players.LocalPlayer:WaitForChild("PlayerGui"),
+	})
+end
+
+-- Pop-in for a panel: its nested UIScale grows from `from` to 1 with an overshoot.
+function UiKit.pop(uiScale: UIScale, from: number?)
+	uiScale.Scale = from or 0.85
+	TweenService:Create(uiScale, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+end
+
+return UiKit
 ]]></string>
           </Properties>
         </Item>

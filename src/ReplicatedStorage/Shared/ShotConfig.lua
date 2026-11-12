@@ -81,7 +81,7 @@ ShotConfig.Goalkeeper = {
 ShotConfig.DefaultShooting = 42
 
 -- Shot training: one guided shot that always scores, then the task (score TaskGoals in any number
--- of shots), then free play (until the next training stage exists).
+-- of shots). The pass training (PassConfig) follows; after it the career goes on to the first match.
 ShotConfig.Training = {
 	TutorialAim = { X = 0.62, Y = 0.62 }, -- where the finger shows to press (aim coordinates)
 	TutorialRingRadius = 2.6, -- studs, the ring drawn on the goal
@@ -94,7 +94,7 @@ ShotConfig.Training = {
 	-- Training keeper: still saves central shots, beatable in the corners.
 	TaskKeeperSkill = 15,
 	TaskKeeperDelay = 0.12, -- good corner shots score ~90-97%, central ones are still saved
-	-- Where a new player starts: "SHOT" (shot training), "PASS" (pass training) or "FREE".
+	-- Where a new career's training starts: "SHOT" (shot training) or "PASS" (pass training).
 	-- Set "PASS" to test the pass stage without replaying the shot training.
 	StartStage = "SHOT",
 }

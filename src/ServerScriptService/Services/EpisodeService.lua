@@ -5,11 +5,12 @@
 --   stage SHOT  TUTORIAL (one guided shot that always scores) -> TASK (score Training.TaskGoals)
 --   stage PASS  TUTORIAL (one guided pass that always arrives) -> TASK (PassConfig.Training.TaskPasses good passes)
 --   After a TASK the phase is DONE and the menu asks for "RETRY" (task again) or "NEXT" (next stage).
+--   "NEXT" after the PASS task ends the training: no more episodes, the client goes back to the menu.
 --   A good pass is followed by a SHOT episode (mode FOLLOWUP) from where the receiver took the ball;
 --   the pass already counted, the shot only adds to `bonusGoals`. The pass's status (TUTORIAL_DONE,
 --   CONTINUE, COMPLETED) is reported with the shot's result.
---   stage FREE  free shooting against the normal keeper (placeholder until a full match exists)
--- Misses never reset task progress.
+-- Misses never reset task progress. Only players put into training by CareerService (beginTraining)
+-- get episodes; each completed task is reported back through hooks.onStageCompleted.
 --
 -- Input per episode kind (SubmitEpisodeInput):
 --   SHOT  (episodeId, aimX -1..1, aimY 0..1, power 0..1)
@@ -29,13 +30,12 @@ local PassResolver = require(script.Parent.PassResolver)
 local Training = ShotConfig.Training
 local PassTraining = PassConfig.Training
 local MAX_LAG = 0.6 -- seconds a pass's clientTime may trail the server clock
-local FREE_HISTORY = 10
-local STAGES = { SHOT = true, PASS = true, FREE = true }
+local STAGES = { SHOT = true, PASS = true }
 
 type Episode = {
 	id: number,
 	kind: string, -- SHOT | PASS
-	mode: string, -- TUTORIAL | TASK | FREE | FOLLOWUP
+	mode: string, -- TUTORIAL | TASK | FOLLOWUP
 	seed: number,
 	startedAt: number,
 	layout: PassPhysics.Layout?,
@@ -51,11 +51,11 @@ type PlayerState = {
 	nextEpisodeId: number,
 	active: Episode?,
 	lastRemoteAt: number,
-	stage: string, -- SHOT | PASS | FREE
-	phase: string, -- TUTORIAL | TASK | DONE (ignored in FREE)
-	shots: number, -- attempts in the current task (or in free play)
+	stage: string, -- SHOT | PASS
+	phase: string, -- TUTORIAL | TASK | DONE
+	shots: number, -- attempts in the current task
 	goals: number, -- goals / good passes
-	history: { string }, -- outcome of each attempt, most recent last (free play keeps the last 10)
+	history: { string }, -- outcome of each attempt, most recent last
 	bonusGoals: number, -- pass stage: goals scored after good passes in this task attempt
 	followUp: FollowUp?, -- a good pass waiting for its shot
 }
@@ -63,31 +63,13 @@ type PlayerState = {
 local EpisodeService = {}
 
 local states: { [Player]: PlayerState } = {}
+local nextIds: { [Player]: number } = {} -- episode ids keep counting across training sessions
 local seedSource = Random.new()
 local remotes
+local hooks = nil :: { onStageCompleted: (Player, string) -> () }?
 
 local function resetCounters(state: PlayerState)
 	state.shots, state.goals, state.history, state.bonusGoals = 0, 0, {}, 0
-end
-
-local function getState(player: Player): PlayerState
-	local state = states[player]
-	if not state then
-		local stage = if STAGES[Training.StartStage] then Training.StartStage else "SHOT"
-		state = {
-			nextEpisodeId = 1,
-			active = nil,
-			lastRemoteAt = -math.huge,
-			stage = stage,
-			phase = "TUTORIAL",
-			shots = 0,
-			goals = 0,
-			history = {},
-			bonusGoals = 0,
-		}
-		states[player] = state
-	end
-	return state
 end
 
 local function passesRateLimit(state: PlayerState): boolean
@@ -206,7 +188,10 @@ local function startEpisode(player: Player, state: PlayerState, choice: string?)
 	end
 	if state.phase == "DONE" then
 		if choice == "NEXT" then
-			state.stage = if state.stage == "SHOT" then "PASS" else "FREE"
+			if state.stage ~= "SHOT" then
+				return -- the pass task was the last one: training is over
+			end
+			state.stage = "PASS"
 			state.phase = "TUTORIAL"
 		else
 			state.phase = "TASK"
@@ -215,7 +200,7 @@ local function startEpisode(player: Player, state: PlayerState, choice: string?)
 	end
 	local seed = seedSource:NextInteger(1, 2 ^ 31 - 1)
 	local kind = if state.stage == "PASS" then "PASS" else "SHOT"
-	local mode = if state.stage == "FREE" then "FREE" else state.phase
+	local mode = state.phase
 	local layout
 	if kind == "PASS" then
 		-- The situation is picked from the seed too, so (seed, input) reproduces the whole pass.
@@ -243,8 +228,8 @@ local function reject(player: Player, episodeId: any, reason: string)
 end
 
 local function onRequestEpisode(player: Player, choice: any)
-	local state = getState(player)
-	if not passesRateLimit(state) then
+	local state = states[player]
+	if not state or not passesRateLimit(state) then
 		return
 	end
 
@@ -274,12 +259,6 @@ local function advance(state: PlayerState, mode: string, success: boolean, outco
 		state.goals += 1
 	end
 	table.insert(state.history, outcome)
-	if mode == "FREE" then
-		if #state.history > FREE_HISTORY then
-			table.remove(state.history, 1)
-		end
-		return "CONTINUE"
-	end
 	if state.goals >= taskGoal(state.stage) then
 		state.phase = "DONE"
 		return "COMPLETED"
@@ -306,10 +285,8 @@ local function resolveShot(active: Episode, aimX: number, aimY: number, power: n
 	elseif active.mode == "TUTORIAL" then
 		local guideX, guideY = guidedAim(nil)
 		options = { guided = { aimX = guideX, aimY = guideY } }
-	elseif active.mode == "TASK" then
-		options = { keeperDelay = Training.TaskKeeperDelay }
 	else
-		stats.keeperSkill = ShotConfig.Goalkeeper.Skill
+		options = { keeperDelay = Training.TaskKeeperDelay }
 	end
 	local result = ShotResolver.resolve(input, stats, Random.new(active.seed), options)
 	local used = result.input
@@ -365,8 +342,8 @@ local function resolvePass(active: Episode, dirX: number, dirZ: number, power: n
 end
 
 local function onSubmitEpisodeInput(player: Player, episodeId: any, a: any, b: any, power: any, clientTime: any)
-	local state = getState(player)
-	if not passesRateLimit(state) then
+	local state = states[player]
+	if not state or not passesRateLimit(state) then
 		return
 	end
 
@@ -414,6 +391,9 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, a: any, b: a
 		end
 	else
 		status = advance(state, active.mode, success, outcome)
+		if status == "COMPLETED" and hooks then
+			hooks.onStageCompleted(player, state.stage)
+		end
 		if active.kind == "PASS" and success and payload.receiver and payload.receiverTrack then
 			-- The receiver takes it towards goal and shoots next.
 			local meet = payload.receiverTrack[#payload.receiverTrack]
@@ -448,16 +428,47 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, a: any, b: a
 	remotes.EpisodeResult:FireClient(player, payload)
 end
 
-function EpisodeService.init(remoteEvents)
+-- Starts (or restarts) the training at `stage` (SHOT | PASS), from its guided attempt.
+function EpisodeService.beginTraining(player: Player, stage: string)
+	local old = states[player]
+	if old then
+		nextIds[player] = old.nextEpisodeId
+	end
+	states[player] = {
+		nextEpisodeId = nextIds[player] or 1,
+		active = nil,
+		lastRemoteAt = -math.huge,
+		stage = if STAGES[stage] then stage else "SHOT",
+		phase = "TUTORIAL",
+		shots = 0,
+		goals = 0,
+		history = {},
+		bonusGoals = 0,
+	}
+end
+
+-- Back to the menus: any open episode is dropped and further requests are ignored.
+function EpisodeService.stopTraining(player: Player)
+	local state = states[player]
+	if state then
+		nextIds[player] = state.nextEpisodeId
+		states[player] = nil
+	end
+end
+
+-- trainingHooks.onStageCompleted(player, stage) runs when a SHOT or PASS task is completed.
+function EpisodeService.init(remoteEvents, trainingHooks)
 	if remotes then
 		warn("[EpisodeService] init called twice; ignoring")
 		return
 	end
 	remotes = remoteEvents
+	hooks = trainingHooks
 	remotes.RequestEpisode.OnServerEvent:Connect(onRequestEpisode)
 	remotes.SubmitEpisodeInput.OnServerEvent:Connect(onSubmitEpisodeInput)
 	Players.PlayerRemoving:Connect(function(player)
 		states[player] = nil
+		nextIds[player] = nil
 	end)
 end
 

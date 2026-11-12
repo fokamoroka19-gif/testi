@@ -178,6 +178,13 @@ function PassVisuals.new()
 	return self
 end
 
+-- The passer and his teammates wear the player's club kit.
+function PassVisuals:setTeamKit(kit)
+	for _, animator in { self.passer, self.mates[1], self.mates[2] } do
+		FigureBuilder.applyKit(animator.model, kit)
+	end
+end
+
 -- Shows the drill (parents everything into the workspace) and moves the camera over.
 function PassVisuals:enter()
 	if self.active and not self.followUp then
