@@ -19,7 +19,9 @@ local TEXT = {
 	LogoMiddle = "FOOTBALL",
 	LogoBottom = "STAR",
 	Mode = 'ОБУЧЕНИЕ  •  <font color="#FFBF1F">УДАРЫ</font>',
-	Stage = "Этап 1 из 3",
+	ModePass = 'ОБУЧЕНИЕ  •  <font color="#FFBF1F">ПАС</font>',
+	Stage = "Этап %d из 3",
+	StageFree = "Обучение пройдено",
 	Goals = "ГОЛЫ",
 	Power = "СИЛА %d%%",
 	PowerHint = "55–85% — удобно   ·   100% — мяч летит выше",
@@ -30,11 +32,22 @@ local TEXT = {
 	TutorialReady = "Повтори за пальцем: нажми на кружок и держи",
 	TutorialHolding = "Отпусти, когда сила в зелёной зоне",
 	PowerZone = "ЗОНА УДАРА",
+	PassPowerZone = "ДО ПАРТНЁРА",
+	PassPowerHint = "Сила = длина паса   ·   дальше партнёра — не удержит",
+	PassReady = "Нажми и веди к партнёру, отпусти — пас",
+	PassHolding = "Отпусти, чтобы отдать пас",
+	PassFlying = "Пас!",
+	PassAfter = "Выбери свободного партнёра",
+	PassTutorialReady = "Повтори за пальцем: веди от мяча к партнёру",
+	PassTutorialHolding = "Отпусти на партнёре",
 	NextShot = "ЕЩЁ УДАР  ›",
 	Speed = "%d км/ч",
 	-- Training
 	GoalsTutorial = "ПОДСКАЗКА",
 	GoalsTask = "ЗАДАНИЕ: ЗАБЕЙ %d",
+	GoalsTaskPass = "ЗАДАНИЕ: %d ТОЧНЫХ ПАСОВ",
+	PassTutorialDone = "Отличный пас! Теперь сделай %d точных пасов",
+	PassLeft = "Осталось пасов: %d",
 	GoalsFree = "ГОЛЫ / УДАРЫ",
 	ModeFree = 'СВОБОДНАЯ ИГРА  •  <font color="#FFBF1F">УДАРЫ</font>',
 	TutorialDone = "Так и бей! Теперь забей %d голов",
@@ -43,8 +56,9 @@ local TEXT = {
 	TaskLeft = "Осталось забить: %d",
 	CompleteTitle = "ТРЕНИРОВКА\nПРОЙДЕНА!",
 	CompleteSubtitle = "%d голов за %d ударов",
+	CompleteSubtitlePass = "%d точных пасов за %d попыток",
 	CompleteSpeed = "Лучший удар: %d км/ч",
-	CompleteStage = "Этап 1 из 3 пройден",
+	CompleteStage = "Этап %d из 3 пройден",
 	PlayAgain = "ЕЩЁ РАЗ",
 	Next = "ДАЛЕЕ  ›",
 	Outcomes = {
@@ -57,6 +71,11 @@ local TEXT = {
 		BAR = { "ПЕРЕКЛАДИНА!", "Совсем рядом. Чуть ниже" },
 		WIDE = { "МИМО!", "Мяч прошёл мимо ворот" },
 		OVER = { "ВЫШЕ ВОРОТ!", "Слишком сильно. Сбавь силу" },
+		PASS_GOOD = { "ТОЧНЫЙ ПАС!", "Партнёр принял мяч" },
+		PASS_INTERCEPTED = { "ПЕРЕХВАТ!", "Защитник успел. Пасуй свободному или дождись момента" },
+		PASS_TOO_HARD = { "СЛИШКОМ СИЛЬНО!", "Партнёр не удержал. Отпускай ближе к нему" },
+		PASS_SHORT = { "НЕ ДОШЁЛ!", "Слабый пас. Веди палец до партнёра" },
+		PASS_WIDE = { "МИМО!", "Пас ушёл мимо партнёра" },
 	},
 }
 
@@ -90,8 +109,13 @@ local KIND_STYLE = {
 	BAR = { top = GOLD_LIGHT, bottom = ORANGE, accent = ORANGE, icon = "🥅" },
 	WIDE = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
 	OVER = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
+	PASS_GOOD = { top = CREAM, bottom = GOLD, accent = GOLD, icon = "👟", sparkle = true },
+	PASS_INTERCEPTED = { top = CREAM, bottom = LILAC, accent = GLOW, icon = "✋" },
+	PASS_TOO_HARD = { top = GOLD_LIGHT, bottom = ORANGE, accent = ORANGE, icon = "💨" },
+	PASS_SHORT = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
+	PASS_WIDE = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
 }
-local PIP_COLORS = { GOAL = GOLD, SAVE = GLOW, POST = CREAM, MISS = RED }
+local PIP_COLORS = { GOAL = GOLD, SAVE = GLOW, POST = CREAM, MISS = RED, GOOD = GOLD, INTERCEPTED = GLOW }
 
 local MONTSERRAT = "rbxasset://fonts/families/Montserrat.json"
 local FONT_HEAVY = Font.new(MONTSERRAT, Enum.FontWeight.Heavy, Enum.FontStyle.Italic)
@@ -399,8 +423,10 @@ function ShotHud:_buildLogo()
 	outline(modeText, 1.5)
 	self.modeText = modeText
 
-	local stage = text({ Name = "Stage", Position = UDim2.fromOffset(12, 172), Size = UDim2.fromOffset(112, 20), Text = TEXT.Stage, TextSize = 15, FontFace = FONT_BOLD, TextTransparency = 0.15, Parent = root })
+	local stage = text({ Name = "Stage", Position = UDim2.fromOffset(12, 172), Size = UDim2.fromOffset(112, 20), Text = string.format(TEXT.Stage, 1), TextSize = 15, FontFace = FONT_BOLD, TextTransparency = 0.15, Parent = root })
+	sizeLimit(stage, 15)
 	outline(stage, 1.5)
+	self.stageText = stage
 	self.stageDots = {}
 	for i = 1, 3 do
 		local current = i == 1
@@ -414,7 +440,8 @@ function ShotHud:_buildLogo()
 			Parent = root,
 		})
 		corner(dot, 2)
-		stroke(dot, if current then INK else VIOLET, 2)
+		self.stageDotStrokes = self.stageDotStrokes or {}
+		self.stageDotStrokes[i] = stroke(dot, if current then INK else VIOLET, 2)
 		self.stageDots[i] = dot
 	end
 end
@@ -503,7 +530,8 @@ function ShotHud:_buildPowerPanel()
 	})
 	corner(zone, 4)
 	stroke(zone, LIME, 2.5)
-	local zoneLabel = text({
+	local zoneLabel
+	zoneLabel = text({
 		Name = "Label",
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 1, 3),
@@ -515,6 +543,7 @@ function ShotHud:_buildPowerPanel()
 		Parent = zone,
 	})
 	outline(zoneLabel, 1.5)
+	self.powerZoneLabel = zoneLabel
 	TweenService:Create(zone, TweenInfo.new(0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { BackgroundTransparency = 0.45 }):Play()
 	self.powerZone = zone
 
@@ -589,7 +618,8 @@ function ShotHud:_buildCompleteMenu()
 		outline(label, 1.5)
 		return c, label
 	end
-	chip(1, "✅", TEXT.CompleteStage, LIME)
+	local _, stageChipText = chip(1, "✅", string.format(TEXT.CompleteStage, 1), LIME)
+	self.completeStageText = stageChipText
 	self.completeSpeed, self.completeSpeedText = chip(2, "⚡", "", GOLD)
 
 	-- Two buttons: replay the task (secondary) and go on (primary).
@@ -928,19 +958,32 @@ function ShotHud:hideCard()
 	self.retryButton.shineTween:Cancel()
 end
 
--- Labels for the current part of the training: TUTORIAL | TASK | FREE.
-function ShotHud:setMode(mode: string, taskGoals: number)
+-- Stage dots: done = lime, current = gold and larger, still to come = dark. stage 4 = all done.
+function ShotHud:_setStage(stage: number)
+	for i, dot in self.stageDots do
+		local done, current = i < stage, i == stage
+		dot.BackgroundColor3 = if done then LIME elseif current then GOLD else NAVY
+		dot.Size = if current then UDim2.fromOffset(13, 13) else UDim2.fromOffset(10, 10)
+		self.stageDotStrokes[i].Color = if done or current then INK else VIOLET
+	end
+	self.stageText.Text = if stage > 3 then TEXT.StageFree else string.format(TEXT.Stage, stage)
+end
+
+-- Labels for the current part of the training. kind: SHOT | PASS; mode: TUTORIAL | TASK | FREE.
+function ShotHud:setMode(kind: string, mode: string, taskGoals: number)
+	self.kind = kind
+	local pass = kind == "PASS"
 	if mode == "TUTORIAL" then
 		self.goalsLabel.Text = TEXT.GoalsTutorial
 	elseif mode == "TASK" then
-		self.goalsLabel.Text = string.format(TEXT.GoalsTask, taskGoals)
+		self.goalsLabel.Text = string.format(if pass then TEXT.GoalsTaskPass else TEXT.GoalsTask, taskGoals)
 	else
 		self.goalsLabel.Text = TEXT.GoalsFree
 	end
-	self.modeText.Text = if mode == "FREE" then TEXT.ModeFree else TEXT.Mode
-	if mode == "FREE" then
-		self.stageDots[1].BackgroundColor3 = LIME
-	end
+	self.modeText.Text = if mode == "FREE" then TEXT.ModeFree elseif pass then TEXT.ModePass else TEXT.Mode
+	self.powerHint.Text = if pass then TEXT.PassPowerHint else TEXT.PowerHint
+	self.powerZoneLabel.Text = if pass then TEXT.PassPowerZone else TEXT.PowerZone
+	self:_setStage(if mode == "FREE" then 4 elseif pass then 2 else 1)
 end
 
 -- Highlights the power range that the guided shot asks for (nil hides it).
@@ -957,11 +1000,13 @@ function ShotHud:setPowerZone(min: number?, max: number?)
 	zone.Visible = true
 end
 
--- Completion menu after the task is done. stats: { goals, shots, bestSpeed }
-function ShotHud:showComplete(stats: { goals: number, shots: number, bestSpeed: number? })
+-- Completion menu after a task is done. stats: { kind, goals, shots, bestSpeed }
+function ShotHud:showComplete(stats: { kind: string, goals: number, shots: number, bestSpeed: number? })
 	self.card.Visible = false
 	self.cardButton.shineTween:Cancel()
-	self.completeSubtitle.Text = string.format(TEXT.CompleteSubtitle, stats.goals, stats.shots)
+	local stage = if stats.kind == "PASS" then 2 else 1
+	self.completeSubtitle.Text = string.format(if stats.kind == "PASS" then TEXT.CompleteSubtitlePass else TEXT.CompleteSubtitle, stats.goals, stats.shots)
+	self.completeStageText.Text = string.format(TEXT.CompleteStage, stage)
 	local hasSpeed = type(stats.bestSpeed) == "number" and stats.bestSpeed > 0
 	self.completeSpeed.Visible = hasSpeed
 	if hasSpeed then
@@ -970,7 +1015,7 @@ function ShotHud:showComplete(stats: { goals: number, shots: number, bestSpeed: 
 	for i, ball in self.completeBalls do
 		ball.Visible = i <= stats.goals
 	end
-	self.stageDots[1].BackgroundColor3 = LIME
+	self:_setStage(stage + 1)
 
 	self.complete.Visible = true
 	self.completeDim.BackgroundTransparency = 1

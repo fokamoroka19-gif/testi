@@ -1,8 +1,8 @@
-# New Football Star — Stage 1: the shot
+# New Football Star — Stages 1–2: the shot and the pass
 
-Playable prototype of the SHOT mini-game (GDD §5, roadmap v0.1): training ground, goal, ball,
-goalkeeper, crosshair, power bar, a shot training (finger hint, then a 5-shot task) and GOAL / SAVE / POST / MISS results.
-Works with mouse and touch.
+Playable prototype of the SHOT and PASS mini-games (GDD §5–6, roadmap v0.1–v0.2): stadium, goal,
+goalkeeper, a shot training (finger hint, then 5 goals) followed by a pass training (finger hint,
+then 5 good passes past a defender), and free shooting after that. Works with mouse and touch.
 
 **Client draws, server decides.** The client only sends `{episodeId, aimX, aimY, power}`.
 The server checks types, ranges, the current episode, repeats and request rate, then computes
@@ -25,12 +25,16 @@ The server modules can be anywhere under ServerScriptService (next to `Main` or 
 |---|---|---|
 | `src/shared/ShotConfig.lua` | `ReplicatedStorage/Shared/ShotConfig` | ModuleScript |
 | `src/shared/ShotPhysics.lua` | `ReplicatedStorage/Shared/ShotPhysics` | ModuleScript |
+| `src/shared/PassConfig.lua` | `ReplicatedStorage/Shared/PassConfig` | ModuleScript |
+| `src/shared/PassPhysics.lua` | `ReplicatedStorage/Shared/PassPhysics` | ModuleScript |
+| `src/shared/FigureBuilder.lua` | `ReplicatedStorage/Shared/FigureBuilder` | ModuleScript |
 | `src/shared/Images/Logo.lua`, `Banners.lua`, `Keeper.lua`, `Ui.lua` | `ReplicatedStorage/Shared/Images/Logo`, `Banners`, `Keeper`, `Ui` (inside a Folder named `Images`) | ModuleScript |
 | `src/server/Main.server.lua` | `ServerScriptService/Main` | Script |
 | `src/server/SceneBuilder.lua` | `ServerScriptService/SceneBuilder` | ModuleScript |
 | `src/server/KeeperBuilder.lua` | `ServerScriptService/KeeperBuilder` | ModuleScript |
 | `src/server/Services/EpisodeService.lua` | `ServerScriptService/Services/EpisodeService` | ModuleScript |
 | `src/server/Services/ShotResolver.lua` | `ServerScriptService/Services/ShotResolver` | ModuleScript |
+| `src/server/Services/PassResolver.lua` | `ServerScriptService/Services/PassResolver` | ModuleScript |
 | `src/client/ShotClient/init.client.lua` | `StarterPlayer/StarterPlayerScripts/ShotClient` | LocalScript |
 | `src/client/ShotClient/InputController.lua` | `.../ShotClient/InputController` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/ShotVisuals.lua` | `.../ShotClient/ShotVisuals` (child of the LocalScript) | ModuleScript |
@@ -38,6 +42,8 @@ The server modules can be anywhere under ServerScriptService (next to `Main` or 
 | `src/client/ShotClient/KeeperAnimator.lua` | `.../ShotClient/KeeperAnimator` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/ImageLoader.lua` | `.../ShotClient/ImageLoader` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/TutorialHint.lua` | `.../ShotClient/TutorialHint` (child of the LocalScript) | ModuleScript |
+| `src/client/ShotClient/PassVisuals.lua` | `.../ShotClient/PassVisuals` (child of the LocalScript) | ModuleScript |
+| `src/client/ShotClient/FigureAnimator.lua` | `.../ShotClient/FigureAnimator` (child of the LocalScript) | ModuleScript |
 
 The default Baseplate and SpawnLocation are removed automatically during play (they would cover the pitch and goal).
 
@@ -55,9 +61,11 @@ Game Settings → Security → Allow Mesh / Image APIs**, otherwise the game sti
 fallbacks: the text logo, plain LED boards and a keeper in plain kit colours (the Output explains why).
 If you upload the logo to Roblox yourself, put its id in `LOGO_IMAGE` at the top of `ShotHud`.
 
-To change the art, edit `tools/assets/build_images.py` (the tutorial finger is drawn in
-`tools/assets/finger.py`) and run `python3 tools/assets/build_images.py` (needs Pillow), then rebuild
-the place file.
+The tutorial finger is the supplied icon `tools/assets/source/finger.png`, used as drawn (only the
+white page around it is made transparent, see `tools/assets/finger.py`).
+
+To change the art, edit `tools/assets/build_images.py` and run `python3 tools/assets/build_images.py`
+(needs Pillow), then rebuild the place file.
 
 ## Shot training
 
@@ -70,12 +78,34 @@ the place file.
 2. **Task.** Score 5 goals against the training keeper, in as many shots as it takes. Misses and saves
    don't reset anything. The goals panel shows the task and one dot per goal.
 3. **Completed.** After the 5th goal a **ТРЕНИРОВКА ПРОЙДЕНА!** menu appears (goals and shots taken,
-   fastest goal, stage 1 done) with two buttons: **ЕЩЁ РАЗ** replays the task, **ДАЛЕЕ** goes on.
-   The next training stage (pass, roadmap stage 2) doesn't exist yet, so **ДАЛЕЕ** currently opens
-   free play: unlimited shots against the normal keeper, goals / shots and the last 10 results on the panel.
+   fastest goal, stage 1 done) with two buttons: **ЕЩЁ РАЗ** replays the task, **ДАЛЕЕ** opens the
+   pass training.
 
-The flow is decided on the server (`EpisodeService`), so a client can't skip the task. Numbers
-(hint position and ring size, green zone, goals needed, training keeper) are in `ShotConfig.Training`.
+## Pass training (stage 2)
+
+The camera rises behind our player. Two teammates (gold) wait upfield, one defender (red) walks
+back and forth on a short route. Press anywhere, drag to where the ball should go and let go: the
+dotted line shows the path, the drag length is the power (the ball rolls a little past the release
+point, so it reaches the teammate with some pace). Lilac rings show where a teammate can take the
+ball, the red circle shows the defender's reach.
+
+The server simulates the pass: the defender reacts after ~0.3 s and runs at the ball, teammates step
+up to 4 studs to meet it. Results: **ТОЧНЫЙ ПАС** (received), **ПЕРЕХВАТ** (the defender got there
+first), **СЛИШКОМ СИЛЬНО** (too fast for the teammate to control), **НЕ ДОШЁЛ** / **МИМО**.
+A teammate the defender isn't near is safe; one he is patrolling towards needs the right moment.
+
+1. **Guided pass.** The target teammate's ring pulses and the finger shows it: press at the ball,
+   drag to the teammate, let go. This pass always arrives.
+2. **Task.** 5 good passes in any number of attempts, in random situations (`PassConfig.Layouts`).
+3. **Completed.** The menu again: **ЕЩЁ РАЗ** replays the task, **ДАЛЕЕ** opens free play
+   (unlimited shots against the normal keeper) until the next stage (a full match) exists.
+
+The defender's position is the same on both sides: the client sends the time at which it played the
+pass, and the server only accepts times within 0.6 s behind its own clock.
+
+The flow is decided on the server (`EpisodeService`), so a client can't skip a task. Numbers are in
+`ShotConfig.Training` (shot) and `PassConfig` (pass). To test the pass stage without replaying the
+shot training, set `ShotConfig.Training.StartStage = "PASS"`.
 
 On phones (short side under 500 px) the HUD is drawn up to 1.7× larger than the plain fit (the logo a bit less), as far as
 the power panel and the completion menu still fit the screen (`PHONE_*` at the top of `ShotHud`).
@@ -96,9 +126,10 @@ All on-screen text is in the `TEXT` table at the top of `ShotHud`.
 ## Testing
 
 1. **PC:** press Play. The Output window should show:
-   `[SceneBuilder] Stadium built (… objects)`, `[KeeperBuilder] Goalkeeper ready (R15 blocks, … studs tall)`, `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
+   `[SceneBuilder] Stadium built (… objects)`, `[KeeperBuilder] Goalkeeper ready (R15 blocks, … studs tall)`, `[Main] Shot and pass training ready`, `[ShotClient] ready`,
    `[EpisodeService] <you>: episode #1 started (SHOT TUTORIAL, seed …)`, and after each shot a line like
-   `[EpisodeService] <you>: episode #2 TASK aim=(0.72, 0.55) power=0.64 -> GOAL/GOAL, 98 km/h, CONTINUE (1 goals from 1 shots)`.
+   `[EpisodeService] <you>: episode #2 SHOT TASK aim=(0.72, 0.55) power=0.64 -> GOAL/GOAL, 98 km/h, CONTINUE (1 of 1)`;
+   in the pass stage `... PASS TASK dir=(-0.62, -0.78) power=0.52 t=2.31 -> GOOD/GOOD, 37 km/h, CONTINUE (1 of 1)`.
    There should be no red errors.
 2. **Phone layout:** Test → Device emulator, choose a phone in landscape, and repeat.
    The HUD respects screen notches, and no thumbstick or jump button appears.

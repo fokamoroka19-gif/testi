@@ -1,4 +1,4 @@
--- Server entry point for the Stage 1 shot prototype.
+-- Server entry point for the shot and pass training prototype.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -30,7 +30,7 @@ local function requireServerModule(name: string)
 end
 
 local shared = ReplicatedStorage:FindFirstChild("Shared")
-for _, name in { "ShotConfig", "ShotPhysics" } do
+for _, name in { "ShotConfig", "ShotPhysics", "PassConfig", "PassPhysics", "FigureBuilder" } do
 	if not (shared and shared:FindFirstChild(name)) then
 		error(string.format("[Main] ReplicatedStorage > Shared > %s (ModuleScript) is missing. See README > Setup.", name), 0)
 	end
@@ -64,4 +64,4 @@ local scene = SceneBuilder.build()
 KeeperBuilder.build(scene)
 EpisodeService.init(remotes)
 
-print("[Main] Stage 1 shot prototype ready")
+print("[Main] Shot and pass training ready")

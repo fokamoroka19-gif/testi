@@ -94,6 +94,9 @@ ShotConfig.Training = {
 	-- Training keeper: still saves central shots, beatable in the corners.
 	TaskKeeperSkill = 15,
 	TaskKeeperDelay = 0.12, -- good corner shots score ~90-97%, central ones are still saved
+	-- Where a new player starts: "SHOT" (shot training), "PASS" (pass training) or "FREE".
+	-- Set "PASS" to test the pass stage without replaying the shot training.
+	StartStage = "SHOT",
 }
 
 ShotConfig.Episode = {

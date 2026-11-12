@@ -7,11 +7,172 @@
       <Properties>
         <string name="Name">Shared</string>
       </Properties>
-      <Item class="Folder" referent="2">
+      <Item class="ModuleScript" referent="2">
+        <Properties>
+          <string name="Name">FigureBuilder</string>
+          <string name="Source"><![CDATA[-- Blocky R15-style footballer, in the proportions of the character sheet
+-- (tools/assets/source/keeper_sheet.png). Used for the goalkeeper (server) and the pass
+-- drill's players (client). The rig faces -Z and uses the R15 Motor6D names, so
+-- KeeperAnimator / FigureAnimator can drive it. Decals are filled in by the client's ImageLoader.
+
+local FigureBuilder = {}
+
+local IMAGE_TAG = "NfsImage" -- see ShotClient/ImageLoader
+
+export type Kit = {
+	skin: Color3,
+	shirt: Color3,
+	sleeves: Color3?, -- lower arms (default: skin)
+	shorts: Color3,
+	socks: Color3,
+	boots: Color3,
+	hands: Color3?, -- default: skin
+	hair: Color3,
+}
+
+-- Texture names per face (Images/Keeper.lua). The rig faces -Z, so Front is the chest.
+type Faces = { Front: string?, Back: string?, Left: string?, Right: string? }
+local function sides(front: string?, back: string?, side: string): Faces
+	return { Front = front, Back = back, Left = side, Right = side .. "R" }
+end
+
+-- name, size, centre, kit colour, faces with the full kit textures (all at scale 1, feet on y = 0)
+local PARTS: { { any } } = {
+	{ "LowerTorso", Vector3.new(2, 0.6, 1), Vector3.new(0, 2.3, 0), "shorts", sides("LowerTorsoFront", "LowerTorsoBack", "LowerTorsoSide") },
+	{ "UpperTorso", Vector3.new(2, 1.4, 1), Vector3.new(0, 3.3, 0), "shirt", sides("UpperTorsoFront", "UpperTorsoBack", "UpperTorsoSide") },
+	{ "Head", Vector3.new(1.4, 1.25, 1.3), Vector3.new(0, 4.625, 0), "skin", sides("HeadFront", "HeadBack", "HeadSide") },
+	{ "LeftUpperArm", Vector3.new(0.9, 1, 0.9), Vector3.new(-1.45, 3.5, 0), "shirt", sides("UpperArmSide", "UpperArmSide", "UpperArmSide") },
+	{ "LeftLowerArm", Vector3.new(0.85, 0.75, 0.85), Vector3.new(-1.45, 2.625, 0), "sleeves", sides("LowerArmSide", "LowerArmSide", "LowerArmSide") },
+	{ "LeftHand", Vector3.new(0.95, 0.75, 0.95), Vector3.new(-1.45, 1.875, 0), "hands", sides("GloveSide", "GloveSide", "GloveSide") },
+	{ "RightUpperArm", Vector3.new(0.9, 1, 0.9), Vector3.new(1.45, 3.5, 0), "shirt", sides("UpperArmSide", "UpperArmSide", "UpperArmSide") },
+	{ "RightLowerArm", Vector3.new(0.85, 0.75, 0.85), Vector3.new(1.45, 2.625, 0), "sleeves", sides("LowerArmSide", "LowerArmSide", "LowerArmSide") },
+	{ "RightHand", Vector3.new(0.95, 0.75, 0.95), Vector3.new(1.45, 1.875, 0), "hands", sides("GloveSide", "GloveSide", "GloveSide") },
+	{ "LeftUpperLeg", Vector3.new(0.98, 1.05, 0.98), Vector3.new(-0.5, 1.475, 0), "shorts", sides("LeftUpperLegFront", "LeftUpperLegBack", "UpperLegSide") },
+	{ "LeftLowerLeg", Vector3.new(0.9, 0.6, 0.9), Vector3.new(-0.5, 0.65, 0), "socks", sides("LeftLowerLegFront", "LeftLowerLegBack", "LowerLegSide") },
+	{ "LeftFoot", Vector3.new(1, 0.35, 1.2), Vector3.new(-0.5, 0.175, -0.1), "boots", {} },
+	{ "RightUpperLeg", Vector3.new(0.98, 1.05, 0.98), Vector3.new(0.5, 1.475, 0), "shorts", sides("RightUpperLegFront", "RightUpperLegBack", "UpperLegSide") },
+	{ "RightLowerLeg", Vector3.new(0.9, 0.6, 0.9), Vector3.new(0.5, 0.65, 0), "socks", sides("RightLowerLegFront", "RightLowerLegBack", "LowerLegSide") },
+	{ "RightFoot", Vector3.new(1, 0.35, 1.2), Vector3.new(0.5, 0.175, -0.1), "boots", {} },
+}
+
+-- joint name, parent part, child part, joint position (scale 1)
+local JOINTS = {
+	{ "Root", "HumanoidRootPart", "LowerTorso", Vector3.new(0, 2.6, 0) },
+	{ "Waist", "LowerTorso", "UpperTorso", Vector3.new(0, 2.6, 0) },
+	{ "Neck", "UpperTorso", "Head", Vector3.new(0, 4, 0) },
+	{ "LeftShoulder", "UpperTorso", "LeftUpperArm", Vector3.new(-1.45, 3.8, 0) },
+	{ "LeftElbow", "LeftUpperArm", "LeftLowerArm", Vector3.new(-1.45, 3, 0) },
+	{ "LeftWrist", "LeftLowerArm", "LeftHand", Vector3.new(-1.45, 2.25, 0) },
+	{ "RightShoulder", "UpperTorso", "RightUpperArm", Vector3.new(1.45, 3.8, 0) },
+	{ "RightElbow", "RightUpperArm", "RightLowerArm", Vector3.new(1.45, 3, 0) },
+	{ "RightWrist", "RightLowerArm", "RightHand", Vector3.new(1.45, 2.25, 0) },
+	{ "LeftHip", "LowerTorso", "LeftUpperLeg", Vector3.new(-0.5, 2, 0) },
+	{ "LeftKnee", "LeftUpperLeg", "LeftLowerLeg", Vector3.new(-0.5, 0.95, 0) },
+	{ "LeftAnkle", "LeftLowerLeg", "LeftFoot", Vector3.new(-0.5, 0.35, 0) },
+	{ "RightHip", "LowerTorso", "RightUpperLeg", Vector3.new(0.5, 2, 0) },
+	{ "RightKnee", "RightUpperLeg", "RightLowerLeg", Vector3.new(0.5, 0.95, 0) },
+	{ "RightAnkle", "RightLowerLeg", "RightFoot", Vector3.new(0.5, 0.35, 0) },
+}
+
+local HEAD_PARTS = { Head = true }
+
+local function makePart(model: Model, name: string, size: Vector3, position: Vector3, color: Color3): Part
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Size = size
+	part.CFrame = CFrame.new(position)
+	part.Color = color
+	part.Material = Enum.Material.SmoothPlastic
+	part.TopSurface = Enum.SurfaceType.Smooth
+	part.BottomSurface = Enum.SurfaceType.Smooth
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Parent = model
+	return part
+end
+
+local function addDecal(part: BasePart, face: string, image: string)
+	local decal = Instance.new("Decal")
+	decal.Name = "Kit" .. face
+	decal.Face = Enum.NormalId[face]
+	decal:SetAttribute("Image", "Keeper/" .. image)
+	decal:AddTag(IMAGE_TAG)
+	decal.Parent = part
+end
+
+-- textures: "kit" paints the whole character sheet on (the goalkeeper), "head" only the face
+-- and hair (outfield players in plain kit colours). Returns the model, standing on y = 0 and
+-- facing -Z, and the height of its root above the ground.
+function FigureBuilder.build(name: string, kit: Kit, scale: number, textures: string): (Model, number)
+	local model = Instance.new("Model")
+	model.Name = name
+	local colors = {
+		skin = kit.skin,
+		shirt = kit.shirt,
+		sleeves = kit.sleeves or kit.skin,
+		shorts = kit.shorts,
+		socks = kit.socks,
+		boots = kit.boots,
+		hands = kit.hands or kit.skin,
+	}
+
+	local root = makePart(model, "HumanoidRootPart", Vector3.new(2, 2, 1), Vector3.new(0, 3, 0), kit.shirt)
+	root.Transparency = 1
+	root.Anchored = true -- anchors the whole rig; animators move it with PivotTo
+	model.PrimaryPart = root
+
+	local parts: { [string]: BasePart } = { HumanoidRootPart = root }
+	for _, spec in PARTS do
+		local part = makePart(model, spec[1], spec[2], spec[3], colors[spec[4]])
+		if textures == "kit" or (textures == "head" and HEAD_PARTS[spec[1]]) then
+			for face, image in spec[5] do
+				addDecal(part, face, image)
+			end
+		end
+		parts[spec[1]] = part
+	end
+
+	-- Hair: a cap over the top of the head; the face and back textures already show the fringe.
+	local head = parts.Head
+	local hair = makePart(model, "Hair", Vector3.new(1.5, 0.34, 1.42), head.Position + Vector3.new(0, 0.74, 0.03), kit.hair)
+	if textures ~= "none" then
+		for _, face in { "Front", "Back", "Left", "Right" } do
+			addDecal(hair, face, "Hair")
+		end
+	end
+	local hairWeld = Instance.new("WeldConstraint")
+	hairWeld.Part0 = head
+	hairWeld.Part1 = hair
+	hairWeld.Parent = hair
+
+	for _, joint in JOINTS do
+		local part0, part1 = parts[joint[2]], parts[joint[3]]
+		local motor = Instance.new("Motor6D")
+		motor.Name = joint[1]
+		motor.Part0 = part0
+		motor.Part1 = part1
+		motor.C0 = CFrame.new(joint[4] - part0.Position)
+		motor.C1 = CFrame.new(joint[4] - part1.Position)
+		motor.Parent = part1
+	end
+
+	model:ScaleTo(scale)
+	local box, size = model:GetBoundingBox()
+	local rootHeight = root.Position.Y - (box.Position.Y - size.Y / 2)
+	model:PivotTo(CFrame.new(0, rootHeight, 0))
+	return model, rootHeight
+end
+
+return FigureBuilder
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Folder" referent="3">
         <Properties>
           <string name="Name">Images</string>
         </Properties>
-        <Item class="ModuleScript" referent="3">
+        <Item class="ModuleScript" referent="4">
           <Properties>
             <string name="Name">Banners</string>
             <string name="Source"><![CDATA[-- Generated by tools/assets/build_images.py. Do not edit by hand.
@@ -1169,7 +1330,7 @@ AJyIoJdSAJAYAIN/AYLBppZRAJUYAII/AIkWnYdFAIQ5A4M1oYluAJDxnImPAKoMAIMbkQAvgKmf0wIA
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="4">
+        <Item class="ModuleScript" referent="5">
           <Properties>
             <string name="Name">Keeper</string>
             <string name="Source"><![CDATA[-- Generated by tools/assets/build_images.py. Do not edit by hand.
@@ -1808,7 +1969,7 @@ sgEAf4B8AINeAIAvAIB8AIBXAYItCoE+AIBQBgAehz4AARcEgXwAgkECgEcCAQoFiD4Ag20AAAqAPgAB
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="5">
+        <Item class="ModuleScript" referent="6">
           <Properties>
             <string name="Name">Logo</string>
             <string name="Source"><![CDATA[-- Generated by tools/assets/build_images.py. Do not edit by hand.
@@ -2474,92 +2635,398 @@ AP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAP8YAOoYAA==
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="6">
+        <Item class="ModuleScript" referent="7">
           <Properties>
             <string name="Name">Ui</string>
             <string name="Source"><![CDATA[-- Generated by tools/assets/build_images.py. Do not edit by hand.
--- Tutorial finger (finger.py); fingertip at 0.225, 0.018 of the image.
+-- Tutorial finger icon (tools/assets/source/finger.png). FingerTip: fingertip as fractions of the image.
 return {
 	["Finger"] = [==[
-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
+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
+nAAEgACyAQoM4QKy
 ]==],
+	FingerTip = { 0.490, 0.031 },
 }
 ]]></string>
           </Properties>
         </Item>
       </Item>
-      <Item class="ModuleScript" referent="7">
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">PassConfig</string>
+          <string name="Source"><![CDATA[-- Tuning for the Stage 2 pass, shared by the server (outcome) and the client (visuals).
+--
+-- The pass is played on the same pitch as the shot, further from the goal: the passer stands at
+-- Origin and passes along the ground (Y is ignored) towards teammates nearer the goal (-Z).
+
+local PassConfig = {}
+
+PassConfig.Origin = Vector3.new(0, 0, 66) -- ball at the passer's feet
+
+-- Higher, steeper camera than the shot so the whole move fits on screen.
+PassConfig.Camera = {
+	Position = Vector3.new(0, 48, 110),
+	LookAt = Vector3.new(0, 0, 58), -- ball at ~60% of the screen height, clear of the bottom panel on phones
+	FieldOfView = 42,
+}
+
+PassConfig.Ball = {
+	Friction = 20, -- stud/s^2, rolling deceleration
+	-- The ball is played to stop this far past the release point, so it arrives with some pace.
+	Overrun = 6,
+	MinRange = 8, -- shorter drags don't pass (accidental taps)
+	MaxRange = 50, -- drag length for 100% power
+}
+
+PassConfig.Teammate = {
+	Reach = 2.2, -- studs from the body that the foot covers
+	Speed = 12, -- stud/s when stepping to the ball
+	Reaction = 0.12,
+	MaxMove = 4, -- how far a teammate comes off his spot for a pass
+	ControlMaxSpeed = 25, -- faster balls bounce off ("too hard")
+}
+
+PassConfig.Defender = {
+	Reach = 2.4, -- includes the lunge
+	Speed = 10,
+	Reaction = 0.32, -- after the pass is played
+	ReactionJitter = 0.05,
+}
+
+PassConfig.Accuracy = {
+	-- Standard deviation of the direction error (degrees) and distance error (fraction), by Passing skill.
+	AngleAtZeroSkill = 6,
+	AngleAtMaxSkill = 1,
+	DistanceAtZeroSkill = 0.1,
+	DistanceAtMaxSkill = 0.02,
+	MaxSigmas = 2.5,
+}
+
+-- Placeholder until career data exists.
+PassConfig.DefaultPassing = 45
+
+-- Prepared situations, relative to Origin (studs; -Z is towards the goal). The defender walks back
+-- and forth between `from` and `to`; where he is when the pass is played is up to the player.
+PassConfig.Layouts = {
+	-- 1: tutorial. Left teammate free, defender out on the right.
+	{ teammates = { { -14, -18 }, { 18, -26 } }, defender = { from = { 12, -12 }, to = { 20, -12 }, speed = 4 } },
+	-- 2: left free, right lane patrolled.
+	{ teammates = { { -16, -20 }, { 18, -26 } }, defender = { from = { -2, -13 }, to = { 11, -13 }, speed = 6 } },
+	-- 3: short pass is easy, the long one needs timing.
+	{ teammates = { { -12, -12 }, { 10, -34 } }, defender = { from = { -6, -21 }, to = { 10, -21 }, speed = 7 } },
+	-- 4: defender in the middle covers both lanes in turn.
+	{ teammates = { { -19, -23 }, { 19, -23 } }, defender = { from = { -10, -12 }, to = { 10, -12 }, speed = 8 } },
+	-- 5: through ball or a safe square pass.
+	{ teammates = { { -6, -32 }, { 20, -12 } }, defender = { from = { -12, -20 }, to = { 4, -20 }, speed = 6 } },
+}
+
+PassConfig.Training = {
+	TutorialLayout = 1,
+	TutorialTarget = 1, -- teammate the finger shows
+	RingRadius = 4.2, -- studs, the ring around that teammate
+	TapRadius = 7, -- releases this close to him count on the guided pass
+	TaskPasses = 5, -- good passes needed (any number of attempts)
+}
+
+PassConfig.SimStep = 1 / 120
+PassConfig.SampleStep = 1 / 60
+
+return PassConfig
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">PassPhysics</string>
+          <string name="Source"><![CDATA[-- Ground pass simulation, shared by the server (decides the outcome) and the client (layouts,
+-- the defender's patrol and the aiming line). Pure functions: same inputs, same result.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local PassConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PassConfig"))
+
+local BallCfg = PassConfig.Ball
+local Mate = PassConfig.Teammate
+local Defender = PassConfig.Defender
+
+export type Patrol = { from: Vector3, to: Vector3, speed: number, phase: number }
+export type Layout = { index: number, origin: Vector3, teammates: { Vector3 }, defender: Patrol }
+export type PassSim = {
+	detail: string, -- GOOD | INTERCEPTED | TOO_HARD | SHORT | WIDE
+	outcome: string, -- GOOD | INTERCEPTED | MISS
+	eventTime: number, -- when the result is decided (received, intercepted, missed, ball stops)
+	endTime: number,
+	receiver: number?, -- teammate index for GOOD / TOO_HARD
+	speed: number, -- launch speed, stud/s
+	ball: { Vector3 }, -- samples every PassConfig.SampleStep
+	defender: { Vector3 },
+	receiverTrack: { Vector3 }?,
+}
+
+local PassPhysics = {}
+
+local function flat(v: Vector3): Vector3
+	return Vector3.new(v.X, 0, v.Z)
+end
+
+local function offset(origin: Vector3, xz: { number }): Vector3
+	return origin + Vector3.new(xz[1], 0, xz[2])
+end
+
+-- Absolute positions for a prepared situation. phase (0..2) sets where the patrol starts.
+function PassPhysics.layout(index: number, phase: number): Layout
+	local spec = PassConfig.Layouts[index]
+	local origin = PassConfig.Origin
+	local teammates = {}
+	for i, xz in spec.teammates do
+		teammates[i] = offset(origin, xz)
+	end
+	return {
+		index = index,
+		origin = origin,
+		teammates = teammates,
+		defender = {
+			from = offset(origin, spec.defender.from),
+			to = offset(origin, spec.defender.to),
+			speed = spec.defender.speed,
+			phase = phase,
+		},
+	}
+end
+
+-- Defender on his back-and-forth route, t seconds after the episode started.
+function PassPhysics.patrolAt(patrol: Patrol, t: number): Vector3
+	local span = (patrol.to - patrol.from).Magnitude
+	if span < 1e-3 then
+		return patrol.from
+	end
+	local k = (patrol.phase + t * patrol.speed / span) % 2
+	if k > 1 then
+		k = 2 - k
+	end
+	return patrol.from:Lerp(patrol.to, k)
+end
+
+-- Drag length -> pass distance (and back), both clamped to the playable range.
+function PassPhysics.distanceForPower(power: number): number
+	return math.clamp(power * BallCfg.MaxRange, BallCfg.MinRange, BallCfg.MaxRange)
+end
+
+function PassPhysics.powerForDistance(distance: number): number
+	return math.clamp(distance / BallCfg.MaxRange, 0, 1)
+end
+
+function PassPhysics.launchSpeed(distance: number): number
+	return math.sqrt(2 * BallCfg.Friction * (distance + BallCfg.Overrun))
+end
+
+-- Where the ball is t seconds after a pass of launch speed v0, and its speed.
+function PassPhysics.ballAt(start: Vector3, dir: Vector3, v0: number, t: number): (Vector3, number)
+	local a = BallCfg.Friction
+	t = math.clamp(t, 0, v0 / a)
+	return start + dir * (v0 * t - a * t * t / 2), v0 - a * t
+end
+
+-- Samples f(t) every SampleStep from 0 to endTime.
+local function sample(endTime: number, f: (number) -> Vector3): { Vector3 }
+	local out = {}
+	local step = PassConfig.SampleStep
+	local count = math.ceil(endTime / step)
+	for i = 0, count do
+		out[i + 1] = f(math.min(i * step, endTime))
+	end
+	return out
+end
+
+-- start: ball spot; dir: unit direction on the ground; distance: intended length;
+-- releaseTime: seconds since the episode started (where the patrol is); reaction: defender's
+-- reaction time; guided: the defender can't intercept and any reachable ball is controlled.
+function PassPhysics.simulate(layout: Layout, start: Vector3, dir: Vector3, distance: number, releaseTime: number, reaction: number, guided: boolean?): PassSim
+	local v0 = PassPhysics.launchSpeed(distance)
+	local tStop = v0 / BallCfg.Friction
+	local patrol = layout.defender
+	local function defenderAt(t: number): Vector3
+		return PassPhysics.patrolAt(patrol, releaseTime + t)
+	end
+	local defenderSet = defenderAt(reaction)
+
+	local interceptT, receiveT, receiver, heavyT, heavyIndex
+	local step = PassConfig.SimStep
+	local t = 0
+	while t <= tStop + 1e-9 do
+		local p, speed = PassPhysics.ballAt(start, dir, v0, t)
+		if not guided then
+			local reachable
+			if t <= reaction then
+				reachable = flat(p - defenderAt(t)).Magnitude <= Defender.Reach
+			else
+				reachable = flat(p - defenderSet).Magnitude - Defender.Reach <= Defender.Speed * (t - reaction)
+			end
+			if reachable then
+				interceptT = t
+				break
+			end
+		end
+		for i, mate in layout.teammates do
+			local need = flat(p - mate).Magnitude - Mate.Reach
+			if need <= 0 or (t > Mate.Reaction and need <= Mate.Speed * (t - Mate.Reaction) and need <= Mate.MaxMove) then
+				if guided or speed <= Mate.ControlMaxSpeed then
+					receiveT, receiver = t, i
+					break
+				elseif not heavyT then
+					heavyT, heavyIndex = t, i
+				end
+			end
+		end
+		if receiveT then
+			break
+		end
+		t += step
+	end
+
+	local detail, eventTime
+	if interceptT then
+		detail, eventTime = "INTERCEPTED", interceptT
+	elseif receiveT then
+		detail, eventTime = "GOOD", receiveT
+	elseif heavyT then
+		detail, eventTime, receiver = "TOO_HARD", heavyT, heavyIndex
+	else
+		-- Nobody got there: short of the teammate it was meant for, or wide / past him.
+		local best, bestDot = layout.teammates[1], -math.huge
+		for _, mate in layout.teammates do
+			local d = flat(mate - start).Unit:Dot(dir)
+			if d > bestDot then
+				best, bestDot = mate, d
+			end
+		end
+		local along = flat(best - start):Dot(dir)
+		detail = if distance + BallCfg.Overrun < along - Mate.Reach then "SHORT" else "WIDE"
+		eventTime = tStop
+	end
+	local outcome = if detail == "GOOD" then "GOOD" elseif detail == "INTERCEPTED" then "INTERCEPTED" else "MISS"
+	local endTime = if detail == "GOOD" or detail == "INTERCEPTED" then eventTime + 0.7 else math.max(eventTime, tStop) + 0.3
+
+	-- Receiver: steps from his spot to meet the ball, then stays with it.
+	local receiverTrack, meetPoint
+	if receiver then
+		local mate = layout.teammates[receiver]
+		local at = PassPhysics.ballAt(start, dir, v0, eventTime)
+		local toMate = flat(mate - at)
+		meetPoint = if toMate.Magnitude > Mate.Reach * 0.7 then at + toMate.Unit * Mate.Reach * 0.7 else mate
+		local moveFrom = math.min(Mate.Reaction, eventTime)
+		receiverTrack = sample(endTime, function(time)
+			if time <= moveFrom then
+				return mate
+			end
+			return mate:Lerp(meetPoint, math.clamp((time - moveFrom) / math.max(eventTime - moveFrom, 1e-3), 0, 1))
+		end)
+	end
+
+	-- Defender: patrols until he reacts, then runs to the interception point (or chases the ball).
+	local interceptPoint
+	if interceptT then
+		local at = PassPhysics.ballAt(start, dir, v0, interceptT)
+		local from = if interceptT <= reaction then defenderAt(interceptT) else defenderSet
+		local toDef = flat(from - at)
+		interceptPoint = if toDef.Magnitude > Defender.Reach * 0.6 then at + toDef.Unit * Defender.Reach * 0.6 else from
+	end
+	local chase = defenderSet
+	local lastChaseT = reaction
+	local defenderTrack = sample(endTime, function(time)
+		if time <= reaction and not (interceptT and time >= interceptT) then
+			return defenderAt(time)
+		end
+		if interceptT then
+			if interceptT <= reaction then
+				return defenderAt(interceptT)
+			end
+			return defenderSet:Lerp(interceptPoint, math.clamp((time - reaction) / (interceptT - reaction), 0, 1))
+		end
+		-- Chase the ball until the result is decided, then pull up.
+		local until_ = math.min(time, eventTime)
+		if until_ > lastChaseT then
+			local ballPos = PassPhysics.ballAt(start, dir, v0, until_)
+			local towards = flat(ballPos - chase)
+			local stepLen = math.min(towards.Magnitude, Defender.Speed * 0.85 * (until_ - lastChaseT))
+			if towards.Magnitude > 1e-3 then
+				chase += towards.Unit * stepLen
+			end
+			lastChaseT = until_
+		end
+		return chase
+	end)
+
+	-- Ball: rolls along its line, then stays at the feet of whoever got it.
+	local ball = sample(endTime, function(time)
+		if time <= eventTime or not (detail == "GOOD" or detail == "INTERCEPTED") then
+			return (PassPhysics.ballAt(start, dir, v0, time))
+		end
+		local holder = if detail == "GOOD" then meetPoint else interceptPoint
+		local at = PassPhysics.ballAt(start, dir, v0, eventTime)
+		return at:Lerp(holder :: Vector3, math.clamp((time - eventTime) / 0.15, 0, 1) * 0.6)
+	end)
+
+	return {
+		detail = detail,
+		outcome = outcome,
+		eventTime = eventTime,
+		endTime = endTime,
+		receiver = receiver,
+		speed = v0,
+		ball = ball,
+		defender = defenderTrack,
+		receiverTrack = receiverTrack,
+	}
+end
+
+return PassPhysics
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="10">
         <Properties>
           <string name="Name">ShotConfig</string>
           <string name="Source"><![CDATA[-- Tuning values for the Stage 1 shot, shared by the server (outcome) and the client (visuals)
@@ -2658,6 +3125,9 @@ ShotConfig.Training = {
 	-- Training keeper: still saves central shots, beatable in the corners.
 	TaskKeeperSkill = 15,
 	TaskKeeperDelay = 0.12, -- good corner shots score ~90-97%, central ones are still saved
+	-- Where a new player starts: "SHOT" (shot training), "PASS" (pass training) or "FREE".
+	-- Set "PASS" to test the pass stage without replaying the shot training.
+	StartStage = "SHOT",
 }
 
 ShotConfig.Episode = {
@@ -2683,7 +3153,7 @@ return ShotConfig
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="8">
+      <Item class="ModuleScript" referent="11">
         <Properties>
           <string name="Name">ShotPhysics</string>
           <string name="Source"><![CDATA[-- Shot geometry and ball physics, shared by server and client.
@@ -3046,161 +3516,49 @@ return ShotPhysics
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="9">
+  <Item class="ServerScriptService" referent="12">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="ModuleScript" referent="10">
+    <Item class="ModuleScript" referent="13">
       <Properties>
         <string name="Name">KeeperBuilder</string>
-        <string name="Source"><![CDATA[-- Builds the goalkeeper on the server: a blocky R15-style rig in the proportions of the
--- character sheet (tools/assets/source/keeper_sheet.png), with the sheet's kit painted on as
--- decals. The client fills the decals in (ImageLoader) and animates the rig locally
--- (KeeperAnimator, which drives the R15 Motor6D names below); the server never moves it.
+        <string name="Source"><![CDATA[-- Builds the goalkeeper on the server: the blocky footballer (Shared/FigureBuilder) with the
+-- character sheet's kit painted on. The client fills the decals in (ImageLoader) and animates the
+-- rig locally (KeeperAnimator); the server never moves it.
 -- Part colours match the kit, so the keeper still looks right if images are unavailable.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
+local FigureBuilder = require(Shared:WaitForChild("FigureBuilder"))
 
 local Keeper = ShotConfig.Goalkeeper
-local IMAGE_TAG = "NfsImage" -- see ImageLoader
 
-local SKIN = Color3.fromRGB(214, 132, 82)
-local KIT = Color3.fromRGB(30, 22, 40) -- black/purple camo shirt and shorts
-local SOCKS = Color3.fromRGB(22, 18, 28)
-local GLOVES = Color3.fromRGB(236, 232, 244)
-local BOOTS = Color3.fromRGB(232, 228, 242)
-local HAIR = Color3.fromRGB(52, 32, 26)
-
--- Texture names per face (Images/Keeper.lua). The rig faces -Z, so Front is the chest.
-type Faces = { Front: string?, Back: string?, Left: string?, Right: string? }
-local function sides(front: string?, back: string?, side: string): Faces
-	return { Front = front, Back = back, Left = side, Right = side .. "R" }
-end
-
--- name, size, centre, colour, faces (all at scale 1, feet on y = 0)
-local PARTS: { { any } } = {
-	{ "LowerTorso", Vector3.new(2, 0.6, 1), Vector3.new(0, 2.3, 0), KIT, sides("LowerTorsoFront", "LowerTorsoBack", "LowerTorsoSide") },
-	{ "UpperTorso", Vector3.new(2, 1.4, 1), Vector3.new(0, 3.3, 0), KIT, sides("UpperTorsoFront", "UpperTorsoBack", "UpperTorsoSide") },
-	{ "Head", Vector3.new(1.4, 1.25, 1.3), Vector3.new(0, 4.625, 0), SKIN, sides("HeadFront", "HeadBack", "HeadSide") },
-	{ "LeftUpperArm", Vector3.new(0.9, 1, 0.9), Vector3.new(-1.45, 3.5, 0), KIT, sides("UpperArmSide", "UpperArmSide", "UpperArmSide") },
-	{ "LeftLowerArm", Vector3.new(0.85, 0.75, 0.85), Vector3.new(-1.45, 2.625, 0), KIT, sides("LowerArmSide", "LowerArmSide", "LowerArmSide") },
-	{ "LeftHand", Vector3.new(0.95, 0.75, 0.95), Vector3.new(-1.45, 1.875, 0), GLOVES, sides("GloveSide", "GloveSide", "GloveSide") },
-	{ "RightUpperArm", Vector3.new(0.9, 1, 0.9), Vector3.new(1.45, 3.5, 0), KIT, sides("UpperArmSide", "UpperArmSide", "UpperArmSide") },
-	{ "RightLowerArm", Vector3.new(0.85, 0.75, 0.85), Vector3.new(1.45, 2.625, 0), KIT, sides("LowerArmSide", "LowerArmSide", "LowerArmSide") },
-	{ "RightHand", Vector3.new(0.95, 0.75, 0.95), Vector3.new(1.45, 1.875, 0), GLOVES, sides("GloveSide", "GloveSide", "GloveSide") },
-	{ "LeftUpperLeg", Vector3.new(0.98, 1.05, 0.98), Vector3.new(-0.5, 1.475, 0), KIT, sides("LeftUpperLegFront", "LeftUpperLegBack", "UpperLegSide") },
-	{ "LeftLowerLeg", Vector3.new(0.9, 0.6, 0.9), Vector3.new(-0.5, 0.65, 0), SOCKS, sides("LeftLowerLegFront", "LeftLowerLegBack", "LowerLegSide") },
-	{ "LeftFoot", Vector3.new(1, 0.35, 1.2), Vector3.new(-0.5, 0.175, -0.1), BOOTS, {} },
-	{ "RightUpperLeg", Vector3.new(0.98, 1.05, 0.98), Vector3.new(0.5, 1.475, 0), KIT, sides("RightUpperLegFront", "RightUpperLegBack", "UpperLegSide") },
-	{ "RightLowerLeg", Vector3.new(0.9, 0.6, 0.9), Vector3.new(0.5, 0.65, 0), SOCKS, sides("RightLowerLegFront", "RightLowerLegBack", "LowerLegSide") },
-	{ "RightFoot", Vector3.new(1, 0.35, 1.2), Vector3.new(0.5, 0.175, -0.1), BOOTS, {} },
-}
-
--- joint name, parent part, child part, joint position (scale 1)
-local JOINTS = {
-	{ "Root", "HumanoidRootPart", "LowerTorso", Vector3.new(0, 2.6, 0) },
-	{ "Waist", "LowerTorso", "UpperTorso", Vector3.new(0, 2.6, 0) },
-	{ "Neck", "UpperTorso", "Head", Vector3.new(0, 4, 0) },
-	{ "LeftShoulder", "UpperTorso", "LeftUpperArm", Vector3.new(-1.45, 3.8, 0) },
-	{ "LeftElbow", "LeftUpperArm", "LeftLowerArm", Vector3.new(-1.45, 3, 0) },
-	{ "LeftWrist", "LeftLowerArm", "LeftHand", Vector3.new(-1.45, 2.25, 0) },
-	{ "RightShoulder", "UpperTorso", "RightUpperArm", Vector3.new(1.45, 3.8, 0) },
-	{ "RightElbow", "RightUpperArm", "RightLowerArm", Vector3.new(1.45, 3, 0) },
-	{ "RightWrist", "RightLowerArm", "RightHand", Vector3.new(1.45, 2.25, 0) },
-	{ "LeftHip", "LowerTorso", "LeftUpperLeg", Vector3.new(-0.5, 2, 0) },
-	{ "LeftKnee", "LeftUpperLeg", "LeftLowerLeg", Vector3.new(-0.5, 0.95, 0) },
-	{ "LeftAnkle", "LeftLowerLeg", "LeftFoot", Vector3.new(-0.5, 0.35, 0) },
-	{ "RightHip", "LowerTorso", "RightUpperLeg", Vector3.new(0.5, 2, 0) },
-	{ "RightKnee", "RightUpperLeg", "RightLowerLeg", Vector3.new(0.5, 0.95, 0) },
-	{ "RightAnkle", "RightLowerLeg", "RightFoot", Vector3.new(0.5, 0.35, 0) },
+local KIT = {
+	skin = Color3.fromRGB(214, 132, 82),
+	shirt = Color3.fromRGB(30, 22, 40), -- black/purple camo shirt and shorts
+	sleeves = Color3.fromRGB(30, 22, 40),
+	shorts = Color3.fromRGB(30, 22, 40),
+	socks = Color3.fromRGB(22, 18, 28),
+	boots = Color3.fromRGB(232, 228, 242),
+	hands = Color3.fromRGB(236, 232, 244), -- gloves
+	hair = Color3.fromRGB(52, 32, 26),
 }
 
 local KeeperBuilder = {}
-
-local function makePart(model: Model, name: string, size: Vector3, position: Vector3, color: Color3): Part
-	local part = Instance.new("Part")
-	part.Name = name
-	part.Size = size
-	part.CFrame = CFrame.new(position)
-	part.Color = color
-	part.Material = Enum.Material.SmoothPlastic
-	part.TopSurface = Enum.SurfaceType.Smooth
-	part.BottomSurface = Enum.SurfaceType.Smooth
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.Parent = model
-	return part
-end
-
-local function addDecal(part: BasePart, face: string, image: string)
-	local decal = Instance.new("Decal")
-	decal.Name = "Kit" .. face
-	decal.Face = Enum.NormalId[face]
-	decal:SetAttribute("Image", "Keeper/" .. image)
-	decal:AddTag(IMAGE_TAG)
-	decal.Parent = part
-end
-
-local function makeRig(): Model
-	local model = Instance.new("Model")
-	model.Name = "Goalkeeper"
-
-	local root = makePart(model, "HumanoidRootPart", Vector3.new(2, 2, 1), Vector3.new(0, 3, 0), KIT)
-	root.Transparency = 1
-	root.Anchored = true -- anchors the whole rig; the client moves it with PivotTo
-	model.PrimaryPart = root
-
-	local parts: { [string]: BasePart } = { HumanoidRootPart = root }
-	for _, spec in PARTS do
-		local part = makePart(model, spec[1], spec[2], spec[3], spec[4])
-		for face, image in spec[5] do
-			addDecal(part, face, image)
-		end
-		parts[spec[1]] = part
-	end
-
-	-- Hair: a cap over the top of the head; the face and back textures already show the fringe.
-	local head = parts.Head
-	local hair = makePart(model, "Hair", Vector3.new(1.5, 0.34, 1.42), head.Position + Vector3.new(0, 0.74, 0.03), HAIR)
-	for _, face in { "Front", "Back", "Left", "Right" } do
-		addDecal(hair, face, "Hair")
-	end
-	local hairWeld = Instance.new("WeldConstraint")
-	hairWeld.Part0 = head
-	hairWeld.Part1 = hair
-	hairWeld.Parent = hair
-
-	for _, joint in JOINTS do
-		local part0, part1 = parts[joint[2]], parts[joint[3]]
-		local motor = Instance.new("Motor6D")
-		motor.Name = joint[1]
-		motor.Part0 = part0
-		motor.Part1 = part1
-		motor.C0 = CFrame.new(joint[4] - part0.Position)
-		motor.C1 = CFrame.new(joint[4] - part1.Position)
-		motor.Parent = part1
-	end
-
-	model:ScaleTo(Keeper.ModelScale)
-	model:SetAttribute("Rig", "R15 blocks")
-	return model
-end
 
 function KeeperBuilder.build(scene: Instance): Model?
 	if not Keeper.Enabled then
 		return nil
 	end
-	local model = makeRig()
+	local model, rootHeight = FigureBuilder.build("Goalkeeper", KIT, Keeper.ModelScale, "kit")
+	model:SetAttribute("Rig", "R15 blocks")
 	-- Face the shooter (+Z) and stand with the feet on the ground.
-	local facing = CFrame.Angles(0, math.pi, 0)
-	model:PivotTo(facing)
-	local box, size = model:GetBoundingBox()
-	local lift = -(box.Position.Y - size.Y / 2)
-	model:PivotTo(CFrame.new(Keeper.HomeX, lift, Keeper.HomeZ) * facing)
+	model:PivotTo(CFrame.new(Keeper.HomeX, rootHeight, Keeper.HomeZ) * CFrame.Angles(0, math.pi, 0))
 	model.Parent = scene
+	local _, size = model:GetBoundingBox()
 	print(string.format("[KeeperBuilder] Goalkeeper ready (%s, %.1f studs tall)", model:GetAttribute("Rig"), size.Y))
 	return model
 end
@@ -3209,11 +3567,11 @@ return KeeperBuilder
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Script" referent="11">
+    <Item class="Script" referent="14">
       <Properties>
         <string name="Name">Main</string>
         <token name="RunContext">0</token>
-        <string name="Source"><![CDATA[-- Server entry point for the Stage 1 shot prototype.
+        <string name="Source"><![CDATA[-- Server entry point for the shot and pass training prototype.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -3245,7 +3603,7 @@ local function requireServerModule(name: string)
 end
 
 local shared = ReplicatedStorage:FindFirstChild("Shared")
-for _, name in { "ShotConfig", "ShotPhysics" } do
+for _, name in { "ShotConfig", "ShotPhysics", "PassConfig", "PassPhysics", "FigureBuilder" } do
 	if not (shared and shared:FindFirstChild(name)) then
 		error(string.format("[Main] ReplicatedStorage > Shared > %s (ModuleScript) is missing. See README > Setup.", name), 0)
 	end
@@ -3279,11 +3637,11 @@ local scene = SceneBuilder.build()
 KeeperBuilder.build(scene)
 EpisodeService.init(remotes)
 
-print("[Main] Stage 1 shot prototype ready")
+print("[Main] Shot and pass training ready")
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="12">
+    <Item class="ModuleScript" referent="15">
       <Properties>
         <string name="Name">SceneBuilder</string>
         <string name="Source"><![CDATA[-- Builds the evening stadium at runtime: striped pitch and markings, goal with net, LED boards,
@@ -4204,39 +4562,61 @@ return SceneBuilder
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Folder" referent="13">
+    <Item class="Folder" referent="16">
       <Properties>
         <string name="Name">Services</string>
       </Properties>
-      <Item class="ModuleScript" referent="14">
+      <Item class="ModuleScript" referent="17">
         <Properties>
           <string name="Name">EpisodeService</string>
           <string name="Source"><![CDATA[-- Owns interactive episodes: hands them out, validates client input and sends back results.
--- The client only ever sends {episodeId, aimX, aimY, power}; it never reports an outcome.
+-- The client only ever sends its input; it never reports an outcome.
 --
--- Shot training flow, decided here so the client can't skip it:
---   TUTORIAL  one guided shot (finger hint on the client) that always scores
---   TASK      score Training.TaskGoals goals; misses don't reset anything
---   DONE      task completed; the menu asks for "RETRY" (task again) or "NEXT"
---   FREE      free play with the normal keeper (placeholder until the pass training, stage 2, exists)
+-- Training flow, decided here so the client can't skip it:
+--   stage SHOT  TUTORIAL (one guided shot that always scores) -> TASK (score Training.TaskGoals)
+--   stage PASS  TUTORIAL (one guided pass that always arrives) -> TASK (PassConfig.Training.TaskPasses good passes)
+--   After a TASK the phase is DONE and the menu asks for "RETRY" (task again) or "NEXT" (next stage).
+--   stage FREE  free shooting against the normal keeper (placeholder until a full match exists)
+-- Misses never reset task progress.
+--
+-- Input per episode kind (SubmitEpisodeInput):
+--   SHOT  (episodeId, aimX -1..1, aimY 0..1, power 0..1)
+--   PASS  (episodeId, dirX -1..1, dirZ -1..1, power 0..1, clientTime) - clientTime: seconds since
+--         the client showed the episode; sets where the patrolling defender was, within MaxLag.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
+local PassConfig = require(Shared:WaitForChild("PassConfig"))
+local PassPhysics = require(Shared:WaitForChild("PassPhysics"))
 local ShotResolver = require(script.Parent.ShotResolver)
+local PassResolver = require(script.Parent.PassResolver)
 
 local Training = ShotConfig.Training
+local PassTraining = PassConfig.Training
+local MAX_LAG = 0.6 -- seconds a pass's clientTime may trail the server clock
+local FREE_HISTORY = 10
+local STAGES = { SHOT = true, PASS = true, FREE = true }
 
-type Episode = { id: number, kind: string, mode: string, seed: number, startedAt: number }
+type Episode = {
+	id: number,
+	kind: string, -- SHOT | PASS
+	mode: string, -- TUTORIAL | TASK | FREE
+	seed: number,
+	startedAt: number,
+	layout: PassPhysics.Layout?,
+}
 type PlayerState = {
 	nextEpisodeId: number,
 	active: Episode?,
 	lastRemoteAt: number,
-	phase: string, -- "TUTORIAL" | "TASK" | "DONE" | "FREE"
-	shots: number, -- shots taken in the current task attempt (or in free play)
-	goals: number,
-	history: { string }, -- outcome of each shot, most recent last (free play keeps the last 10)
+	stage: string, -- SHOT | PASS | FREE
+	phase: string, -- TUTORIAL | TASK | DONE (ignored in FREE)
+	shots: number, -- attempts in the current task (or in free play)
+	goals: number, -- goals / good passes
+	history: { string }, -- outcome of each attempt, most recent last (free play keeps the last 10)
 }
 
 local EpisodeService = {}
@@ -4245,8 +4625,6 @@ local states: { [Player]: PlayerState } = {}
 local seedSource = Random.new()
 local remotes
 
-local FREE_HISTORY = 10
-
 local function resetCounters(state: PlayerState)
 	state.shots, state.goals, state.history = 0, 0, {}
 end
@@ -4254,10 +4632,12 @@ end
 local function getState(player: Player): PlayerState
 	local state = states[player]
 	if not state then
+		local stage = if STAGES[Training.StartStage] then Training.StartStage else "SHOT"
 		state = {
 			nextEpisodeId = 1,
 			active = nil,
 			lastRemoteAt = -math.huge,
+			stage = stage,
 			phase = "TUTORIAL",
 			shots = 0,
 			goals = 0,
@@ -4286,12 +4666,30 @@ local function isNumberInRange(value: any, min: number, max: number): boolean
 	return value >= min - tolerance and value <= max + tolerance
 end
 
+local function taskGoal(stage: string): number
+	return if stage == "PASS" then PassTraining.TaskPasses else Training.TaskGoals
+end
+
 local function progress(state: PlayerState)
 	return {
 		goals = state.goals,
 		shots = state.shots,
-		taskGoals = Training.TaskGoals,
+		taskGoals = taskGoal(state.stage),
 		history = table.clone(state.history),
+	}
+end
+
+local function passHint(layout: PassPhysics.Layout)
+	local mate = layout.teammates[PassTraining.TutorialTarget]
+	local distance = Vector3.new(mate.X - layout.origin.X, 0, mate.Z - layout.origin.Z).Magnitude
+	return {
+		start = layout.origin,
+		target = mate,
+		targetIndex = PassTraining.TutorialTarget,
+		ringRadius = PassTraining.RingRadius,
+		tapRadius = PassTraining.TapRadius,
+		powerMin = PassPhysics.powerForDistance(distance - 6),
+		powerMax = PassPhysics.powerForDistance(distance + 8),
 	}
 end
 
@@ -4300,15 +4698,20 @@ local function sendEpisode(player: Player, state: PlayerState, episode: Episode)
 	payload.episodeId = episode.id
 	payload.kind = episode.kind
 	payload.mode = episode.mode
+	payload.layout = episode.layout
 	if episode.mode == "TUTORIAL" then
-		payload.hint = {
-			aimX = Training.TutorialAim.X,
-			aimY = Training.TutorialAim.Y,
-			ringRadius = Training.TutorialRingRadius,
-			tapRadius = Training.TutorialTapRadius,
-			powerMin = Training.GuidedPowerMin,
-			powerMax = Training.GuidedPowerMax,
-		}
+		if episode.kind == "PASS" then
+			payload.hint = passHint(episode.layout :: PassPhysics.Layout)
+		else
+			payload.hint = {
+				aimX = Training.TutorialAim.X,
+				aimY = Training.TutorialAim.Y,
+				ringRadius = Training.TutorialRingRadius,
+				tapRadius = Training.TutorialTapRadius,
+				powerMin = Training.GuidedPowerMin,
+				powerMax = Training.GuidedPowerMax,
+			}
+		end
 	end
 	remotes.EpisodeStarted:FireClient(player, payload)
 end
@@ -4316,20 +4719,31 @@ end
 -- choice: what the completion menu asked for ("RETRY" or "NEXT"); ignored in other phases.
 local function startEpisode(player: Player, state: PlayerState, choice: string?)
 	if state.phase == "DONE" then
-		state.phase = if choice == "NEXT" then "FREE" else "TASK"
+		if choice == "NEXT" then
+			state.stage = if state.stage == "SHOT" then "PASS" else "FREE"
+			state.phase = "TUTORIAL"
+		else
+			state.phase = "TASK"
+		end
 		resetCounters(state)
 	end
-	local episode = {
-		id = state.nextEpisodeId,
-		kind = "SHOT",
-		mode = state.phase,
-		-- Logged so any result can be reproduced from (seed, input, mode).
-		seed = seedSource:NextInteger(1, 2 ^ 31 - 1),
-		startedAt = os.clock(),
-	}
+	local seed = seedSource:NextInteger(1, 2 ^ 31 - 1)
+	local kind = if state.stage == "PASS" then "PASS" else "SHOT"
+	local mode = if state.stage == "FREE" then "FREE" else state.phase
+	local layout
+	if kind == "PASS" then
+		-- The situation is picked from the seed too, so (seed, input) reproduces the whole pass.
+		local rng = Random.new(seed)
+		local index = if mode == "TUTORIAL" then PassTraining.TutorialLayout else rng:NextInteger(2, #PassConfig.Layouts)
+		layout = PassPhysics.layout(index, rng:NextNumber() * 2)
+	end
+	local episode = { id = state.nextEpisodeId, kind = kind, mode = mode, seed = seed, startedAt = os.clock(), layout = layout }
 	state.nextEpisodeId += 1
 	state.active = episode
-	print(string.format("[EpisodeService] %s: episode #%d started (SHOT %s, seed %d)", player.Name, episode.id, episode.mode, episode.seed))
+	print(string.format(
+		"[EpisodeService] %s: episode #%d started (%s %s%s, seed %d)",
+		player.Name, episode.id, kind, mode, if layout then ", layout " .. layout.index else "", seed
+	))
 	sendEpisode(player, state, episode)
 end
 
@@ -4357,12 +4771,12 @@ local function onRequestEpisode(player: Player, choice: any)
 	startEpisode(player, state, if typeof(choice) == "string" then choice else nil)
 end
 
--- Updates the training progress after a shot and returns what happens next:
+-- Updates the training progress after an attempt and returns what happens next:
 -- TUTORIAL_DONE | TUTORIAL_RETRY | CONTINUE | COMPLETED
-local function advance(state: PlayerState, mode: string, outcome: string): string
+local function advance(state: PlayerState, mode: string, success: boolean, outcome: string): string
 	if mode == "TUTORIAL" then
-		if outcome ~= "GOAL" then
-			return "TUTORIAL_RETRY" -- should not happen: guided shots always score
+		if not success then
+			return "TUTORIAL_RETRY" -- should not happen: guided attempts always succeed
 		end
 		state.phase = "TASK"
 		resetCounters(state)
@@ -4370,7 +4784,7 @@ local function advance(state: PlayerState, mode: string, outcome: string): strin
 	end
 
 	state.shots += 1
-	if outcome == "GOAL" then
+	if success then
 		state.goals += 1
 	end
 	table.insert(state.history, outcome)
@@ -4380,43 +4794,14 @@ local function advance(state: PlayerState, mode: string, outcome: string): strin
 		end
 		return "CONTINUE"
 	end
-	if state.goals >= Training.TaskGoals then
+	if state.goals >= taskGoal(state.stage) then
 		state.phase = "DONE"
 		return "COMPLETED"
 	end
 	return "CONTINUE"
 end
 
-local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, aimY: any, power: any)
-	local state = getState(player)
-	if not passesRateLimit(state) then
-		return
-	end
-
-	local active = state.active
-	if not active or episodeId ~= active.id then
-		reject(player, episodeId, "unknown or already finished episode")
-		return
-	end
-	if not (isNumberInRange(aimX, -1, 1) and isNumberInRange(aimY, 0, 1) and isNumberInRange(power, 0, 1)) then
-		reject(player, episodeId, "invalid input values")
-		return
-	end
-
-	local elapsed = os.clock() - active.startedAt
-	if elapsed < ShotConfig.Episode.MinThinkTime then
-		reject(player, episodeId, "input too early")
-		return
-	end
-	if elapsed > ShotConfig.Episode.Timeout then
-		state.active = nil
-		reject(player, episodeId, "episode expired")
-		return
-	end
-
-	-- Consume before resolving so the same episode can never produce a second result.
-	state.active = nil
-
+local function resolveShot(active: Episode, aimX: number, aimY: number, power: number)
 	local input = {
 		aimX = math.clamp(aimX, -1, 1),
 		aimY = math.clamp(aimY, 0, 1),
@@ -4432,35 +4817,117 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, a
 		stats.keeperSkill = ShotConfig.Goalkeeper.Skill
 	end
 	local result = ShotResolver.resolve(input, stats, Random.new(active.seed), options)
-	local status = advance(state, active.mode, result.outcome)
-
 	local used = result.input
+	local sim = result.sim
+	-- The client replays this exact path, so what it shows always matches the outcome.
+	local payload = {
+		path = sim.path,
+		sampleStep = ShotConfig.Physics.SampleStep,
+		events = sim.events,
+		spin = result.spin,
+		held = sim.held,
+		decisiveTime = result.decisiveTime,
+		keeperTime = sim.keeperTime,
+		keeperTarget = result.keeperTarget,
+		keeperReaction = result.keeperReaction,
+		keeperDives = result.keeperDives,
+		keeperKind = sim.keeperKind,
+	}
+	local summary = string.format("aim=(%.2f, %.2f) power=%.2f", used.aimX, used.aimY, used.power)
+	return result.outcome == "GOAL", result.outcome, result.detail, result.speedKmh, payload, summary
+end
+
+local function resolvePass(active: Episode, dirX: number, dirZ: number, power: number, clientTime: any)
+	if Vector3.new(dirX, 0, dirZ).Magnitude < 0.1 then
+		return nil
+	end
+	-- Where the defender was: the client's clock, but never ahead of ours or more than MAX_LAG behind.
+	local elapsed = os.clock() - active.startedAt
+	local releaseTime = elapsed - 0.1
+	if typeof(clientTime) == "number" and clientTime == clientTime then
+		releaseTime = math.clamp(clientTime, math.max(0, elapsed - MAX_LAG), elapsed)
+	end
+	local input = { dirX = dirX, dirZ = dirZ, power = math.clamp(power, 0, 1) }
+	local options = { releaseTime = releaseTime, guided = nil :: { target: number }? }
+	if active.mode == "TUTORIAL" then
+		options.guided = { target = PassTraining.TutorialTarget }
+	end
+	local result = PassResolver.resolve(input, active.layout :: PassPhysics.Layout, PassConfig.DefaultPassing, Random.new(active.seed), options)
+	local sim = result.sim
+	local payload = {
+		sampleStep = PassConfig.SampleStep,
+		releaseTime = releaseTime,
+		ball = sim.ball,
+		defender = sim.defender,
+		receiver = sim.receiver,
+		receiverTrack = sim.receiverTrack,
+		eventTime = sim.eventTime,
+		endTime = sim.endTime,
+	}
+	local used = result.input
+	local summary = string.format("dir=(%.2f, %.2f) power=%.2f t=%.2f", used.dirX, used.dirZ, used.power, releaseTime)
+	return result.outcome == "GOOD", result.outcome, result.detail, result.speedKmh, payload, summary
+end
+
+local function onSubmitEpisodeInput(player: Player, episodeId: any, a: any, b: any, power: any, clientTime: any)
+	local state = getState(player)
+	if not passesRateLimit(state) then
+		return
+	end
+
+	local active = state.active
+	if not active or episodeId ~= active.id then
+		reject(player, episodeId, "unknown or already finished episode")
+		return
+	end
+	local bMin = if active.kind == "PASS" then -1 else 0
+	if not (isNumberInRange(a, -1, 1) and isNumberInRange(b, bMin, 1) and isNumberInRange(power, 0, 1)) then
+		reject(player, episodeId, "invalid input values")
+		return
+	end
+
+	local elapsed = os.clock() - active.startedAt
+	if elapsed < ShotConfig.Episode.MinThinkTime then
+		reject(player, episodeId, "input too early")
+		return
+	end
+	if elapsed > ShotConfig.Episode.Timeout then
+		state.active = nil
+		reject(player, episodeId, "episode expired")
+		return
+	end
+
+	local success, outcome, detail, speedKmh, payload, summary
+	if active.kind == "PASS" then
+		success, outcome, detail, speedKmh, payload, summary = resolvePass(active, math.clamp(a, -1, 1), math.clamp(b, -1, 1), power, clientTime)
+		if success == nil then
+			reject(player, episodeId, "invalid input values")
+			return
+		end
+	else
+		success, outcome, detail, speedKmh, payload, summary = resolveShot(active, a, b, power)
+	end
+
+	-- Consume the episode once it has a result, so it can never produce a second one.
+	state.active = nil
+	local status = advance(state, active.mode, success, outcome)
 	print(string.format(
-		"[EpisodeService] %s: episode #%d %s aim=(%.2f, %.2f) power=%.2f -> %s/%s, %d km/h, %s (%d goals from %d shots)",
-		player.Name, active.id, active.mode, used.aimX, used.aimY, used.power, result.outcome, result.detail, result.speedKmh,
+		"[EpisodeService] %s: episode #%d %s %s %s -> %s/%s, %d km/h, %s (%d of %d)",
+		player.Name, active.id, active.kind, active.mode, summary, outcome, detail, speedKmh,
 		status, state.goals, state.shots
 	))
 
-	local sim = result.sim
-	local payload = progress(state)
+	local info = progress(state)
+	for key, value in info do
+		payload[key] = value
+	end
 	payload.episodeId = active.id
+	payload.kind = active.kind
 	payload.mode = active.mode
 	payload.status = status
-	payload.outcome = result.outcome
-	payload.detail = result.detail
-	payload.speedKmh = result.speedKmh
-	-- The client replays this exact path, so what it shows always matches the outcome.
-	payload.path = sim.path
-	payload.sampleStep = ShotConfig.Physics.SampleStep
-	payload.events = sim.events
-	payload.spin = result.spin
-	payload.held = sim.held
-	payload.decisiveTime = result.decisiveTime
-	payload.keeperTime = sim.keeperTime
-	payload.keeperTarget = result.keeperTarget
-	payload.keeperReaction = result.keeperReaction
-	payload.keeperDives = result.keeperDives
-	payload.keeperKind = sim.keeperKind
+	payload.outcome = outcome
+	payload.detail = detail
+	payload.speedKmh = speedKmh
 	remotes.EpisodeResult:FireClient(player, payload)
 end
 
@@ -4481,7 +4948,81 @@ return EpisodeService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="15">
+      <Item class="ModuleScript" referent="18">
+        <Properties>
+          <string name="Name">PassResolver</string>
+          <string name="Source"><![CDATA[-- Server-only: turns validated pass input into a simulated pass. Never runs on the client.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local PassConfig = require(Shared:WaitForChild("PassConfig"))
+local PassPhysics = require(Shared:WaitForChild("PassPhysics"))
+
+export type PassInput = { dirX: number, dirZ: number, power: number }
+-- guided: tutorial pass to teammate `target` that always arrives (no error, no interception).
+-- releaseTime: seconds since the episode started when the pass was played (sets the patrol).
+export type PassOptions = { guided: { target: number }?, releaseTime: number }
+export type PassResult = {
+	input: PassInput,
+	outcome: string, -- GOOD | INTERCEPTED | MISS (task progress / history)
+	detail: string, -- GOOD | INTERCEPTED | TOO_HARD | SHORT | WIDE (what the player sees)
+	speedKmh: number,
+	sim: PassPhysics.PassSim,
+}
+
+local PassResolver = {}
+
+local function lerp(a: number, b: number, t: number): number
+	return a + (b - a) * t
+end
+
+local function gaussian(rng: Random): number
+	local u1 = math.max(rng:NextNumber(), 1e-9)
+	local u2 = rng:NextNumber()
+	return math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2)
+end
+
+function PassResolver.resolve(input: PassInput, layout: PassPhysics.Layout, passing: number, rng: Random, options: PassOptions): PassResult
+	local accuracy = PassConfig.Accuracy
+	local start = layout.origin
+	local dir = Vector3.new(input.dirX, 0, input.dirZ).Unit
+	local distance = PassPhysics.distanceForPower(input.power)
+
+	local guided = options.guided
+	-- Random parts are always drawn, in the same order, so (seed, input) reproduces a result.
+	local skill = math.clamp(passing, 0, 100) / 100
+	local cap = accuracy.MaxSigmas
+	local angle = math.rad(math.clamp(gaussian(rng), -cap, cap) * lerp(accuracy.AngleAtZeroSkill, accuracy.AngleAtMaxSkill, skill))
+	local stretch = 1 + math.clamp(gaussian(rng), -cap, cap) * lerp(accuracy.DistanceAtZeroSkill, accuracy.DistanceAtMaxSkill, skill)
+	local reaction = PassConfig.Defender.Reaction + (rng:NextNumber() * 2 - 1) * PassConfig.Defender.ReactionJitter
+
+	if guided then
+		local target = layout.teammates[guided.target]
+		local toTarget = Vector3.new(target.X - start.X, 0, target.Z - start.Z)
+		dir, distance = toTarget.Unit, toTarget.Magnitude
+		input = { dirX = dir.X, dirZ = dir.Z, power = PassPhysics.powerForDistance(distance) }
+	else
+		local c, s = math.cos(angle), math.sin(angle)
+		dir = Vector3.new(dir.X * c - dir.Z * s, 0, dir.X * s + dir.Z * c)
+		distance *= stretch
+	end
+
+	local sim = PassPhysics.simulate(layout, start, dir, distance, options.releaseTime, reaction, guided ~= nil)
+	return {
+		input = input,
+		outcome = sim.outcome,
+		detail = sim.detail,
+		speedKmh = math.floor(sim.speed + 0.5),
+		sim = sim,
+	}
+end
+
+return PassResolver
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="19">
         <Properties>
           <string name="Name">ShotResolver</string>
           <string name="Source"><![CDATA[-- Server-only: turns validated shot input into a fully simulated shot. Never runs on the client.
@@ -4679,20 +5220,20 @@ return ShotResolver
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="16">
+  <Item class="StarterPlayer" referent="20">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="17">
+    <Item class="StarterPlayerScripts" referent="21">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="LocalScript" referent="18">
+      <Item class="LocalScript" referent="22">
         <Properties>
           <string name="Name">ShotClient</string>
-          <string name="Source"><![CDATA[-- Client entry point for the Stage 1 shot training: wires input, 3D visuals, HUD and the finger
--- hint to the server remotes. The client sends only aim and power; the server decides the
--- outcome and the training flow (guided shot -> task -> completed).
+          <string name="Source"><![CDATA[-- Client entry point for the shot and pass training: wires input, both drills' 3D visuals, the
+-- HUD and the finger hint to the server remotes. The client sends only its input; the server
+-- decides outcomes and the training flow (shot: guided -> task, pass: guided -> task, free play).
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -4705,6 +5246,7 @@ local ShotVisuals = require(script:WaitForChild("ShotVisuals"))
 local ShotHud = require(script:WaitForChild("ShotHud"))
 local ImageLoader = require(script:WaitForChild("ImageLoader"))
 local TutorialHint = require(script:WaitForChild("TutorialHint"))
+local PassVisuals = require(script:WaitForChild("PassVisuals"))
 
 local CARD_DELAY = 0.55 -- let the player see the ball hit the net before the card covers the goal
 
@@ -4732,11 +5274,13 @@ task.spawn(function()
 end)
 
 local hud = ShotHud.new()
-ImageLoader.watch() -- stadium banners and keeper kit textures
+ImageLoader.watch() -- stadium banners, keeper kit and players' faces
 local visuals = ShotVisuals.new()
+local passVisuals = PassVisuals.new()
 local input = InputController.new()
 local hint = TutorialHint.new()
 local currentEpisode = nil
+local currentKind = "SHOT"
 local waitingForEpisode = false
 local bestSpeed = 0 -- fastest goal in the current task attempt, for the completion menu
 
@@ -4764,20 +5308,35 @@ hud.onNext = function()
 	continueWith("NEXT")
 end
 
--- Goals panel: in the task, one pip per goal still needed; in free play, the last results.
+-- Goals panel: in a task, one pip per goal / good pass still needed; in free play, the last results.
 local function showProgress(info)
 	if info.mode == "FREE" then
 		hud:setSeries(info.goals, 10, info.history, info.shots)
 	else
-		local goals = {}
+		local done = {}
 		for _ = 1, info.goals do
-			table.insert(goals, "GOAL")
+			table.insert(done, if info.kind == "PASS" then "GOOD" else "GOAL")
 		end
-		hud:setSeries(info.goals, info.taskGoals, goals)
+		hud:setSeries(info.goals, info.taskGoals, done)
 	end
 end
 
-input.onShoot = function(aimX, aimY, power)
+-- Switches the 3D drill (camera, ball, players) between the shot and the pass.
+local function setKind(kind: string)
+	if kind == currentKind then
+		return
+	end
+	currentKind = kind
+	if kind == "PASS" then
+		visuals:setActive(false)
+		passVisuals:enter()
+	else
+		passVisuals:exit()
+		visuals:setActive(true)
+	end
+end
+
+input.onShoot = function(a, b, power)
 	local episode = currentEpisode
 	if not episode then
 		return
@@ -4785,47 +5344,66 @@ input.onShoot = function(aimX, aimY, power)
 	input:setEnabled(false)
 	hint:hide()
 	hud:setPowerZone(nil)
-	visuals:onShotReleased()
-	hud:setTitle("Flying")
-	SubmitEpisodeInput:FireServer(episode.episodeId, aimX, aimY, power)
+	if episode.kind == "PASS" then
+		passVisuals:onPassReleased()
+		hud:setTitle("PassFlying")
+		SubmitEpisodeInput:FireServer(episode.episodeId, a, b, power, passVisuals:clockTime())
+	else
+		visuals:onShotReleased()
+		hud:setTitle("Flying")
+		SubmitEpisodeInput:FireServer(episode.episodeId, a, b, power)
+	end
 end
 
 EpisodeStarted.OnClientEvent:Connect(function(episode)
-	if typeof(episode) ~= "table" or episode.kind ~= "SHOT" then
+	if typeof(episode) ~= "table" or (episode.kind ~= "SHOT" and episode.kind ~= "PASS") then
 		return
 	end
 	waitingForEpisode = false
 	currentEpisode = episode
 	input:setEnabled(false)
-	visuals:reset()
+	setKind(episode.kind)
+	local pass = episode.kind == "PASS"
+	if pass then
+		passVisuals:reset(episode.layout)
+		input:setMode("PASS", episode.layout.origin)
+	else
+		visuals:reset()
+		input:setMode("SHOT")
+	end
 	hud:hideCard()
 	hud:setPower(0)
 	showProgress(episode)
-	hud:setMode(episode.mode, episode.taskGoals)
+	hud:setMode(episode.kind, episode.mode, episode.taskGoals)
 	if episode.shots == 0 then
 		bestSpeed = 0
 	end
 
 	local guide = episode.mode == "TUTORIAL" and episode.hint
 	if guide then
-		hint:show(guide)
+		hint:show(episode.kind, guide)
 		hud:setPowerZone(guide.powerMin, guide.powerMax)
 		input:setGuide({
-			aimX = guide.aimX,
-			aimY = guide.aimY,
+			aimX = if pass then nil else guide.aimX,
+			aimY = if pass then nil else guide.aimY,
 			accepts = function(aimX, aimY)
 				return hint:accepts(aimX, aimY)
+			end,
+			acceptsTarget = function(target)
+				return hint:acceptsTarget(target)
 			end,
 			onRejected = function()
 				hint:nudge()
 			end,
 		})
+		passVisuals:setHighlight(if pass then guide.targetIndex else nil)
 	else
 		hint:hide()
 		hud:setPowerZone(nil)
 		input:setGuide(nil)
+		passVisuals:setHighlight(nil)
 	end
-	hud:setTitle(if guide then "TutorialReady" else "Ready")
+	hud:setTitle(if pass then (if guide then "PassTutorialReady" else "PassReady") else (if guide then "TutorialReady" else "Ready"))
 
 	task.delay(ShotConfig.Input.ReadyDelay, function()
 		if currentEpisode == episode then
@@ -4834,30 +5412,35 @@ EpisodeStarted.OnClientEvent:Connect(function(episode)
 	end)
 end)
 
--- What the card says after each shot, by the server's training status.
+-- What the card says after each attempt, by the server's training status.
 local function showOutcome(result)
 	local status = result.status
+	local pass = result.kind == "PASS"
+	local key = if pass then "PASS_" .. result.detail else result.detail
 	local speed = result.speedKmh
 	if status == "COMPLETED" then
-		hud:showComplete({ goals = result.goals, shots = result.shots, bestSpeed = bestSpeed })
+		hud:showComplete({ kind = result.kind, goals = result.goals, shots = result.shots, bestSpeed = if pass then nil else bestSpeed })
 	elseif status == "TUTORIAL_DONE" then
-		hud:showResult(result.detail, {
-			subtitle = string.format(hud.text.TutorialDone, result.taskGoals),
+		hud:showResult(key, {
+			subtitle = string.format(if pass then hud.text.PassTutorialDone else hud.text.TutorialDone, result.taskGoals),
 			button = hud.text.ToTask,
 			speedKmh = speed,
 		})
 	elseif status == "TUTORIAL_RETRY" then
-		hud:showResult(result.detail, { subtitle = hud.text.TutorialRetry, speedKmh = speed })
+		hud:showResult(key, { subtitle = hud.text.TutorialRetry, speedKmh = speed })
 	else
 		local left = result.taskGoals - result.goals
-		local subtitle = if result.mode == "TASK" and result.outcome == "GOAL" then string.format(hud.text.TaskLeft, left) else nil
-		hud:showResult(result.detail, { subtitle = subtitle, speedKmh = speed })
+		local subtitle = nil
+		if result.mode == "TASK" and result.outcome == (if pass then "GOOD" else "GOAL") then
+			subtitle = string.format(if pass then hud.text.PassLeft else hud.text.TaskLeft, left)
+		end
+		hud:showResult(key, { subtitle = subtitle, speedKmh = speed })
 	end
 end
 
 EpisodeResult.OnClientEvent:Connect(function(result)
 	if result.rejected then
-		warn("[ShotClient] Server rejected the shot:", result.reason)
+		warn("[ShotClient] Server rejected the input:", result.reason)
 		currentEpisode = nil
 		input:setEnabled(false)
 		task.delay(0.5, requestEpisode) -- the server resends the open episode or starts a new one
@@ -4867,24 +5450,30 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 		return
 	end
 	currentEpisode = nil
-	if result.mode == "TASK" and result.outcome == "GOAL" then
+	local pass = result.kind == "PASS"
+	if not pass and result.mode == "TASK" and result.outcome == "GOAL" then
 		bestSpeed = math.max(bestSpeed, result.speedKmh or 0)
 	end
 
-	visuals:playShot(result, function()
+	local function onDecisive()
 		if result.mode ~= "TUTORIAL" then
 			showProgress(result)
-			if result.outcome == "GOAL" then
+			if result.outcome == (if pass then "GOOD" else "GOAL") then
 				hud:bumpGoals()
 			end
 		end
-		hud:setTitle("AfterShot")
+		hud:setTitle(if pass then "PassAfter" else "AfterShot")
 		task.delay(CARD_DELAY, function()
 			if not currentEpisode and not waitingForEpisode then
 				showOutcome(result)
 			end
 		end)
-	end)
+	end
+	if pass then
+		passVisuals:playPass(result, onDecisive)
+	else
+		visuals:playShot(result, onDecisive)
+	end
 end)
 
 -- Space / Enter / gamepad A press the card button.
@@ -4900,21 +5489,28 @@ end)
 
 local wasHolding = false
 RunService.RenderStepped:Connect(function(dt)
-	visuals:update(dt)
+	local pass = currentKind == "PASS"
+	visuals:update(dt) -- keeper (and the camera while the shot drill is active)
+	passVisuals:update(dt)
 	input:update()
 	if input.enabled then
 		local guided = hint:isActive()
-		local demoPower = hint:update(dt, input.holding, input.power, hud.scale)
-		visuals:updateAiming(true, input.aimX, input.aimY, input.power, input.holding)
-		hud:setPower(if input.holding or not demoPower then input.power else demoPower)
-		if guided then
-			hud:setTitle(if input.holding then "TutorialHolding" else "TutorialReady")
+		local demoPower = hint:update(dt, input.holding, input.power, hud.scale, input.target)
+		if pass then
+			passVisuals:updateAiming(true, input.target, input.power, input.holding)
 		else
-			hud:setTitle(if input.holding then "Holding" else "Ready")
+			visuals:updateAiming(true, input.aimX, input.aimY, input.power, input.holding)
+		end
+		hud:setPower(if input.holding or not demoPower then (if input.holding then input.power else 0) else demoPower)
+		local prefix = if pass then "Pass" else ""
+		if guided then
+			hud:setTitle(prefix .. (if input.holding then "TutorialHolding" else "TutorialReady"))
+		else
+			hud:setTitle(if pass then (if input.holding then "PassHolding" else "PassReady") else (if input.holding then "Holding" else "Ready"))
 		end
 	end
-	-- The keeper gets set (hop + lower stance) while the player charges.
-	local holding = input.enabled and input.holding
+	-- The keeper gets set (hop + lower stance) while the player charges a shot.
+	local holding = input.enabled and input.holding and not pass
 	if holding ~= wasHolding then
 		wasHolding = holding
 		visuals:setCharging(holding)
@@ -4925,7 +5521,198 @@ requestEpisode()
 print("[ShotClient] ready")
 ]]></string>
         </Properties>
-        <Item class="ModuleScript" referent="19">
+        <Item class="ModuleScript" referent="23">
+          <Properties>
+            <string name="Name">FigureAnimator</string>
+            <string name="Source"><![CDATA[-- Procedural animation for the outfield players of the pass drill (FigureBuilder rigs).
+-- Same joint conventions as KeeperAnimator: degrees around the rig's own axes, +X swings a
+-- hanging limb forward, +Z swings it to the rig's right; knees bend with -X.
+-- Feed it a ground position and facing every frame (moveTo); it derives the run cycle from
+-- the speed and overlays one-shot or looping actions.
+
+local FigureAnimator = {}
+FigureAnimator.__index = FigureAnimator
+
+local JOINT_NAMES = {
+	"Waist", "Neck",
+	"LeftShoulder", "LeftElbow", "LeftWrist", "RightShoulder", "RightElbow", "RightWrist",
+	"LeftHip", "LeftKnee", "LeftAnkle", "RightHip", "RightKnee", "RightAnkle",
+}
+
+-- One-shot actions and their length in seconds; WAVE and CHEER loop until replaced.
+local DURATION = { KICK = 0.5, TRAP = 0.55, LUNGE = 0.8 }
+
+local function J(x: number, y: number, z: number): Vector3
+	return Vector3.new(x, y, z)
+end
+
+local function smooth(t: number): number
+	t = math.clamp(t, 0, 1)
+	return t * t * (3 - 2 * t)
+end
+
+function FigureAnimator.new(model: Model, rootHeight: number, scale: number)
+	local self = setmetatable({}, FigureAnimator)
+	self.model = model
+	self.rootHeight = rootHeight
+	self.scale = scale
+	self.motors = {}
+	for _, name in JOINT_NAMES do
+		local motor = model:FindFirstChild(name, true)
+		if motor and motor:IsA("Motor6D") then
+			self.motors[name] = { motor = motor, base = motor.C0 }
+		end
+	end
+	self.joints = {}
+	self.position = Vector3.zero
+	self.facing = Vector3.new(0, 0, -1)
+	self.speed = 0
+	self.phase = math.random() * math.pi * 2
+	self.clock = math.random() * 10
+	self.action = nil
+	self.actionTime = 0
+	self.drop = 0
+	return self
+end
+
+-- Jumps straight there (new episode).
+function FigureAnimator:place(position: Vector3, facing: Vector3?)
+	self.position = Vector3.new(position.X, 0, position.Z)
+	if facing and facing.Magnitude > 1e-3 then
+		self.facing = Vector3.new(facing.X, 0, facing.Z).Unit
+	end
+	self.speed = 0
+end
+
+-- Moves there this frame; the run cycle follows the distance covered.
+function FigureAnimator:moveTo(position: Vector3, facing: Vector3?, dt: number)
+	local flat = Vector3.new(position.X, 0, position.Z)
+	local speed = if dt > 0 then (flat - self.position).Magnitude / dt else 0
+	self.speed += (speed - self.speed) * math.min(1, dt * 12)
+	self.position = flat
+	if facing and facing.Magnitude > 1e-3 then
+		local f = Vector3.new(facing.X, 0, facing.Z).Unit
+		self.facing = self.facing:Lerp(f, math.min(1, dt * 10))
+		if self.facing.Magnitude < 1e-3 then
+			self.facing = f
+		end
+		self.facing = self.facing.Unit
+	end
+end
+
+-- KICK | TRAP | LUNGE (one-shot), WAVE | CHEER (loop), nil = back to idle/run.
+function FigureAnimator:play(action: string?)
+	if self.action == action and (action == "WAVE" or action == "CHEER") then
+		return
+	end
+	self.action = action
+	self.actionTime = 0
+end
+
+function FigureAnimator:_pose(): (Vector3, number)
+	local run = math.clamp(self.speed / 9, 0, 1)
+	local s = math.sin(self.phase)
+	local c = math.cos(self.phase)
+	local breathe = math.sin(self.clock * 2.2)
+	local joints = {
+		Waist = J(-10 * run, 0, 0),
+		Neck = J(4 * run, 0, 0),
+		LeftShoulder = J(-34 * run * s, 0, -8 - 2 * breathe),
+		RightShoulder = J(34 * run * s, 0, 8 + 2 * breathe),
+		LeftElbow = J(18 + 50 * run, 0, 0),
+		RightElbow = J(18 + 50 * run, 0, 0),
+		LeftWrist = J(0, 0, 0),
+		RightWrist = J(0, 0, 0),
+		LeftHip = J(4 + 40 * run * s, 0, -3),
+		RightHip = J(4 - 40 * run * s, 0, 3),
+		LeftKnee = J(-8 - 55 * run * math.max(0, -c), 0, 0),
+		RightKnee = J(-8 - 55 * run * math.max(0, c), 0, 0),
+		LeftAnkle = J(4, 0, 0),
+		RightAnkle = J(4, 0, 0),
+	}
+	local bob = math.abs(s) * 0.22 * run + 0.03 * breathe * (1 - run)
+	local drop = 0
+
+	local action, t = self.action, self.actionTime
+	if action == "KICK" then
+		-- Inside-foot pass with the right foot: wind up, swing through, follow through.
+		local back = smooth(t / 0.16) * (1 - smooth((t - 0.16) / 0.1))
+		local through = smooth((t - 0.16) / 0.1) * (1 - smooth((t - 0.32) / 0.18))
+		joints.RightHip = J(-38 * back + 48 * through, 0, 8 * through)
+		joints.RightKnee = J(-70 * back - 10 * through, 0, 0)
+		joints.RightAnkle = J(10, 0, 0)
+		joints.LeftKnee = J(-18 * (back + through), 0, 0)
+		joints.LeftShoulder = J(10, 0, -40 * (back + through))
+		joints.RightShoulder = J(-20 * through, 0, 32 * (back + through))
+		joints.Waist = J(-8, 12 * back - 10 * through, 0)
+		drop = 0.15 * (back + through)
+	elseif action == "TRAP" then
+		local k = smooth(t / 0.15) * (1 - smooth((t - 0.38) / 0.17))
+		joints.RightHip = J(28 * k, 0, 6 * k)
+		joints.RightKnee = J(-34 * k, 0, 0)
+		joints.RightAnkle = J(-18 * k, 0, 0)
+		joints.LeftKnee = J(-16 * k, 0, 0)
+		joints.LeftShoulder = J(8, 0, -30 * k)
+		joints.RightShoulder = J(8, 0, 30 * k)
+		joints.Neck = J(18 * k, 0, 0) -- eyes on the ball
+		drop = 0.12 * k
+	elseif action == "LUNGE" then
+		-- Slide in with the right leg stretched towards the ball.
+		local k = smooth(t / 0.18) * (1 - smooth((t - 0.55) / 0.25))
+		joints.RightHip = J(72 * k, 0, 0)
+		joints.RightKnee = J(-4 * k, 0, 0)
+		joints.LeftHip = J(-12 * k, 0, 0)
+		joints.LeftKnee = J(-75 * k, 0, 0)
+		joints.Waist = J(16 * k, 0, 0)
+		joints.LeftShoulder = J(30 * k, 0, -55 * k)
+		joints.RightShoulder = J(-10 * k, 0, 55 * k)
+		drop = 0.75 * k
+	elseif action == "WAVE" then
+		-- Calling for the ball: right arm up, waving.
+		joints.RightShoulder = J(150, 0, 18 + 14 * math.sin(self.clock * 9))
+		joints.RightElbow = J(20, 0, 0)
+	elseif action == "CHEER" then
+		local pump = math.sin(self.clock * 10)
+		joints.LeftShoulder = J(160 + 8 * pump, 0, -16)
+		joints.RightShoulder = J(160 - 8 * pump, 0, 16)
+		joints.LeftElbow = J(15, 0, 0)
+		joints.RightElbow = J(15, 0, 0)
+		bob += math.max(0, pump) * 0.25
+	end
+	return joints, bob - drop
+end
+
+function FigureAnimator:update(dt: number)
+	self.clock += dt
+	local cadence = 1.6 + self.speed * 0.42 -- strides per second grow with speed
+	self.phase += dt * cadence * math.pi
+	if self.action then
+		self.actionTime += dt
+		local duration = DURATION[self.action]
+		if duration and self.actionTime >= duration then
+			self.action = nil
+		end
+	end
+
+	local joints, lift = self:_pose()
+	local k = 1 - math.exp(-20 * dt)
+	for name, entry in self.motors do
+		local target = joints[name] or Vector3.zero
+		local current = self.joints[name] or target
+		current = current:Lerp(target, k)
+		self.joints[name] = current
+		entry.motor.C0 = entry.base * CFrame.Angles(math.rad(current.X), math.rad(current.Y), math.rad(current.Z))
+	end
+	self.drop += (lift - self.drop) * k
+	local base = self.position + Vector3.new(0, self.rootHeight + self.drop * self.scale, 0)
+	self.model:PivotTo(CFrame.lookAt(base, base + self.facing))
+end
+
+return FigureAnimator
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="24">
           <Properties>
             <string name="Name">ImageLoader</string>
             <string name="Source"><![CDATA[-- Turns the packed images in ReplicatedStorage.Shared.Images (made by tools/assets/build_images.py)
@@ -5133,11 +5920,13 @@ return ImageLoader
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="20">
+        <Item class="ModuleScript" referent="25">
           <Properties>
             <string name="Name">InputController</string>
-            <string name="Source"><![CDATA[-- Turns mouse or touch into a normalized aim (X -1..1, Y 0..1) and power (0..1).
--- Press on the goal to aim, hold to charge the power meter, release to shoot.
+            <string name="Source"><![CDATA[-- Turns mouse or touch into shot or pass input.
+--   SHOT: press on the goal to aim (X -1..1, Y 0..1), hold to charge the power meter, release.
+--   PASS: press and drag; the point on the grass under the finger is where the ball goes, its
+--         distance from the ball is the power. Release to pass (drags shorter than MinRange cancel).
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
@@ -5145,20 +5934,34 @@ local UserInputService = game:GetService("UserInputService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
 local ShotPhysics = require(Shared:WaitForChild("ShotPhysics"))
+local PassConfig = require(Shared:WaitForChild("PassConfig"))
 
 local InputController = {}
 InputController.__index = InputController
+
+type Guide = {
+	-- SHOT: presses only count near (aimX, aimY) and the aim stays there.
+	aimX: number?,
+	aimY: number?,
+	accepts: (aimX: number, aimY: number) -> boolean,
+	-- PASS: whether a release at this ground point counts.
+	acceptsTarget: ((target: Vector3) -> boolean)?,
+	onRejected: (() -> ())?,
+}
 
 function InputController.new()
 	local self = setmetatable({
 		enabled = false,
 		holding = false,
+		mode = "SHOT",
 		aimX = 0,
 		aimY = 0.5,
 		power = 0,
-		onShoot = nil :: ((aimX: number, aimY: number, power: number) -> ())?,
-		-- Guided shot: presses only count near (aimX, aimY) and the aim stays there.
-		guide = nil :: { aimX: number, aimY: number, accepts: (aimX: number, aimY: number) -> boolean, onRejected: (() -> ())? }?,
+		target = nil :: Vector3?, -- PASS: drop point on the ground
+		passOrigin = PassConfig.Origin,
+		-- SHOT: (aimX, aimY, power); PASS: (dirX, dirZ, power)
+		onShoot = nil :: ((a: number, b: number, power: number) -> ())?,
+		guide = nil :: Guide?,
 		_activeInput = nil :: InputObject?,
 		_holdStartedAt = 0,
 	}, InputController)
@@ -5175,46 +5978,83 @@ function InputController.new()
 	return self
 end
 
+function InputController:setMode(mode: string, passOrigin: Vector3?)
+	self.mode = mode
+	self.passOrigin = passOrigin or PassConfig.Origin
+	self.target = nil
+	self.power = 0
+end
+
 function InputController:setEnabled(enabled: boolean)
 	self.enabled = enabled
 	if not enabled then
 		self.holding = false
 		self._activeInput = nil
 		self.power = 0
+		self.target = nil
 	end
 end
 
--- Call every frame: advances the power meter while held.
+-- Call every frame: advances the shot power meter while held.
 function InputController:update()
-	if not self.holding then
+	if not self.holding or self.mode ~= "SHOT" then
 		return
 	end
 	local phase = ((os.clock() - self._holdStartedAt) / ShotConfig.Input.PowerCycleSeconds) % 1
 	self.power = 1 - math.abs(1 - 2 * phase) -- 0 -> 1 -> 0
 end
 
-function InputController:setGuide(guide)
+function InputController:setGuide(guide: Guide?)
 	self.guide = guide
-	if guide then
+	if guide and guide.aimX and guide.aimY then
 		self.aimX, self.aimY = guide.aimX, guide.aimY
 	end
 end
 
--- Projects a screen point onto the goal plane (Z = 0).
-local function screenToAim(position: Vector3): (number?, number?)
+local function screenRay(position: Vector3): Ray?
 	local camera = workspace.CurrentCamera
 	if not camera then
-		return nil, nil
+		return nil
 	end
-	local ray = camera:ScreenPointToRay(position.X, position.Y)
-	if ray.Direction.Z > -1e-4 then
+	return camera:ScreenPointToRay(position.X, position.Y)
+end
+
+-- Projects a screen point onto the goal plane (Z = 0).
+local function screenToAim(position: Vector3): (number?, number?)
+	local ray = screenRay(position)
+	if not ray or ray.Direction.Z > -1e-4 then
 		return nil, nil
 	end
 	local point = ray.Origin + ray.Direction * (-ray.Origin.Z / ray.Direction.Z)
 	return ShotPhysics.goalPointToAim(point)
 end
 
+-- Projects a screen point onto the grass (Y = 0), limited to the longest pass.
+function InputController:_screenToGround(position: Vector3): Vector3?
+	local ray = screenRay(position)
+	if not ray or ray.Direction.Y > -1e-4 then
+		return nil
+	end
+	local point = ray.Origin + ray.Direction * (-ray.Origin.Y / ray.Direction.Y)
+	local origin = self.passOrigin
+	local delta = Vector3.new(point.X - origin.X, 0, point.Z - origin.Z)
+	local maxRange = PassConfig.Ball.MaxRange
+	if delta.Magnitude > maxRange then
+		delta = delta.Unit * maxRange
+	end
+	return origin + delta
+end
+
 function InputController:_aimAt(position: Vector3)
+	if self.mode == "PASS" then
+		local target = self:_screenToGround(position)
+		if target then
+			self.target = target
+			local origin = self.passOrigin
+			self.power = Vector3.new(target.X - origin.X, 0, target.Z - origin.Z).Magnitude / PassConfig.Ball.MaxRange
+		end
+		return
+	end
 	if self.guide then
 		return
 	end
@@ -5231,7 +6071,7 @@ function InputController:_onBegan(input: InputObject, gameProcessed: boolean)
 	local inputType = input.UserInputType
 	if inputType == Enum.UserInputType.MouseButton1 or inputType == Enum.UserInputType.Touch then
 		local guide = self.guide
-		if guide then
+		if guide and self.mode == "SHOT" then
 			local aimX, aimY = screenToAim(input.Position)
 			if not (aimX and guide.accepts(aimX, aimY)) then
 				if guide.onRejected then
@@ -5253,7 +6093,9 @@ function InputController:_onChanged(input: InputObject)
 		return
 	end
 	if input.UserInputType == Enum.UserInputType.MouseMovement then
-		self:_aimAt(input.Position) -- PC: the marker follows the mouse even before clicking
+		if self.mode == "SHOT" or self.holding then
+			self:_aimAt(input.Position) -- PC: the shot marker follows the mouse even before clicking
+		end
 	elseif input.UserInputType == Enum.UserInputType.Touch and input == self._activeInput then
 		self:_aimAt(input.Position)
 	end
@@ -5273,16 +6115,37 @@ function InputController:_onEnded(input: InputObject)
 
 	self.holding = false
 	self._activeInput = nil
-	if self.enabled and self.onShoot then
-		self.onShoot(self.aimX, self.aimY, self.power)
+	if not (self.enabled and self.onShoot) then
+		return
 	end
+	if self.mode == "PASS" then
+		local target = self.target
+		local origin = self.passOrigin
+		local delta = target and Vector3.new(target.X - origin.X, 0, target.Z - origin.Z)
+		if not delta or delta.Magnitude < PassConfig.Ball.MinRange then
+			self.target, self.power = nil, 0 -- a tap or a tiny drag: no pass
+			return
+		end
+		local guide = self.guide
+		if guide and guide.acceptsTarget and not guide.acceptsTarget(target :: Vector3) then
+			if guide.onRejected then
+				guide.onRejected()
+			end
+			self.target, self.power = nil, 0
+			return
+		end
+		local dir = delta.Unit
+		self.onShoot(dir.X, dir.Z, math.clamp(delta.Magnitude / PassConfig.Ball.MaxRange, 0, 1))
+		return
+	end
+	self.onShoot(self.aimX, self.aimY, self.power)
 end
 
 return InputController
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="21">
+        <Item class="ModuleScript" referent="26">
           <Properties>
             <string name="Name">KeeperAnimator</string>
             <string name="Source"><![CDATA[-- Procedural goalkeeper animation for the R15 rig (no animation assets needed).
@@ -5611,7 +6474,434 @@ return KeeperAnimator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="22">
+        <Item class="ModuleScript" referent="27">
+          <Properties>
+            <string name="Name">PassVisuals</string>
+            <string name="Source"><![CDATA[-- 3D side of the pass drill: camera, the four players, ball, ground markers, the aiming line,
+-- and the replay of the server's simulated pass. Everything is local to this client.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
+local PassConfig = require(Shared:WaitForChild("PassConfig"))
+local PassPhysics = require(Shared:WaitForChild("PassPhysics"))
+local FigureBuilder = require(Shared:WaitForChild("FigureBuilder"))
+local FigureAnimator = require(script.Parent:WaitForChild("FigureAnimator"))
+
+local BALL_RADIUS = ShotConfig.Ball.Radius
+local SCALE = ShotConfig.Goalkeeper.ModelScale
+local LINE_DOTS = 22
+local CAMERA_BLEND = 0.9
+
+local rgb = Color3.fromRGB
+local WHITE = Color3.new(1, 1, 1)
+local GOLD = rgb(255, 191, 31)
+local LILAC = rgb(190, 168, 255)
+local RED = rgb(255, 45, 85)
+
+local SKIN = rgb(214, 132, 82)
+local HAIR = rgb(52, 32, 26)
+-- Our team in gold and purple, the opponent in red.
+local TEAM_KIT = { skin = SKIN, shirt = GOLD, shorts = rgb(43, 18, 80), socks = GOLD, boots = rgb(20, 14, 30), hair = HAIR }
+local OPPONENT_KIT = { skin = SKIN, shirt = RED, shorts = rgb(245, 240, 250), socks = RED, boots = rgb(245, 240, 250), hair = HAIR }
+
+local PassVisuals = {}
+PassVisuals.__index = PassVisuals
+
+local function create(className: string, props: { [string]: any }): any
+	local inst = Instance.new(className)
+	local parent = props.Parent
+	for key, value in props do
+		if key ~= "Parent" then
+			inst[key] = value
+		end
+	end
+	inst.Parent = parent
+	return inst
+end
+
+local function makePart(props: { [string]: any }): Part
+	props.Anchored = true
+	props.CanCollide = false
+	props.CanQuery = false
+	props.CanTouch = false
+	props.CastShadow = props.CastShadow or false
+	props.Material = props.Material or Enum.Material.SmoothPlastic
+	return create("Part", props)
+end
+
+-- Flat circle on the grass, drawn as a crisp GUI on the part's top face.
+local function groundCircle(parent: Instance, name: string, radius: number, color: Color3, fill: number)
+	local part = makePart({ Name = name, Size = Vector3.new(radius * 2, 0.05, radius * 2), Transparency = 1, Parent = parent })
+	local gui = create("SurfaceGui", {
+		Face = Enum.NormalId.Top,
+		LightInfluence = 0,
+		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
+		PixelsPerStud = 24,
+		Parent = part,
+	})
+	local circle = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(1, -8, 1, -8),
+		BackgroundColor3 = color,
+		BackgroundTransparency = fill,
+		Parent = gui,
+	})
+	create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = circle })
+	local stroke = create("UIStroke", { Color = color, Thickness = 4, Parent = circle })
+	return { part = part, frame = circle, stroke = stroke, gui = gui }
+end
+
+local function icosahedronDirections(): { Vector3 }
+	local phi = (1 + math.sqrt(5)) / 2
+	local dirs = {}
+	for _, a in { -1, 1 } do
+		for _, b in { -phi, phi } do
+			table.insert(dirs, Vector3.new(0, a, b).Unit)
+			table.insert(dirs, Vector3.new(a, b, 0).Unit)
+			table.insert(dirs, Vector3.new(b, 0, a).Unit)
+		end
+	end
+	return dirs
+end
+
+-- Position on a sampled track at time t (linear between samples).
+local function trackAt(track: { Vector3 }, step: number, t: number): Vector3
+	local f = math.max(t, 0) / step
+	local i = math.floor(f)
+	if i >= #track - 1 then
+		return track[#track]
+	end
+	return track[i + 1]:Lerp(track[i + 2], f - i)
+end
+
+local function flat(v: Vector3): Vector3
+	return Vector3.new(v.X, 0, v.Z)
+end
+
+function PassVisuals.new()
+	local self = setmetatable({}, PassVisuals)
+	self.clock = 0
+	self.frozen = false
+	self.token = 0
+	self.ballRotation = CFrame.identity
+	self.active = false
+
+	local folder = create("Folder", { Name = "PassVisuals" })
+	self.folder = folder
+
+	-- Ball, same look as the shot drill's.
+	local ballModel = create("Model", { Name = "Ball", Parent = folder })
+	local shell = makePart({ Name = "Shell", Shape = Enum.PartType.Ball, Size = Vector3.one * BALL_RADIUS * 2, Color = WHITE, CastShadow = true, Parent = ballModel })
+	self.ballParts = { { shell, CFrame.identity } }
+	for _, dir in icosahedronDirections() do
+		local reference = if math.abs(dir.Y) < 0.9 then Vector3.yAxis else Vector3.xAxis
+		local patch = makePart({
+			Name = "Panel",
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(0.05, BALL_RADIUS * 0.66, BALL_RADIUS * 0.66),
+			Color = rgb(28, 18, 48),
+			Parent = ballModel,
+		})
+		table.insert(self.ballParts, { patch, CFrame.fromMatrix(dir * BALL_RADIUS * 0.985, dir, dir:Cross(reference).Unit) })
+	end
+
+	local function figure(name: string, kit, textures: string)
+		local model, rootHeight = FigureBuilder.build(name, kit, SCALE, textures)
+		for _, part in model:GetDescendants() do
+			if part:IsA("BasePart") then
+				part.CastShadow = true
+			end
+		end
+		model.Parent = folder
+		return FigureAnimator.new(model, rootHeight, SCALE)
+	end
+	self.passer = figure("Passer", TEAM_KIT, "head")
+	self.mates = { figure("Teammate1", TEAM_KIT, "head"), figure("Teammate2", TEAM_KIT, "head") }
+	self.defender = figure("Defender", OPPONENT_KIT, "head")
+
+	-- Ground markers: where teammates can take the ball, and the defender's reach.
+	self.mateRings = {
+		groundCircle(folder, "MateRing1", PassConfig.Teammate.Reach + 0.8, LILAC, 0.85),
+		groundCircle(folder, "MateRing2", PassConfig.Teammate.Reach + 0.8, LILAC, 0.85),
+	}
+	self.defenderZone = groundCircle(folder, "DefenderZone", PassConfig.Defender.Reach, RED, 0.7)
+	self.targetRing = groundCircle(folder, "Target", 1.6, GOLD, 0.6)
+	self.dots = {}
+	for i = 1, LINE_DOTS do
+		self.dots[i] = makePart({
+			Name = "LineDot",
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(0.06, 0.55, 0.55),
+			Color = GOLD,
+			Material = Enum.Material.Neon,
+			Transparency = 1,
+			Parent = folder,
+		})
+	end
+	return self
+end
+
+-- Shows the drill (parents everything into the workspace) and moves the camera over.
+function PassVisuals:enter()
+	if self.active then
+		return
+	end
+	self.active = true
+	self.folder.Parent = workspace
+	local camera = workspace.CurrentCamera
+	self.blendFrom, self.blendFov, self.blendT = camera.CFrame, camera.FieldOfView, 0
+end
+
+function PassVisuals:exit()
+	self.active = false
+	self.folder.Parent = nil
+end
+
+function PassVisuals:_setBall(position: Vector3)
+	local base = CFrame.new(position) * self.ballRotation
+	for _, entry in self.ballParts do
+		entry[1].CFrame = base * entry[2]
+	end
+	self.ballPosition = position
+end
+
+function PassVisuals:_placeRing(ring, position: Vector3)
+	ring.part.CFrame = CFrame.new(position.X, 0.06, position.Z)
+end
+
+-- New episode: everyone back on their marks for this situation.
+function PassVisuals:reset(layout)
+	self.token += 1
+	self.layout = layout
+	self.clock = 0
+	self.frozen = false
+	self.replay = nil
+	self.highlight = nil
+	self.ballRotation = CFrame.identity
+	local origin = layout.origin
+	self:_setBall(origin + Vector3.new(0, BALL_RADIUS, 0))
+	local toGoal = Vector3.new(0, 0, -1)
+	self.aimFacing = toGoal
+	self.passer:play(nil)
+	self.passer:place(origin - toGoal * 1.5 + Vector3.new(-0.7, 0, 0), toGoal)
+	for i, mate in self.mates do
+		local at = layout.teammates[i]
+		mate:play(nil)
+		mate:place(at, flat(origin - at))
+		self:_placeRing(self.mateRings[i], at)
+		self.mateRings[i].part.Parent = self.folder
+	end
+	self.defender:play(nil)
+	self.defender:place(PassPhysics.patrolAt(layout.defender, 0), flat(origin - PassPhysics.patrolAt(layout.defender, 0)))
+	self.defenderZone.part.Parent = self.folder
+	self:updateAiming(false, nil, 0, false)
+end
+
+-- Seconds since this episode was shown, stopped at the moment of the pass (sent to the server).
+function PassVisuals:clockTime(): number
+	return self.clock
+end
+
+-- Pulses one teammate's ring (the tutorial's target), or none.
+function PassVisuals:setHighlight(index: number?)
+	self.highlight = index
+end
+
+-- target: the drag point on the ground while holding (nil = not aiming).
+function PassVisuals:updateAiming(enabled: boolean, target: Vector3?, power: number, holding: boolean)
+	local layout = self.layout
+	local show = enabled and holding and target ~= nil and layout ~= nil
+	self.targetRing.part.Parent = if show then self.folder else nil
+	for _, dot in self.dots do
+		dot.Transparency = 1
+	end
+	self.aimTarget = if show then target else nil
+	if not show then
+		return
+	end
+	local origin = layout.origin
+	local delta = flat((target :: Vector3) - origin)
+	local length = delta.Magnitude
+	if length < 1e-3 then
+		return
+	end
+	local dir = delta / length
+	self.aimFacing = dir
+	self:_placeRing(self.targetRing, origin + delta)
+	-- Dotted line from the ball to the drop point; gold within reach, lilac when too short to pass.
+	local tooShort = length < PassConfig.Ball.MinRange
+	local count = math.clamp(math.floor(length / 2.2), 2, LINE_DOTS)
+	for i, dot in self.dots do
+		if i <= count then
+			local p = origin + dir * (length * i / (count + 1))
+			dot.CFrame = CFrame.new(p.X, 0.08, p.Z) * CFrame.Angles(0, 0, math.pi / 2)
+			dot.Color = if tooShort then LILAC else GOLD
+			dot.Transparency = 0.15 + 0.5 * i / count
+		end
+	end
+	self.targetRing.stroke.Color = if tooShort then LILAC else GOLD
+	self.targetRing.frame.BackgroundColor3 = if tooShort then LILAC else GOLD
+end
+
+function PassVisuals:onPassReleased()
+	self.frozen = true
+	self.passer:play("KICK")
+	self:updateAiming(false, nil, 0, false)
+	for _, mate in self.mates do
+		mate:play(nil)
+	end
+end
+
+-- Replays the server's pass. onDecisive runs when the result is clear on screen.
+function PassVisuals:playPass(result, onDecisive: () -> ())
+	self.replay = {
+		token = self.token,
+		result = result,
+		t = 0,
+		onDecisive = onDecisive,
+		decided = false,
+		reacted = false,
+	}
+	self.defenderZone.part.Parent = nil
+end
+
+function PassVisuals:_updateReplay(dt: number)
+	local replay = self.replay
+	local result = replay.result
+	local step = result.sampleStep
+	replay.t += dt
+	local t = replay.t
+
+	local ball = trackAt(result.ball, step, t)
+	local previous = self.ballPosition
+	local position = Vector3.new(ball.X, BALL_RADIUS, ball.Z)
+	-- Rolling: spin about the axis perpendicular to the motion.
+	local moved = flat(position - previous)
+	if moved.Magnitude > 1e-4 then
+		local axis = Vector3.yAxis:Cross(moved.Unit)
+		self.ballRotation = CFrame.fromAxisAngle(axis, moved.Magnitude / BALL_RADIUS) * self.ballRotation
+	end
+	self:_setBall(position)
+
+	local defender = trackAt(result.defender, step, t)
+	local defenderVelocity = trackAt(result.defender, step, t + 0.05) - defender
+	local facing = if defenderVelocity.Magnitude > 0.05 then defenderVelocity else (position - defender)
+	self.defender:moveTo(defender, facing, dt)
+
+	for i, mate in self.mates do
+		local home = self.layout.teammates[i]
+		if result.receiver == i and result.receiverTrack then
+			mate:moveTo(trackAt(result.receiverTrack, step, t), flat(position - mate.position), dt)
+		else
+			mate:moveTo(home, flat(position - home), dt)
+		end
+	end
+	self.passer:moveTo(self.passer.position, flat(position - self.passer.position), dt)
+
+	-- Reactions just before the decisive moment, so the pose lands with the ball.
+	if not replay.reacted and t >= result.eventTime - 0.12 then
+		replay.reacted = true
+		local detail = result.detail
+		local receiver = result.receiver and self.mates[result.receiver]
+		if detail == "GOOD" and receiver then
+			receiver:play("TRAP")
+		elseif detail == "INTERCEPTED" then
+			self.defender:play("LUNGE")
+		elseif detail == "TOO_HARD" and receiver then
+			receiver:play("LUNGE")
+		end
+	end
+	if not replay.decided and t >= result.eventTime then
+		replay.decided = true
+		if result.detail == "GOOD" then
+			self.passer:play("CHEER")
+			local receiver = result.receiver and self.mates[result.receiver]
+			task.delay(0.45, function()
+				if self.replay == replay and receiver then
+					receiver:play("CHEER")
+				end
+			end)
+		elseif result.detail == "INTERCEPTED" then
+			task.delay(0.6, function()
+				if self.replay == replay then
+					self.defender:play("CHEER")
+				end
+			end)
+		end
+		replay.onDecisive()
+	end
+end
+
+-- Per-frame: camera, the defender's patrol, idle players and the replay.
+function PassVisuals:update(dt: number)
+	if not self.active or not self.layout then
+		return
+	end
+	local camera = workspace.CurrentCamera
+	camera.CameraType = Enum.CameraType.Scriptable
+	local target = CFrame.lookAt(PassConfig.Camera.Position, PassConfig.Camera.LookAt)
+	local fov = PassConfig.Camera.FieldOfView
+	if self.blendT < 1 then
+		self.blendT = math.min(1, self.blendT + dt / CAMERA_BLEND)
+		local k = self.blendT * self.blendT * (3 - 2 * self.blendT)
+		camera.CFrame = self.blendFrom:Lerp(target, k)
+		camera.FieldOfView = self.blendFov + (fov - self.blendFov) * k
+	else
+		camera.CFrame = target
+		camera.FieldOfView = fov
+	end
+
+	local layout = self.layout
+	local origin = layout.origin
+	if self.replay and self.replay.token == self.token then
+		self:_updateReplay(dt)
+	else
+		if not self.frozen then
+			self.clock += dt
+		end
+		local def = PassPhysics.patrolAt(layout.defender, self.clock)
+		self.defender:moveTo(def, flat(self.ballPosition - def), if self.frozen then 0 else dt)
+		self:_placeRing(self.defenderZone, def)
+		local aim = self.aimTarget
+		for i, mate in self.mates do
+			local home = layout.teammates[i]
+			mate:moveTo(home, flat(origin - home), dt)
+			-- The teammate the line points at (or the tutorial target) calls for the ball.
+			local calling = (aim and flat(aim - home).Magnitude < 7) or (self.highlight == i and not self.frozen)
+			if not self.frozen then
+				mate:play(if calling then "WAVE" else nil)
+			end
+		end
+		-- The passer turns to where he's about to play it.
+		local facing = self.aimFacing
+		local stand = origin - facing * 1.5 - facing:Cross(Vector3.yAxis) * 0.7 -- ball on his right foot
+		self.passer:moveTo(stand, facing, dt)
+	end
+
+	local pulse = 0.5 + 0.5 * math.sin(os.clock() * 6)
+	for i, ring in self.mateRings do
+		local lit = self.highlight == i and not self.frozen
+		ring.stroke.Color = if lit then GOLD else LILAC
+		ring.frame.BackgroundColor3 = if lit then GOLD else LILAC
+		ring.frame.BackgroundTransparency = if lit then 0.75 - 0.15 * pulse else 0.85
+		ring.stroke.Thickness = if lit then 5 + 3 * pulse else 4
+	end
+
+	self.passer:update(dt)
+	for _, mate in self.mates do
+		mate:update(dt)
+	end
+	self.defender:update(dt)
+end
+
+return PassVisuals
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="28">
           <Properties>
             <string name="Name">ShotHud</string>
             <string name="Source"><![CDATA[-- Screen UI for the shot drill in the purple "pixel UI kit" style: logo + stage, goals counter,
@@ -5635,7 +6925,9 @@ local TEXT = {
 	LogoMiddle = "FOOTBALL",
 	LogoBottom = "STAR",
 	Mode = 'ОБУЧЕНИЕ  •  <font color="#FFBF1F">УДАРЫ</font>',
-	Stage = "Этап 1 из 3",
+	ModePass = 'ОБУЧЕНИЕ  •  <font color="#FFBF1F">ПАС</font>',
+	Stage = "Этап %d из 3",
+	StageFree = "Обучение пройдено",
 	Goals = "ГОЛЫ",
 	Power = "СИЛА %d%%",
 	PowerHint = "55–85% — удобно   ·   100% — мяч летит выше",
@@ -5646,11 +6938,22 @@ local TEXT = {
 	TutorialReady = "Повтори за пальцем: нажми на кружок и держи",
 	TutorialHolding = "Отпусти, когда сила в зелёной зоне",
 	PowerZone = "ЗОНА УДАРА",
+	PassPowerZone = "ДО ПАРТНЁРА",
+	PassPowerHint = "Сила = длина паса   ·   дальше партнёра — не удержит",
+	PassReady = "Нажми и веди к партнёру, отпусти — пас",
+	PassHolding = "Отпусти, чтобы отдать пас",
+	PassFlying = "Пас!",
+	PassAfter = "Выбери свободного партнёра",
+	PassTutorialReady = "Повтори за пальцем: веди от мяча к партнёру",
+	PassTutorialHolding = "Отпусти на партнёре",
 	NextShot = "ЕЩЁ УДАР  ›",
 	Speed = "%d км/ч",
 	-- Training
 	GoalsTutorial = "ПОДСКАЗКА",
 	GoalsTask = "ЗАДАНИЕ: ЗАБЕЙ %d",
+	GoalsTaskPass = "ЗАДАНИЕ: %d ТОЧНЫХ ПАСОВ",
+	PassTutorialDone = "Отличный пас! Теперь сделай %d точных пасов",
+	PassLeft = "Осталось пасов: %d",
 	GoalsFree = "ГОЛЫ / УДАРЫ",
 	ModeFree = 'СВОБОДНАЯ ИГРА  •  <font color="#FFBF1F">УДАРЫ</font>',
 	TutorialDone = "Так и бей! Теперь забей %d голов",
@@ -5659,8 +6962,9 @@ local TEXT = {
 	TaskLeft = "Осталось забить: %d",
 	CompleteTitle = "ТРЕНИРОВКА\nПРОЙДЕНА!",
 	CompleteSubtitle = "%d голов за %d ударов",
+	CompleteSubtitlePass = "%d точных пасов за %d попыток",
 	CompleteSpeed = "Лучший удар: %d км/ч",
-	CompleteStage = "Этап 1 из 3 пройден",
+	CompleteStage = "Этап %d из 3 пройден",
 	PlayAgain = "ЕЩЁ РАЗ",
 	Next = "ДАЛЕЕ  ›",
 	Outcomes = {
@@ -5673,6 +6977,11 @@ local TEXT = {
 		BAR = { "ПЕРЕКЛАДИНА!", "Совсем рядом. Чуть ниже" },
 		WIDE = { "МИМО!", "Мяч прошёл мимо ворот" },
 		OVER = { "ВЫШЕ ВОРОТ!", "Слишком сильно. Сбавь силу" },
+		PASS_GOOD = { "ТОЧНЫЙ ПАС!", "Партнёр принял мяч" },
+		PASS_INTERCEPTED = { "ПЕРЕХВАТ!", "Защитник успел. Пасуй свободному или дождись момента" },
+		PASS_TOO_HARD = { "СЛИШКОМ СИЛЬНО!", "Партнёр не удержал. Отпускай ближе к нему" },
+		PASS_SHORT = { "НЕ ДОШЁЛ!", "Слабый пас. Веди палец до партнёра" },
+		PASS_WIDE = { "МИМО!", "Пас ушёл мимо партнёра" },
 	},
 }
 
@@ -5706,8 +7015,13 @@ local KIND_STYLE = {
 	BAR = { top = GOLD_LIGHT, bottom = ORANGE, accent = ORANGE, icon = "🥅" },
 	WIDE = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
 	OVER = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
+	PASS_GOOD = { top = CREAM, bottom = GOLD, accent = GOLD, icon = "👟", sparkle = true },
+	PASS_INTERCEPTED = { top = CREAM, bottom = LILAC, accent = GLOW, icon = "✋" },
+	PASS_TOO_HARD = { top = GOLD_LIGHT, bottom = ORANGE, accent = ORANGE, icon = "💨" },
+	PASS_SHORT = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
+	PASS_WIDE = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
 }
-local PIP_COLORS = { GOAL = GOLD, SAVE = GLOW, POST = CREAM, MISS = RED }
+local PIP_COLORS = { GOAL = GOLD, SAVE = GLOW, POST = CREAM, MISS = RED, GOOD = GOLD, INTERCEPTED = GLOW }
 
 local MONTSERRAT = "rbxasset://fonts/families/Montserrat.json"
 local FONT_HEAVY = Font.new(MONTSERRAT, Enum.FontWeight.Heavy, Enum.FontStyle.Italic)
@@ -6015,8 +7329,10 @@ function ShotHud:_buildLogo()
 	outline(modeText, 1.5)
 	self.modeText = modeText
 
-	local stage = text({ Name = "Stage", Position = UDim2.fromOffset(12, 172), Size = UDim2.fromOffset(112, 20), Text = TEXT.Stage, TextSize = 15, FontFace = FONT_BOLD, TextTransparency = 0.15, Parent = root })
+	local stage = text({ Name = "Stage", Position = UDim2.fromOffset(12, 172), Size = UDim2.fromOffset(112, 20), Text = string.format(TEXT.Stage, 1), TextSize = 15, FontFace = FONT_BOLD, TextTransparency = 0.15, Parent = root })
+	sizeLimit(stage, 15)
 	outline(stage, 1.5)
+	self.stageText = stage
 	self.stageDots = {}
 	for i = 1, 3 do
 		local current = i == 1
@@ -6030,7 +7346,8 @@ function ShotHud:_buildLogo()
 			Parent = root,
 		})
 		corner(dot, 2)
-		stroke(dot, if current then INK else VIOLET, 2)
+		self.stageDotStrokes = self.stageDotStrokes or {}
+		self.stageDotStrokes[i] = stroke(dot, if current then INK else VIOLET, 2)
 		self.stageDots[i] = dot
 	end
 end
@@ -6119,7 +7436,8 @@ function ShotHud:_buildPowerPanel()
 	})
 	corner(zone, 4)
 	stroke(zone, LIME, 2.5)
-	local zoneLabel = text({
+	local zoneLabel
+	zoneLabel = text({
 		Name = "Label",
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 1, 3),
@@ -6131,6 +7449,7 @@ function ShotHud:_buildPowerPanel()
 		Parent = zone,
 	})
 	outline(zoneLabel, 1.5)
+	self.powerZoneLabel = zoneLabel
 	TweenService:Create(zone, TweenInfo.new(0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { BackgroundTransparency = 0.45 }):Play()
 	self.powerZone = zone
 
@@ -6205,7 +7524,8 @@ function ShotHud:_buildCompleteMenu()
 		outline(label, 1.5)
 		return c, label
 	end
-	chip(1, "✅", TEXT.CompleteStage, LIME)
+	local _, stageChipText = chip(1, "✅", string.format(TEXT.CompleteStage, 1), LIME)
+	self.completeStageText = stageChipText
 	self.completeSpeed, self.completeSpeedText = chip(2, "⚡", "", GOLD)
 
 	-- Two buttons: replay the task (secondary) and go on (primary).
@@ -6544,19 +7864,32 @@ function ShotHud:hideCard()
 	self.retryButton.shineTween:Cancel()
 end
 
--- Labels for the current part of the training: TUTORIAL | TASK | FREE.
-function ShotHud:setMode(mode: string, taskGoals: number)
+-- Stage dots: done = lime, current = gold and larger, still to come = dark. stage 4 = all done.
+function ShotHud:_setStage(stage: number)
+	for i, dot in self.stageDots do
+		local done, current = i < stage, i == stage
+		dot.BackgroundColor3 = if done then LIME elseif current then GOLD else NAVY
+		dot.Size = if current then UDim2.fromOffset(13, 13) else UDim2.fromOffset(10, 10)
+		self.stageDotStrokes[i].Color = if done or current then INK else VIOLET
+	end
+	self.stageText.Text = if stage > 3 then TEXT.StageFree else string.format(TEXT.Stage, stage)
+end
+
+-- Labels for the current part of the training. kind: SHOT | PASS; mode: TUTORIAL | TASK | FREE.
+function ShotHud:setMode(kind: string, mode: string, taskGoals: number)
+	self.kind = kind
+	local pass = kind == "PASS"
 	if mode == "TUTORIAL" then
 		self.goalsLabel.Text = TEXT.GoalsTutorial
 	elseif mode == "TASK" then
-		self.goalsLabel.Text = string.format(TEXT.GoalsTask, taskGoals)
+		self.goalsLabel.Text = string.format(if pass then TEXT.GoalsTaskPass else TEXT.GoalsTask, taskGoals)
 	else
 		self.goalsLabel.Text = TEXT.GoalsFree
 	end
-	self.modeText.Text = if mode == "FREE" then TEXT.ModeFree else TEXT.Mode
-	if mode == "FREE" then
-		self.stageDots[1].BackgroundColor3 = LIME
-	end
+	self.modeText.Text = if mode == "FREE" then TEXT.ModeFree elseif pass then TEXT.ModePass else TEXT.Mode
+	self.powerHint.Text = if pass then TEXT.PassPowerHint else TEXT.PowerHint
+	self.powerZoneLabel.Text = if pass then TEXT.PassPowerZone else TEXT.PowerZone
+	self:_setStage(if mode == "FREE" then 4 elseif pass then 2 else 1)
 end
 
 -- Highlights the power range that the guided shot asks for (nil hides it).
@@ -6573,11 +7906,13 @@ function ShotHud:setPowerZone(min: number?, max: number?)
 	zone.Visible = true
 end
 
--- Completion menu after the task is done. stats: { goals, shots, bestSpeed }
-function ShotHud:showComplete(stats: { goals: number, shots: number, bestSpeed: number? })
+-- Completion menu after a task is done. stats: { kind, goals, shots, bestSpeed }
+function ShotHud:showComplete(stats: { kind: string, goals: number, shots: number, bestSpeed: number? })
 	self.card.Visible = false
 	self.cardButton.shineTween:Cancel()
-	self.completeSubtitle.Text = string.format(TEXT.CompleteSubtitle, stats.goals, stats.shots)
+	local stage = if stats.kind == "PASS" then 2 else 1
+	self.completeSubtitle.Text = string.format(if stats.kind == "PASS" then TEXT.CompleteSubtitlePass else TEXT.CompleteSubtitle, stats.goals, stats.shots)
+	self.completeStageText.Text = string.format(TEXT.CompleteStage, stage)
 	local hasSpeed = type(stats.bestSpeed) == "number" and stats.bestSpeed > 0
 	self.completeSpeed.Visible = hasSpeed
 	if hasSpeed then
@@ -6586,7 +7921,7 @@ function ShotHud:showComplete(stats: { goals: number, shots: number, bestSpeed: 
 	for i, ball in self.completeBalls do
 		ball.Visible = i <= stats.goals
 	end
-	self.stageDots[1].BackgroundColor3 = LIME
+	self:_setStage(stage + 1)
 
 	self.complete.Visible = true
 	self.completeDim.BackgroundTransparency = 1
@@ -6608,7 +7943,7 @@ return ShotHud
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="23">
+        <Item class="ModuleScript" referent="29">
           <Properties>
             <string name="Name">ShotVisuals</string>
             <string name="Source"><![CDATA[-- Client-only 3D visuals: camera, ball replay, goalkeeper animation, aim crosshair, trajectory
@@ -6688,6 +8023,8 @@ function ShotVisuals.new()
 	self.shake = 0
 	self.fovKick = 0
 	self.ballRotation = CFrame.identity
+	self.active = true
+	self.blendT = 1
 
 	local folder = create("Folder", { Name = "ShotVisuals", Parent = workspace })
 
@@ -6865,6 +8202,25 @@ function ShotVisuals:reset()
 	self:updateAiming(false, 0, 0.5, 0, false)
 end
 
+-- Off while another drill (the pass) owns the camera: the ball is put away, the keeper idles.
+function ShotVisuals:setActive(active: boolean)
+	if self.active == active then
+		return
+	end
+	self.active = active
+	if active then
+		local camera = workspace.CurrentCamera
+		self.blendFrom, self.blendFov, self.blendT = camera.CFrame, camera.FieldOfView, 0
+		self:reset()
+	else
+		self.token += 1 -- stops any replay in progress
+		self.holdBall = false
+		self.trail.Enabled = false
+		self:_setBall(Vector3.new(0, -50, 0))
+		self:updateAiming(false, 0, 0.5, 0, false)
+	end
+end
+
 function ShotVisuals:setCharging(on: boolean)
 	if self.keeper then
 		self.keeper:setCharging(on)
@@ -6877,16 +8233,26 @@ function ShotVisuals:update(dt: number)
 	self.shake = math.max(0, self.shake - dt * 2.5)
 	self.fovKick = math.max(0, self.fovKick - dt * 10)
 
-	local camera = workspace.CurrentCamera
-	camera.CameraType = Enum.CameraType.Scriptable
-	camera.FieldOfView = ShotConfig.Camera.FieldOfView - self.fovKick
-	local base = CFrame.lookAt(ShotConfig.Camera.Position, ShotConfig.Camera.LookAt)
-	if self.shake > 0 then
-		local t = self.clock * 25
-		local amount = self.shake * 0.3
-		base *= CFrame.new(math.noise(t, 1) * amount, math.noise(t, 2) * amount, 0)
+	if self.active then
+		local camera = workspace.CurrentCamera
+		camera.CameraType = Enum.CameraType.Scriptable
+		local fov = ShotConfig.Camera.FieldOfView - self.fovKick
+		local base = CFrame.lookAt(ShotConfig.Camera.Position, ShotConfig.Camera.LookAt)
+		if self.shake > 0 then
+			local t = self.clock * 25
+			local amount = self.shake * 0.3
+			base *= CFrame.new(math.noise(t, 1) * amount, math.noise(t, 2) * amount, 0)
+		end
+		if self.blendT < 1 then
+			-- Coming back from the pass drill: glide to the shot camera.
+			self.blendT = math.min(1, self.blendT + dt / 0.9)
+			local k = self.blendT * self.blendT * (3 - 2 * self.blendT)
+			base = self.blendFrom:Lerp(base, k)
+			fov = self.blendFov + (fov - self.blendFov) * k
+		end
+		camera.FieldOfView = fov
+		camera.CFrame = base
 	end
-	camera.CFrame = base
 
 	if self.keeper then
 		self.keeper:update(dt)
@@ -7040,21 +8406,24 @@ return ShotVisuals
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="24">
+        <Item class="ModuleScript" referent="30">
           <Properties>
             <string name="Name">TutorialHint</string>
-            <string name="Source"><![CDATA[-- Finger hint for the guided first shot: a pulsing ring on the goal shows where to press, and a
--- finger demonstrates press → hold (the power bar fills to the green zone) → release.
--- While the player holds, the finger stays pressed and the callout says when to let go.
---
--- Everything sits in a BillboardGui anchored at the target point on the goal, so the ring lines
--- up with the shot on every screen. The ring is sized in studs (it matches the press area); the
--- finger and callout are sized in pixels times the HUD scale (readable on phones).
+            <string name="Source"><![CDATA[-- Finger hint for the guided first shot and first pass.
+--   SHOT: a pulsing ring on the goal; the finger shows press → hold (power bar to the green
+--         zone) → release.
+--   PASS: the target teammate's ground ring pulses (PassVisuals); the finger presses at the ball,
+--         drags to the teammate and lets go, while the power bar fills.
+-- The ring and callout sit in a BillboardGui anchored at the target, the finger in another one
+-- whose anchor moves, so everything lines up with the 3D scene on any screen. Sizes in pixels are
+-- multiplied by the HUD scale (readable on phones).
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local ShotPhysics = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotPhysics"))
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ShotPhysics = require(Shared:WaitForChild("ShotPhysics"))
+local PassConfig = require(Shared:WaitForChild("PassConfig"))
 local ImageLoader = require(script.Parent:WaitForChild("ImageLoader"))
 
 local rgb = Color3.fromRGB
@@ -7064,7 +8433,6 @@ local PINK = rgb(255, 120, 140)
 local CREAM = rgb(247, 236, 214)
 local INK = rgb(18, 6, 31)
 local NAVY = rgb(18, 11, 36)
-local VIOLET = rgb(90, 47, 194)
 local FONT = Font.new("rbxasset://fonts/families/Montserrat.json", Enum.FontWeight.Heavy, Enum.FontStyle.Italic)
 
 local TEXT = {
@@ -7073,17 +8441,21 @@ local TEXT = {
 	Release = "ОТПУСТИ!",
 	Wait = "ДЕРЖИ ДО ЗЕЛЁНОЙ ЗОНЫ",
 	Missed = "НАЖМИ НА КРУЖОК",
+	PassPress = "ВЕДИ К ПАРТНЁРУ",
+	PassRelease = "ОТПУСТИ!",
+	PassMissed = "ОТПУСТИ У ПАРТНЁРА",
 }
 
-local MARGIN = 360 -- pixels of room around the ring for the finger and the callout
-local FINGER_SIZE = 92 -- pixels at HUD scale 1
-local FINGER_TIP = Vector2.new(0.235, 0.04) -- fingertip in the finger image (see tools/assets/finger.py)
-local FALLBACK_TIP = Vector2.new(0.3, 0.07)
+local MARGIN = 360 -- pixels around the shot ring for the callout
+local FINGER_SIZE = 96 -- pixels at HUD scale 1
+local CALLOUT_HEIGHT = 8.6 -- studs above a pass target (over the teammate's head)
 
--- Demo timeline (seconds in a loop).
-local LOOP = 2.6
+-- Demo timelines (seconds in a loop).
+local SHOT_LOOP = 2.6
 local ARRIVE, PRESS, RELEASE, FADE = 0.55, 0.7, 1.35, 1.7
-local DEMO_POWER = 0.68 -- where the demo releases (middle of the green zone)
+local DEMO_POWER = 0.68 -- where the shot demo releases (middle of the green zone)
+local PASS_LOOP = 2.9
+local P_ARRIVE, P_PRESS, P_DRAG, P_RELEASE = 0.35, 0.5, 1.55, 1.85
 
 local TutorialHint = {}
 TutorialHint.__index = TutorialHint
@@ -7118,55 +8490,52 @@ local function easeOut(t: number): number
 	return 1 - (1 - t) ^ 3
 end
 
+local function easeInOut(t: number): number
+	t = math.clamp(t, 0, 1)
+	return t * t * (3 - 2 * t)
+end
+
 -- Plain finger made of frames, used only if images are unavailable.
 local function fallbackFinger(parent: Instance): { GuiObject }
 	local parts = {}
-	local hand = create("Frame", {
-		Name = "Hand",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.5),
-		Size = UDim2.fromScale(0.5, 0.95),
-		Rotation = -22,
-		BackgroundTransparency = 1,
-		Parent = parent,
-	})
-	local function piece(name: string, position: UDim2, size: UDim2, color: Color3, radius: number)
-		local f = create("Frame", { Name = name, Position = position, Size = size, BackgroundColor3 = color, BorderSizePixel = 0, Parent = hand })
+	local function piece(name: string, position: UDim2, size: UDim2, radius: number)
+		local f = create("Frame", { Name = name, Position = position, Size = size, BackgroundColor3 = CREAM, BorderSizePixel = 0, Parent = parent })
 		create("UICorner", { CornerRadius = UDim.new(radius, 0), Parent = f })
 		create("UIStroke", { Color = INK, Thickness = 3, Parent = f })
 		table.insert(parts, f)
 	end
-	piece("Index", UDim2.fromScale(0.3, 0), UDim2.fromScale(0.3, 0.6), CREAM, 0.5)
-	piece("Palm", UDim2.fromScale(0.05, 0.45), UDim2.fromScale(0.9, 0.4), CREAM, 0.3)
-	piece("Cuff", UDim2.fromScale(0.08, 0.82), UDim2.fromScale(0.84, 0.16), VIOLET, 0.2)
+	piece("Index", UDim2.fromScale(0.38, 0.02), UDim2.fromScale(0.22, 0.55), 0.5)
+	piece("Palm", UDim2.fromScale(0.22, 0.42), UDim2.fromScale(0.56, 0.42), 0.3)
+	piece("Cuff", UDim2.fromScale(0.3, 0.82), UDim2.fromScale(0.4, 0.14), 0.4)
 	return parts
 end
 
 function TutorialHint.new()
 	local self = setmetatable({}, TutorialHint)
 	self.hint = nil
+	self.kind = "SHOT"
 	self.clock = 0
 	self.nudgeUntil = -1
 	self.misses = 0
+	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
 
-	local anchor = Instance.new("Attachment")
-	anchor.Name = "TutorialHintAnchor"
-	self.anchor = anchor
+	self.anchor = create("Attachment", { Name = "TutorialHintAnchor" })
+	self.fingerAnchor = create("Attachment", { Name = "TutorialFingerAnchor" })
 
+	-- Ring + callout, anchored at the target.
 	local gui = create("BillboardGui", {
 		Name = "TutorialHint",
-		Adornee = anchor,
+		Adornee = self.anchor,
 		AlwaysOnTop = true,
 		LightInfluence = 0,
 		ClipsDescendants = false,
 		ResetOnSpawn = false,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		Enabled = false,
-		Parent = Players.LocalPlayer:WaitForChild("PlayerGui"),
+		Parent = playerGui,
 	})
 	self.gui = gui
 
-	-- Ring: the billboard is ring size (studs) plus MARGIN pixels on every side.
 	local target = create("Frame", {
 		Name = "Target",
 		AnchorPoint = Vector2.new(0.5, 0.5),
@@ -7207,7 +8576,6 @@ function TutorialHint.new()
 		self.ripples[i] = { frame = ripple, stroke = stroke }
 	end
 
-	-- Callout bubble above the ring.
 	local bubble = create("Frame", {
 		Name = "Callout",
 		AnchorPoint = Vector2.new(0.5, 1),
@@ -7249,21 +8617,33 @@ function TutorialHint.new()
 	self.tailStroke = create("UIStroke", { Color = GOLD, Thickness = 2.5, Parent = tail })
 	self.popScale = 1
 
-	-- The finger: its anchor point is the fingertip.
+	-- Finger, in its own billboard so it can travel (the pass drag). Its anchor point is the fingertip.
+	local fingerGui = create("BillboardGui", {
+		Name = "TutorialFinger",
+		Adornee = self.fingerAnchor,
+		AlwaysOnTop = true,
+		LightInfluence = 0,
+		ClipsDescendants = false,
+		ResetOnSpawn = false,
+		Size = UDim2.fromOffset(FINGER_SIZE * 3, FINGER_SIZE * 3),
+		Enabled = false,
+		Parent = playerGui,
+	})
+	self.fingerGui = fingerGui
 	local image = ImageLoader.get("Ui/Finger")
+	local uiImages = Shared:FindFirstChild("Images") and Shared.Images:FindFirstChild("Ui")
+	local tip = uiImages and (require(uiImages) :: any).FingerTip
 	local finger
 	if image then
 		finger = create("ImageLabel", {
 			Name = "Finger",
-			AnchorPoint = FINGER_TIP,
+			AnchorPoint = if tip then Vector2.new(tip[1], tip[2]) else Vector2.new(0.5, 0.03),
 			BackgroundTransparency = 1,
 			ImageContent = image,
-			ZIndex = 6,
-			Parent = gui,
+			Parent = fingerGui,
 		})
-		self.fingerParts = nil
 	else
-		finger = create("Frame", { Name = "Finger", AnchorPoint = FALLBACK_TIP, BackgroundTransparency = 1, ZIndex = 6, Parent = gui })
+		finger = create("Frame", { Name = "Finger", AnchorPoint = Vector2.new(0.49, 0.03), BackgroundTransparency = 1, Parent = fingerGui })
 		self.fingerParts = fallbackFinger(finger)
 	end
 	self.finger = finger
@@ -7271,47 +8651,76 @@ function TutorialHint.new()
 	return self
 end
 
--- hint: { aimX, aimY, ringRadius, tapRadius, powerMin, powerMax } from the server's tutorial episode.
-function TutorialHint:show(hint)
+-- kind: SHOT | PASS. hint from the server's tutorial episode:
+--   SHOT { aimX, aimY, ringRadius, tapRadius, powerMin, powerMax }
+--   PASS { start, target, ringRadius, tapRadius, powerMin, powerMax }
+function TutorialHint:show(kind: string, hint)
+	self.kind = kind
 	self.hint = hint
-	self.point = ShotPhysics.aimToGoalPoint(hint.aimX, hint.aimY)
 	self.clock = 0
 	self.nudgeUntil = -1
 	self.misses = 0
 	self.anchor.Parent = workspace.Terrain
-	self.anchor.WorldPosition = self.point
-	local d = hint.ringRadius * 2
-	self.gui.Size = UDim2.new(d, 2 * MARGIN, d, 2 * MARGIN)
+	self.fingerAnchor.Parent = workspace.Terrain
+	if kind == "PASS" then
+		self.point = hint.target
+		self.start = hint.start
+		self.anchor.WorldPosition = hint.target + Vector3.new(0, CALLOUT_HEIGHT, 0)
+		self.gui.Size = UDim2.fromOffset(2 * MARGIN, 2 * MARGIN)
+		self.target.Visible = false -- the teammate's own ground ring pulses instead
+	else
+		self.point = ShotPhysics.aimToGoalPoint(hint.aimX, hint.aimY)
+		self.start = nil
+		self.anchor.WorldPosition = self.point
+		local d = hint.ringRadius * 2
+		self.gui.Size = UDim2.new(d, 2 * MARGIN, d, 2 * MARGIN)
+		self.target.Visible = true
+	end
+	self.fingerAnchor.WorldPosition = self.start or self.point
 	self.gui.Enabled = true
+	self.fingerGui.Enabled = true
 end
 
 function TutorialHint:hide()
 	self.hint = nil
 	self.gui.Enabled = false
+	self.fingerGui.Enabled = false
 	self.anchor.Parent = nil
+	self.fingerAnchor.Parent = nil
 end
 
 function TutorialHint:isActive(): boolean
 	return self.hint ~= nil
 end
 
--- Whether a press at this aim counts (distance on the goal plane, in studs). A press elsewhere
--- is ignored once with a nudge; after that any press counts, since the guided shot keeps the
--- hinted aim anyway.
-function TutorialHint:accepts(aimX: number, aimY: number): boolean
-	local hint = self.hint
-	if not hint then
-		return true
-	end
-	local p = ShotPhysics.aimToGoalPoint(aimX, aimY)
-	if (Vector3.new(p.X, p.Y, 0) - Vector3.new(self.point.X, self.point.Y, 0)).Magnitude <= hint.tapRadius then
+-- A miss is ignored once with a nudge; after that anything counts (the guided attempt keeps the
+-- hinted target anyway).
+function TutorialHint:_judge(distance: number): boolean
+	if distance <= self.hint.tapRadius then
 		return true
 	end
 	self.misses += 1
 	return self.misses > 1
 end
 
--- Pressed somewhere else: shake the finger and point at the ring again.
+-- SHOT: whether a press at this aim counts (distance on the goal plane, in studs).
+function TutorialHint:accepts(aimX: number, aimY: number): boolean
+	if not self.hint then
+		return true
+	end
+	local p = ShotPhysics.aimToGoalPoint(aimX, aimY)
+	return self:_judge((Vector3.new(p.X, p.Y, 0) - Vector3.new(self.point.X, self.point.Y, 0)).Magnitude)
+end
+
+-- PASS: whether a release at this ground point counts.
+function TutorialHint:acceptsTarget(target: Vector3): boolean
+	if not self.hint then
+		return true
+	end
+	return self:_judge(Vector3.new(target.X - self.point.X, 0, target.Z - self.point.Z).Magnitude)
+end
+
+-- Pressed / released somewhere else: shake the finger and show the target again.
 function TutorialHint:nudge()
 	self.nudgeUntil = self.clock + 1.2
 end
@@ -7326,36 +8735,32 @@ function TutorialHint:_setLabel(text: string, color: Color3)
 	self.tailStroke.Color = color
 end
 
--- Call every frame with the HUD scale. Returns the demo power to show on the power bar while
--- the player isn't holding.
-function TutorialHint:update(dt: number, holding: boolean, power: number, uiScale: number): number?
-	local hint = self.hint
-	if not hint then
-		return nil
+function TutorialHint:_setFinger(scale: number, alpha: number)
+	self.fingerScale.Scale = scale
+	if self.fingerParts then
+		for _, part in self.fingerParts do
+			part.BackgroundTransparency = alpha
+			local stroke = part:FindFirstChildOfClass("UIStroke")
+			if stroke then
+				stroke.Transparency = alpha
+			end
+		end
+	else
+		self.finger.ImageTransparency = alpha
 	end
-	self.clock += dt
+end
 
-	local radius = math.max(12, self.target.AbsoluteSize.X / 2) -- ring radius in pixels at this distance
-	local s = uiScale
-	self.popScale += (1 - self.popScale) * math.min(1, dt * 10)
-
-	local pulse = 0.5 + 0.5 * math.sin(self.clock * 6)
-	local inZone = power >= hint.powerMin and power <= hint.powerMax
-	local accent = if holding and inZone then LIME else GOLD
-	self.ringStroke.Color = accent
-	self.fill.BackgroundColor3 = accent
-	self.dot.BackgroundColor3 = accent
-	self.fill.BackgroundTransparency = 0.86 - 0.1 * pulse
-
+-- Shot demo; returns the power to show on the bar (nil = leave it to the player).
+function TutorialHint:_updateShot(holding: boolean, power: number, s: number, radius: number, pulse: number): (Vector2, number, number, number?, number)
+	local hint = self.hint
 	local fingerOffset, fingerScale, fingerAlpha, demoPower = Vector2.zero, 1, 0, nil
-	local rippleT = (self.clock % 1.1) / 1.1 -- idle ripple
-	local pop = self.popScale
-
+	local rippleT = (self.clock % 1.1) / 1.1
+	local inZone = power >= hint.powerMin and power <= hint.powerMax
 	if holding then
-		fingerScale, fingerAlpha = 0.86, 0
+		fingerScale = 0.86
 		if inZone then
 			self:_setLabel(TEXT.Release, LIME)
-			pop *= 1 + 0.08 * pulse
+			self.popScale = math.max(self.popScale, 1 + 0.08 * pulse)
 		else
 			self:_setLabel(TEXT.Wait, GOLD)
 		end
@@ -7363,7 +8768,7 @@ function TutorialHint:update(dt: number, holding: boolean, power: number, uiScal
 		fingerOffset = Vector2.new(math.sin(self.clock * 40) * 10 * s * (self.nudgeUntil - self.clock), 0)
 		self:_setLabel(TEXT.Missed, PINK)
 	else
-		local t = self.clock % LOOP
+		local t = self.clock % SHOT_LOOP
 		local start = Vector2.new(radius * 1.2 + 60 * s, radius * 1.4 + 90 * s)
 		if t < ARRIVE then
 			local k = easeOut(t / ARRIVE)
@@ -7392,33 +8797,101 @@ function TutorialHint:update(dt: number, holding: boolean, power: number, uiScal
 			self:_setLabel(TEXT.Press, GOLD)
 		end
 	end
-
-	-- Positions are pixels from the billboard centre (the target point).
-	self.bubble.Position = UDim2.new(0.5, 0, 0.5, -radius - 12 * s)
-	self.bubbleScale.Scale = s * pop
-
-	local size = FINGER_SIZE * s
-	self.finger.Size = UDim2.fromOffset(size, size)
-	self.finger.Position = UDim2.new(0.5, fingerOffset.X, 0.5, fingerOffset.Y)
-	self.fingerScale.Scale = fingerScale
-	if self.fingerParts then
-		for _, part in self.fingerParts do
-			part.BackgroundTransparency = fingerAlpha
-			local stroke = part:FindFirstChildOfClass("UIStroke")
-			if stroke then
-				stroke.Transparency = fingerAlpha
-			end
-		end
-	else
-		self.finger.ImageTransparency = fingerAlpha
-	end
-
+	local accent = if holding and inZone then LIME else GOLD
+	self.ringStroke.Color = accent
+	self.fill.BackgroundColor3 = accent
+	self.dot.BackgroundColor3 = accent
+	self.fill.BackgroundTransparency = 0.86 - 0.1 * pulse
 	for i, ripple in self.ripples do
 		local k = (rippleT + (i - 1) * 0.5) % 1
 		ripple.frame.Size = UDim2.fromScale(1 + k * 0.9, 1 + k * 0.9)
 		ripple.stroke.Transparency = 0.2 + 0.8 * k
 		ripple.stroke.Color = accent
 	end
+	self.fingerAnchor.WorldPosition = self.point
+	return fingerOffset, fingerScale, fingerAlpha, demoPower, 0
+end
+
+-- Pass demo: press at the ball, drag to the teammate, let go.
+function TutorialHint:_updatePass(holding: boolean, aimTarget: Vector3?, s: number): (Vector2, number, number, number?)
+	local fingerScale, fingerAlpha, demoPower = 1, 0, nil
+	local fingerOffset = Vector2.zero
+	local start, point = self.start :: Vector3, self.point
+	local ground = Vector3.new(point.X, 0, point.Z)
+	local fullPower = Vector3.new(point.X - start.X, 0, point.Z - start.Z).Magnitude / PassConfig.Ball.MaxRange
+	if holding then
+		fingerAlpha = 1 -- the player's own finger is there now
+		local near = aimTarget and Vector3.new(aimTarget.X - point.X, 0, aimTarget.Z - point.Z).Magnitude <= self.hint.tapRadius
+		if near then
+			self:_setLabel(TEXT.PassRelease, LIME)
+		else
+			self:_setLabel(TEXT.PassPress, GOLD)
+		end
+		self.fingerAnchor.WorldPosition = ground
+	elseif self.clock < self.nudgeUntil then
+		fingerOffset = Vector2.new(math.sin(self.clock * 40) * 10 * s * (self.nudgeUntil - self.clock), 0)
+		self.fingerAnchor.WorldPosition = ground
+		self:_setLabel(TEXT.PassMissed, PINK)
+	else
+		local t = self.clock % PASS_LOOP
+		local at = start
+		if t < P_ARRIVE then
+			fingerAlpha = 1 - easeOut(t / P_ARRIVE)
+			fingerOffset = Vector2.new(0, 40 * s * (1 - easeOut(t / P_ARRIVE)))
+		elseif t < P_PRESS then
+			fingerScale = 1 - 0.14 * easeOut((t - P_ARRIVE) / (P_PRESS - P_ARRIVE))
+			demoPower = 0
+		elseif t < P_DRAG then
+			local k = easeInOut((t - P_PRESS) / (P_DRAG - P_PRESS))
+			fingerScale = 0.86
+			at = start:Lerp(ground, k)
+			demoPower = fullPower * k
+		elseif t < P_RELEASE then
+			local k = easeOut((t - P_DRAG) / (P_RELEASE - P_DRAG))
+			at = ground
+			fingerScale = 0.86 + 0.14 * k
+			fingerOffset = Vector2.new(0, -16 * s * k)
+			fingerAlpha = k
+			demoPower = fullPower
+		else
+			at = ground
+			fingerAlpha = 1
+			demoPower = 0
+		end
+		self.fingerAnchor.WorldPosition = Vector3.new(at.X, 0, at.Z)
+		self:_setLabel(if t >= P_DRAG and t < P_RELEASE then TEXT.PassRelease else TEXT.PassPress, if t >= P_DRAG and t < P_RELEASE then LIME else GOLD)
+	end
+	return fingerOffset, fingerScale, fingerAlpha, demoPower
+end
+
+-- Call every frame with the HUD scale. aimTarget: the pass drop point while dragging.
+-- Returns the demo power to show on the power bar while the player isn't holding.
+function TutorialHint:update(dt: number, holding: boolean, power: number, uiScale: number, aimTarget: Vector3?): number?
+	local hint = self.hint
+	if not hint then
+		return nil
+	end
+	self.clock += dt
+	local s = uiScale
+	self.popScale += (1 - self.popScale) * math.min(1, dt * 10)
+	local pulse = 0.5 + 0.5 * math.sin(self.clock * 6)
+
+	local radius = if self.kind == "SHOT" then math.max(12, self.target.AbsoluteSize.X / 2) else 0
+	local fingerOffset, fingerScale, fingerAlpha, demoPower
+	if self.kind == "PASS" then
+		fingerOffset, fingerScale, fingerAlpha, demoPower = self:_updatePass(holding, aimTarget, s)
+	else
+		fingerOffset, fingerScale, fingerAlpha, demoPower = self:_updateShot(holding, power, s, radius, pulse)
+	end
+
+	self.bubble.Position = UDim2.new(0.5, 0, 0.5, -radius - 12 * s)
+	self.bubbleScale.Scale = s * self.popScale
+
+	local size = FINGER_SIZE * s
+	self.fingerGui.Size = UDim2.fromOffset(size * 3, size * 3)
+	self.finger.Size = UDim2.fromOffset(size, size)
+	self.finger.Position = UDim2.new(0.5, fingerOffset.X, 0.5, fingerOffset.Y)
+	self:_setFinger(fingerScale, fingerAlpha)
 	return demoPower
 end
 

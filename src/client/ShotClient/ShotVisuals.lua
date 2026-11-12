@@ -75,6 +75,8 @@ function ShotVisuals.new()
 	self.shake = 0
 	self.fovKick = 0
 	self.ballRotation = CFrame.identity
+	self.active = true
+	self.blendT = 1
 
 	local folder = create("Folder", { Name = "ShotVisuals", Parent = workspace })
 
@@ -252,6 +254,25 @@ function ShotVisuals:reset()
 	self:updateAiming(false, 0, 0.5, 0, false)
 end
 
+-- Off while another drill (the pass) owns the camera: the ball is put away, the keeper idles.
+function ShotVisuals:setActive(active: boolean)
+	if self.active == active then
+		return
+	end
+	self.active = active
+	if active then
+		local camera = workspace.CurrentCamera
+		self.blendFrom, self.blendFov, self.blendT = camera.CFrame, camera.FieldOfView, 0
+		self:reset()
+	else
+		self.token += 1 -- stops any replay in progress
+		self.holdBall = false
+		self.trail.Enabled = false
+		self:_setBall(Vector3.new(0, -50, 0))
+		self:updateAiming(false, 0, 0.5, 0, false)
+	end
+end
+
 function ShotVisuals:setCharging(on: boolean)
 	if self.keeper then
 		self.keeper:setCharging(on)
@@ -264,16 +285,26 @@ function ShotVisuals:update(dt: number)
 	self.shake = math.max(0, self.shake - dt * 2.5)
 	self.fovKick = math.max(0, self.fovKick - dt * 10)
 
-	local camera = workspace.CurrentCamera
-	camera.CameraType = Enum.CameraType.Scriptable
-	camera.FieldOfView = ShotConfig.Camera.FieldOfView - self.fovKick
-	local base = CFrame.lookAt(ShotConfig.Camera.Position, ShotConfig.Camera.LookAt)
-	if self.shake > 0 then
-		local t = self.clock * 25
-		local amount = self.shake * 0.3
-		base *= CFrame.new(math.noise(t, 1) * amount, math.noise(t, 2) * amount, 0)
+	if self.active then
+		local camera = workspace.CurrentCamera
+		camera.CameraType = Enum.CameraType.Scriptable
+		local fov = ShotConfig.Camera.FieldOfView - self.fovKick
+		local base = CFrame.lookAt(ShotConfig.Camera.Position, ShotConfig.Camera.LookAt)
+		if self.shake > 0 then
+			local t = self.clock * 25
+			local amount = self.shake * 0.3
+			base *= CFrame.new(math.noise(t, 1) * amount, math.noise(t, 2) * amount, 0)
+		end
+		if self.blendT < 1 then
+			-- Coming back from the pass drill: glide to the shot camera.
+			self.blendT = math.min(1, self.blendT + dt / 0.9)
+			local k = self.blendT * self.blendT * (3 - 2 * self.blendT)
+			base = self.blendFrom:Lerp(base, k)
+			fov = self.blendFov + (fov - self.blendFov) * k
+		end
+		camera.FieldOfView = fov
+		camera.CFrame = base
 	end
-	camera.CFrame = base
 
 	if self.keeper then
 		self.keeper:update(dt)
