@@ -4,10 +4,13 @@
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 
+local ImageLoader = require(script.Parent:WaitForChild("ImageLoader"))
+
 local ShotHud = {}
 ShotHud.__index = ShotHud
 
--- Optional uploaded logo, e.g. "rbxassetid://1234567890". Empty = logo built from text.
+-- Optional uploaded copy of the logo, e.g. "rbxassetid://1234567890". Empty = the logo PNG
+-- embedded in Images/Logo.lua; the text wordmark is only used if images are unavailable.
 local LOGO_IMAGE = ""
 
 -- All player-facing text in one place.
@@ -335,8 +338,11 @@ function ShotHud:_buildLogo()
 
 	local mark = frame({ Name = "Wordmark", Size = UDim2.fromOffset(300, 130), BackgroundTransparency = 1, Parent = root })
 	local imageId = logoImageId()
+	local embedded = if imageId then nil else ImageLoader.get("Logo/Logo")
 	if imageId then
 		create("ImageLabel", { Name = "LogoImage", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = imageId, ScaleType = Enum.ScaleType.Fit, Parent = mark })
+	elseif embedded then
+		create("ImageLabel", { Name = "LogoImage", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ImageContent = embedded, ScaleType = Enum.ScaleType.Fit, Parent = mark })
 	else
 		local star = buildWordmark(mark)
 		local starScale = create("UIScale", { Parent = star })

@@ -135,8 +135,11 @@ end
 
 type LedStyle = { from: Color3, to: Color3, textColor: Color3, text: string }
 
+local IMAGE_TAG = "NfsImage" -- see ShotClient/ImageLoader
+local BOARD_IMAGES = { "Logo", "Nfs", "Lime", "Ten" }
+
 -- Self-lit LED panel drawn on the face pointing at the pitch (+Z).
-local function ledFace(part: BasePart, style: LedStyle, pixelsPerStud: number, textHeight: number)
+local function ledFace(part: BasePart, style: LedStyle, pixelsPerStud: number, textHeight: number, image: string?)
 	local gui = create("SurfaceGui", {
 		Face = Enum.NormalId.Back,
 		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
@@ -177,6 +180,20 @@ local function ledFace(part: BasePart, style: LedStyle, pixelsPerStud: number, t
 		Text = style.text,
 		Parent = panel,
 	})
+	if image then
+		-- Banner artwork from Images/Banners.lua; the client fills it in and shows it (ImageLoader).
+		local art = create("ImageLabel", {
+			Name = "Art",
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			ScaleType = Enum.ScaleType.Stretch,
+			Visible = false,
+			ZIndex = 2,
+			Parent = panel,
+		})
+		art:SetAttribute("Image", "Banners/" .. image)
+		art:AddTag(IMAGE_TAG)
+	end
 end
 
 local BOARD_STYLES: { LedStyle } = {
@@ -418,7 +435,7 @@ local function buildBoards(scene: Instance)
 			Color = NAVY,
 			Parent = boards,
 		})
-		ledFace(board, BOARD_STYLES[index % #BOARD_STYLES + 1], 30, 0.6)
+		ledFace(board, BOARD_STYLES[index % #BOARD_STYLES + 1], 30, 0.6, BOARD_IMAGES[index % #BOARD_IMAGES + 1])
 	end
 	makePart({
 		Name = "TopStrip",
@@ -530,7 +547,7 @@ local function buildStand(scene: Instance, rng: Random)
 			Color = NAVY,
 			Parent = stand,
 		})
-		ledFace(ribbon, RIBBON_STYLE, 20, 0.7)
+		ledFace(ribbon, RIBBON_STYLE, 20, 0.7, "Ribbon")
 	end
 	neonStrip(stand, "RibbonGlow", ribbonBottom + ribbonHeight + 0.14, lowerBack - 0.3, VIOLET_BRIGHT)
 

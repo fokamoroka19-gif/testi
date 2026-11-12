@@ -24,6 +24,7 @@ The server modules can be anywhere under ServerScriptService (next to `Main` or 
 |---|---|---|
 | `src/shared/ShotConfig.lua` | `ReplicatedStorage/Shared/ShotConfig` | ModuleScript |
 | `src/shared/ShotPhysics.lua` | `ReplicatedStorage/Shared/ShotPhysics` | ModuleScript |
+| `src/shared/Images/Logo.lua`, `Banners.lua`, `Keeper.lua` | `ReplicatedStorage/Shared/Images/Logo`, `Banners`, `Keeper` (inside a Folder named `Images`) | ModuleScript |
 | `src/server/Main.server.lua` | `ServerScriptService/Main` | Script |
 | `src/server/SceneBuilder.lua` | `ServerScriptService/SceneBuilder` | ModuleScript |
 | `src/server/KeeperBuilder.lua` | `ServerScriptService/KeeperBuilder` | ModuleScript |
@@ -34,8 +35,25 @@ The server modules can be anywhere under ServerScriptService (next to `Main` or 
 | `src/client/ShotClient/ShotVisuals.lua` | `.../ShotClient/ShotVisuals` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/ShotHud.lua` | `.../ShotClient/ShotHud` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/KeeperAnimator.lua` | `.../ShotClient/KeeperAnimator` (child of the LocalScript) | ModuleScript |
+| `src/client/ShotClient/ImageLoader.lua` | `.../ShotClient/ImageLoader` (child of the LocalScript) | ModuleScript |
 
 The default Baseplate and SpawnLocation are removed automatically during play (they would cover the pitch and goal).
+
+## Artwork (logo, stadium banners, goalkeeper kit)
+
+The HUD logo is the supplied `tools/assets/source/logo.png`, unchanged apart from trimming the empty
+border. The LED boards and balcony ribbon show banner artwork in the game's purple/gold style, and the
+goalkeeper is a blocky R15 rig in the proportions of the character sheet (`tools/assets/source/keeper_sheet.png`)
+with the sheet's face, hair, kit, number 10 and gloves painted on. Previews of every image are in `assets/generated/`.
+
+Roblox can't load local PNGs, so the pixels are embedded in the `Images` modules and drawn on the client
+with `EditableImage` (no upload needed). Studio Play should work as is. **In a published game (or if the Output shows an `[ImageLoader]` warning), turn on
+Game Settings → Security → Allow Mesh / Image APIs**, otherwise the game still runs but shows the
+fallbacks: the text logo, plain LED boards and a keeper in plain kit colours (the Output explains why).
+If you upload the logo to Roblox yourself, put its id in `LOGO_IMAGE` at the top of `ShotHud`.
+
+To change the art, edit `tools/assets/build_images.py` and run `python3 tools/assets/build_images.py`
+(needs Pillow), then rebuild the place file.
 
 ## Controls
 
@@ -54,7 +72,7 @@ All on-screen text is in the `TEXT` table at the top of `ShotHud`.
 ## Testing
 
 1. **PC:** press Play. The Output window should show:
-   `[SceneBuilder] Stadium built (… objects)`, `[KeeperBuilder] Goalkeeper ready (R15, … studs tall)`, `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
+   `[SceneBuilder] Stadium built (… objects)`, `[KeeperBuilder] Goalkeeper ready (R15 blocks, … studs tall)`, `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
    `[EpisodeService] <you>: episode #1 started (SHOT, seed …)`, and after each shot
    `[EpisodeService] <you>: episode #1 aim=(0.72, 0.55) power=0.64 -> GOAL/GOAL, 98 km/h (1 goals from 1/10 shots)`.
    There should be no red errors.

@@ -10,6 +10,7 @@ local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild
 local InputController = require(script:WaitForChild("InputController"))
 local ShotVisuals = require(script:WaitForChild("ShotVisuals"))
 local ShotHud = require(script:WaitForChild("ShotHud"))
+local ImageLoader = require(script:WaitForChild("ImageLoader"))
 
 local CARD_DELAY = 0.55 -- let the player see the ball hit the net before the card covers the goal
 
@@ -37,6 +38,7 @@ task.spawn(function()
 end)
 
 local hud = ShotHud.new()
+ImageLoader.watch() -- stadium banners and keeper kit textures
 local visuals = ShotVisuals.new()
 local input = InputController.new()
 local currentEpisode = nil
