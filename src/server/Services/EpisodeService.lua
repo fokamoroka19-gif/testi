@@ -150,21 +150,32 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, a
 	local seriesOver = state.shots >= SERIES_LENGTH
 
 	print(string.format(
-		"[EpisodeService] %s: episode #%d aim=(%.2f, %.2f) power=%.2f -> %s (%d goals from %d/%d shots)",
-		player.Name, active.id, input.aimX, input.aimY, input.power, result.outcome, state.goals, state.shots, SERIES_LENGTH
+		"[EpisodeService] %s: episode #%d aim=(%.2f, %.2f) power=%.2f -> %s/%s, %d km/h (%d goals from %d/%d shots)",
+		player.Name, active.id, input.aimX, input.aimY, input.power, result.outcome, result.detail, result.speedKmh,
+		state.goals, state.shots, SERIES_LENGTH
 	))
 	if seriesOver then
 		print(string.format("[EpisodeService] %s: series finished, %d/%d goals", player.Name, state.goals, SERIES_LENGTH))
 	end
 
+	local sim = result.sim
 	remotes.EpisodeResult:FireClient(player, {
 		episodeId = active.id,
 		outcome = result.outcome,
-		start = result.start,
-		target = result.target,
-		flightTime = result.flightTime,
+		detail = result.detail,
+		speedKmh = result.speedKmh,
+		-- The client replays this exact path, so what it shows always matches the outcome.
+		path = sim.path,
+		sampleStep = ShotConfig.Physics.SampleStep,
+		events = sim.events,
+		spin = result.spin,
+		held = sim.held,
+		decisiveTime = result.decisiveTime,
+		keeperTime = sim.keeperTime,
 		keeperTarget = result.keeperTarget,
 		keeperReaction = result.keeperReaction,
+		keeperDives = result.keeperDives,
+		keeperKind = sim.keeperKind,
 		shots = state.shots,
 		goals = state.goals,
 		seriesLength = SERIES_LENGTH,
