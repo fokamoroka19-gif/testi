@@ -49,10 +49,15 @@ ShotConfig.Goalkeeper = {
 	ReactionJitter = 0.06, -- +/- random part of the reaction time
 	DiveSpeedAtZeroSkill = 10,
 	DiveSpeedAtMaxSkill = 26,
+	ModelScale = 1.15, -- R15 rig scale; ~6 studs tall next to the 8-stud goal
 }
 
 -- Placeholder until career data exists (GDD: new players start around OVR 40).
 ShotConfig.DefaultShooting = 42
+
+ShotConfig.Drill = {
+	ShotsPerSeries = 10,
+}
 
 ShotConfig.Episode = {
 	MinThinkTime = 0.3, -- seconds between episode start and an accepted input
@@ -66,10 +71,11 @@ ShotConfig.Input = {
 	ReadyDelay = 0.35, -- pause after a new episode before input is accepted
 }
 
+-- Far and narrow, so the ball sits just above the bottom panel and the goal fills the middle.
 ShotConfig.Camera = {
-	Position = Vector3.new(0, 4.5, ShotConfig.ShotDistance + 12),
-	LookAt = Vector3.new(0, 3, 0),
-	FieldOfView = 40,
+	Position = Vector3.new(0, 6, 72),
+	LookAt = Vector3.new(0, 2.5, 0),
+	FieldOfView = 28,
 }
 
 return ShotConfig

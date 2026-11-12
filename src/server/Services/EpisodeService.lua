@@ -12,9 +12,12 @@ type PlayerState = {
 	nextEpisodeId: number,
 	active: Episode?,
 	lastRemoteAt: number,
-	shots: number,
+	shots: number, -- shots taken in the current series
 	goals: number,
+	history: { string }, -- outcome of each shot in the current series
 }
+
+local SERIES_LENGTH = ShotConfig.Drill.ShotsPerSeries
 
 local EpisodeService = {}
 
@@ -25,7 +28,7 @@ local remotes
 local function getState(player: Player): PlayerState
 	local state = states[player]
 	if not state then
-		state = { nextEpisodeId = 1, active = nil, lastRemoteAt = -math.huge, shots = 0, goals = 0 }
+		state = { nextEpisodeId = 1, active = nil, lastRemoteAt = -math.huge, shots = 0, goals = 0, history = {} }
 		states[player] = state
 	end
 	return state
@@ -49,11 +52,21 @@ local function isNumberInRange(value: any, min: number, max: number): boolean
 	return value >= min - tolerance and value <= max + tolerance
 end
 
-local function sendEpisode(player: Player, episode: Episode)
-	remotes.EpisodeStarted:FireClient(player, { episodeId = episode.id, kind = episode.kind })
+local function sendEpisode(player: Player, state: PlayerState, episode: Episode)
+	remotes.EpisodeStarted:FireClient(player, {
+		episodeId = episode.id,
+		kind = episode.kind,
+		shotNumber = state.shots + 1,
+		seriesLength = SERIES_LENGTH,
+		goals = state.goals,
+		history = table.clone(state.history),
+	})
 end
 
 local function startEpisode(player: Player, state: PlayerState)
+	if state.shots >= SERIES_LENGTH then
+		state.shots, state.goals, state.history = 0, 0, {}
+	end
 	local episode = {
 		id = state.nextEpisodeId,
 		kind = "SHOT",
@@ -64,7 +77,7 @@ local function startEpisode(player: Player, state: PlayerState)
 	state.nextEpisodeId += 1
 	state.active = episode
 	print(string.format("[EpisodeService] %s: episode #%d started (SHOT, seed %d)", player.Name, episode.id, episode.seed))
-	sendEpisode(player, episode)
+	sendEpisode(player, state, episode)
 end
 
 local function reject(player: Player, episodeId: any, reason: string)
@@ -85,7 +98,7 @@ local function onRequestEpisode(player: Player)
 	local active = state.active
 	if active and os.clock() - active.startedAt <= ShotConfig.Episode.Timeout then
 		-- Client lost track of it (e.g. after a rejection): resend instead of issuing a new one.
-		sendEpisode(player, active)
+		sendEpisode(player, state, active)
 		return
 	end
 	startEpisode(player, state)
@@ -133,11 +146,16 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, a
 	if result.outcome == "GOAL" then
 		state.goals += 1
 	end
+	table.insert(state.history, result.outcome)
+	local seriesOver = state.shots >= SERIES_LENGTH
 
 	print(string.format(
-		"[EpisodeService] %s: episode #%d aim=(%.2f, %.2f) power=%.2f -> %s (%d/%d goals)",
-		player.Name, active.id, input.aimX, input.aimY, input.power, result.outcome, state.goals, state.shots
+		"[EpisodeService] %s: episode #%d aim=(%.2f, %.2f) power=%.2f -> %s (%d goals from %d/%d shots)",
+		player.Name, active.id, input.aimX, input.aimY, input.power, result.outcome, state.goals, state.shots, SERIES_LENGTH
 	))
+	if seriesOver then
+		print(string.format("[EpisodeService] %s: series finished, %d/%d goals", player.Name, state.goals, SERIES_LENGTH))
+	end
 
 	remotes.EpisodeResult:FireClient(player, {
 		episodeId = active.id,
@@ -149,6 +167,9 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, a
 		keeperReaction = result.keeperReaction,
 		shots = state.shots,
 		goals = state.goals,
+		seriesLength = SERIES_LENGTH,
+		seriesOver = seriesOver,
+		history = table.clone(state.history),
 	})
 end
 

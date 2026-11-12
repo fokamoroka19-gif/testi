@@ -1,7 +1,7 @@
 # New Football Star — Stage 1: the shot
 
-Playable prototype of the SHOT mini-game (GDD §5, roadmap v0.1): fixed camera, goal, ball,
-goalkeeper, aim marker, power meter, and GOAL / SAVE / POST / MISS results. Works with mouse and touch.
+Playable prototype of the SHOT mini-game (GDD §5, roadmap v0.1): training ground, goal, ball,
+goalkeeper, crosshair, power bar, 10-shot series and GOAL / SAVE / POST / MISS results. Works with mouse and touch.
 
 **Client draws, server decides.** The client only sends `{episodeId, aimX, aimY, power}`.
 The server checks types, ranges, the current episode, repeats and request rate, then computes
@@ -31,25 +31,30 @@ The server modules can be anywhere under ServerScriptService (next to `Main` or 
 | `src/client/ShotClient/init.client.lua` | `StarterPlayer/StarterPlayerScripts/ShotClient` | LocalScript |
 | `src/client/ShotClient/InputController.lua` | `.../ShotClient/InputController` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/ShotVisuals.lua` | `.../ShotClient/ShotVisuals` (child of the LocalScript) | ModuleScript |
+| `src/client/ShotClient/ShotHud.lua` | `.../ShotClient/ShotHud` (child of the LocalScript) | ModuleScript |
 
 The default Baseplate and SpawnLocation are removed automatically during play (they would cover the pitch and goal).
 
 ## Controls
 
-Press on the goal to place the aim marker. Hold to charge the power meter (it goes up and down),
-then release to shoot. On PC the marker follows the mouse before you click. While you hold,
-the dotted line shows the planned path without random error.
+Press on the goal to place the crosshair. Hold to charge power (the bar at the bottom goes up and down),
+then release to shoot. On PC the crosshair follows the mouse before you click. While you hold,
+the dotted line shows the planned path without random error. After each shot a result card appears.
+Press **ЕЩЁ УДАР** (or Space / Enter / gamepad A) for the next shot. A series is 10 shots; the
+dots under the goals counter show each result.
 
 - Aiming close to a post or the bar beats the keeper but risks POST or MISS.
 - Weak shots are slow and easy to save. Shots near the centre always get saved.
-- Power in the red band is less accurate and tends to go over the bar.
+- Power above 85% (the marker on the bar) is less accurate and tends to go over the bar.
+
+All on-screen text is in the `TEXT` table at the top of `ShotHud`.
 
 ## Testing
 
 1. **PC:** press Play. The Output window should show:
-   `[SceneBuilder] Stadium built (… parts)`, `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
+   `[SceneBuilder] Training ground built (… objects)`, `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
    `[EpisodeService] <you>: episode #1 started (SHOT, seed …)`, and after each shot
-   `[EpisodeService] <you>: episode #1 aim=(0.72, 0.55) power=0.64 -> GOAL (1/1 goals)`.
+   `[EpisodeService] <you>: episode #1 aim=(0.72, 0.55) power=0.64 -> GOAL (1 goals from 1/10 shots)`.
    There should be no red errors.
 2. **Phone layout:** Test → Device emulator, choose a phone in landscape, and repeat.
    The HUD respects screen notches, and no thumbstick or jump button appears.
