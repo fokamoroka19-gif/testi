@@ -1,4 +1,4 @@
--- Server entry point for the shot and pass training prototype.
+-- Server entry point: main menu and career (CareerService), shot and pass training (EpisodeService).
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -30,7 +30,7 @@ local function requireServerModule(name: string)
 end
 
 local shared = ReplicatedStorage:FindFirstChild("Shared")
-for _, name in { "ShotConfig", "ShotPhysics", "PassConfig", "PassPhysics", "FigureBuilder" } do
+for _, name in { "ShotConfig", "ShotPhysics", "PassConfig", "PassPhysics", "FigureBuilder", "CareerConfig" } do
 	if not (shared and shared:FindFirstChild(name)) then
 		error(string.format("[Main] ReplicatedStorage > Shared > %s (ModuleScript) is missing. See README > Setup.", name), 0)
 	end
@@ -55,13 +55,22 @@ for _, name in REMOTE_NAMES do
 	end
 	remotes[name] = remote
 end
+local careerRequest = remotesFolder:FindFirstChild("CareerRequest")
+if not careerRequest then
+	careerRequest = Instance.new("RemoteFunction")
+	careerRequest.Name = "CareerRequest"
+	careerRequest.Parent = remotesFolder
+end
+remotes.CareerRequest = careerRequest
 
 local SceneBuilder = requireServerModule("SceneBuilder")
 local KeeperBuilder = requireServerModule("KeeperBuilder")
 local EpisodeService = requireServerModule("EpisodeService")
+local CareerService = requireServerModule("CareerService")
 
 local scene = SceneBuilder.build()
 KeeperBuilder.build(scene)
 EpisodeService.init(remotes)
+CareerService.init(remotes, EpisodeService)
 
-print("[Main] Shot and pass training ready")
+print("[Main] Main menu, career and training ready")

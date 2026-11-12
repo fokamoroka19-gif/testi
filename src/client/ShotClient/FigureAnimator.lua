@@ -46,6 +46,7 @@ function FigureAnimator.new(model: Model, rootHeight: number, scale: number)
 	self.action = nil
 	self.actionTime = 0
 	self.drop = 0
+	self.lift = 0 -- extra height (studs), e.g. rising out of the floor in the menu
 	return self
 end
 
@@ -178,7 +179,7 @@ function FigureAnimator:update(dt: number)
 		entry.motor.C0 = entry.base * CFrame.Angles(math.rad(current.X), math.rad(current.Y), math.rad(current.Z))
 	end
 	self.drop += (lift - self.drop) * k
-	local base = self.position + Vector3.new(0, self.rootHeight + self.drop * self.scale, 0)
+	local base = self.position + Vector3.new(0, self.rootHeight + self.drop * self.scale + self.lift, 0)
 	self.model:PivotTo(CFrame.lookAt(base, base + self.facing))
 end
 

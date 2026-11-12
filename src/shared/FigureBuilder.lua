@@ -152,4 +152,78 @@ function FigureBuilder.build(name: string, kit: Kit, scale: number, textures: st
 	return model, rootHeight
 end
 
+-- Repaints a built figure in another kit (same part names as PARTS).
+function FigureBuilder.applyKit(model: Model, kit: Kit)
+	local colors = {
+		skin = kit.skin,
+		shirt = kit.shirt,
+		sleeves = kit.sleeves or kit.skin,
+		shorts = kit.shorts,
+		socks = kit.socks,
+		boots = kit.boots,
+		hands = kit.hands or kit.skin,
+	}
+	for _, spec in PARTS do
+		local part = model:FindFirstChild(spec[1])
+		if part and part:IsA("BasePart") then
+			part.Color = colors[spec[4]]
+		end
+	end
+	local hair = model:FindFirstChild("Hair")
+	if hair and hair:IsA("BasePart") then
+		hair.Color = kit.hair
+	end
+end
+
+-- Prints the name and number on the back of the shirt and a small number on the chest.
+-- Returns the two SurfaceGuis (back, front) so callers can animate them.
+function FigureBuilder.setShirt(model: Model, shirtName: string, number: number, color: Color3, outlineColor: Color3?): (SurfaceGui?, SurfaceGui?)
+	local torso = model:FindFirstChild("UpperTorso")
+	if not (torso and torso:IsA("BasePart")) then
+		return nil, nil
+	end
+	local font = Font.new("rbxasset://fonts/families/Montserrat.json", Enum.FontWeight.Heavy)
+	local stroke = outlineColor or Color3.fromRGB(18, 6, 31)
+	local function label(parent: Instance, name: string, text: string, position: UDim2, size: UDim2)
+		local l = parent:FindFirstChild(name) :: TextLabel?
+		if not l then
+			l = Instance.new("TextLabel")
+			l.Name = name
+			l.BackgroundTransparency = 1
+			l.TextScaled = true
+			l.FontFace = font
+			l.AnchorPoint = Vector2.new(0.5, 0)
+			l.Parent = parent
+			local s = Instance.new("UIStroke")
+			s.Thickness = 2
+			s.Parent = l
+		end
+		local labelObj = l :: TextLabel
+		labelObj.Position = position
+		labelObj.Size = size
+		labelObj.Text = text
+		labelObj.TextColor3 = color
+		;(labelObj:FindFirstChildOfClass("UIStroke") :: UIStroke).Color = stroke
+	end
+	local function gui(name: string, face: Enum.NormalId): SurfaceGui
+		local g = torso:FindFirstChild(name) :: SurfaceGui?
+		if not g then
+			g = Instance.new("SurfaceGui")
+			g.Name = name
+			g.Face = face
+			g.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+			g.PixelsPerStud = 60
+			g.LightInfluence = 1
+			g.Parent = torso
+		end
+		return g :: SurfaceGui
+	end
+	local back = gui("ShirtBack", Enum.NormalId.Back)
+	label(back, "Name", shirtName, UDim2.fromScale(0.5, 0.06), UDim2.fromScale(0.86, 0.22))
+	label(back, "Number", tostring(number), UDim2.fromScale(0.5, 0.3), UDim2.fromScale(0.8, 0.64))
+	local front = gui("ShirtFront", Enum.NormalId.Front)
+	label(front, "Number", tostring(number), UDim2.fromScale(0.72, 0.12), UDim2.fromScale(0.22, 0.3))
+	return back, front
+end
+
 return FigureBuilder

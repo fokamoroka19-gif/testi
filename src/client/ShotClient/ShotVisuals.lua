@@ -73,6 +73,8 @@ function ShotVisuals.new()
 	self.token = 0
 	self.clock = 0
 	self.shake = 0
+	-- Player settings (main menu): shake, effects (confetti / puffs), aimLine (flight preview).
+	self.settings = { shake = true, effects = true, aimLine = true }
 	self.fovKick = 0
 	self.ballRotation = CFrame.identity
 	self.active = true
@@ -313,7 +315,7 @@ function ShotVisuals:update(dt: number)
 		camera.CameraType = Enum.CameraType.Scriptable
 		local fov = ShotConfig.Camera.FieldOfView - self.fovKick
 		local base = CFrame.lookAt(ShotVisuals.cameraPosition(self.spot), ShotConfig.Camera.LookAt)
-		if self.shake > 0 then
+		if self.shake > 0 and self.settings.shake then
 			local t = self.clock * 25
 			local amount = self.shake * 0.3
 			base *= CFrame.new(math.noise(t, 1) * amount, math.noise(t, 2) * amount, 0)
@@ -346,7 +348,7 @@ function ShotVisuals:updateAiming(enabled: boolean, aimX: number, aimY: number, 
 	self.aimGui.Enabled = enabled
 	self.aimPart.CFrame = CFrame.new(point + Vector3.new(0, 0, 0.25))
 
-	local showArc = enabled and holding
+	local showArc = enabled and holding and self.settings.aimLine
 	for i, dot in self.dots do
 		dot.Transparency = if showArc then 0.1 + 0.55 * i / PREVIEW_DOTS else 1
 	end
@@ -390,6 +392,9 @@ function ShotVisuals:_bulgeNet(at: Vector3)
 end
 
 function ShotVisuals:_puff(at: Vector3, count: number)
+	if not self.settings.effects then
+		return
+	end
 	self.impactHolder.CFrame = CFrame.new(at)
 	self.impact:Emit(count)
 end
@@ -434,7 +439,9 @@ function ShotVisuals:playShot(result, onDecisive: () -> ())
 			local e = table.remove(pending, 1)
 			if e.kind == "goal" then
 				self.shake = 1
-				self.confetti:Emit(160)
+				if self.settings.effects then
+					self.confetti:Emit(160)
+				end
 			elseif e.kind == "net" then
 				self:_bulgeNet(e.pos)
 			elseif e.kind == "frame" then
