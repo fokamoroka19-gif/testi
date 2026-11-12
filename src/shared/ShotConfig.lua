@@ -80,15 +80,16 @@ ShotConfig.Goalkeeper = {
 -- Placeholder until career data exists (GDD: new players start around OVR 40).
 ShotConfig.DefaultShooting = 42
 
--- Shot training: one guided shot that always scores, then the task (score TaskGoals of TaskShots).
+-- Shot training: one guided shot that always scores, then the task (score TaskGoals in any number
+-- of shots), then free play (until the next training stage exists).
 ShotConfig.Training = {
 	TutorialAim = { X = 0.62, Y = 0.62 }, -- where the finger shows to press (aim coordinates)
-	TutorialTapRadius = 3.5, -- studs on the goal plane around that point that accept the press
+	TutorialRingRadius = 2.6, -- studs, the ring drawn on the goal
+	TutorialTapRadius = 4.5, -- studs around that point that accept the press (a bit larger than the ring)
 	GuidedPowerMin = 0.55, -- the green zone on the power bar during the guided shot
 	GuidedPowerMax = 0.8,
 	GuidedSafeMargin = 2, -- studs kept clear of the frame and the keeper's reach on the guided shot
 	GuidedKeeperDelay = 0.3, -- keeper reacts this much later on the guided shot
-	TaskShots = 5,
 	TaskGoals = 5,
 	-- Training keeper: still saves central shots, beatable in the corners.
 	TaskKeeperSkill = 15,

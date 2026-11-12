@@ -3,8 +3,9 @@
 --
 -- Shot training flow, decided here so the client can't skip it:
 --   TUTORIAL  one guided shot (finger hint on the client) that always scores
---   TASK      score Training.TaskGoals of Training.TaskShots; ends early once that is impossible
---   DONE      task completed; the next request starts the task again
+--   TASK      score Training.TaskGoals goals; misses don't reset anything
+--   DONE      task completed; the menu asks for "RETRY" (task again) or "NEXT"
+--   FREE      free play with the normal keeper (placeholder until the pass training, stage 2, exists)
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -19,11 +20,10 @@ type PlayerState = {
 	nextEpisodeId: number,
 	active: Episode?,
 	lastRemoteAt: number,
-	phase: string, -- "TUTORIAL" | "TASK" | "DONE"
-	shots: number, -- task shots taken in the current attempt
+	phase: string, -- "TUTORIAL" | "TASK" | "DONE" | "FREE"
+	shots: number, -- shots taken in the current task attempt (or in free play)
 	goals: number,
-	history: { string }, -- outcome of each task shot
-	restartTask: boolean, -- the last task attempt failed; reset it on the next episode
+	history: { string }, -- outcome of each shot, most recent last (free play keeps the last 10)
 }
 
 local EpisodeService = {}
@@ -32,9 +32,10 @@ local states: { [Player]: PlayerState } = {}
 local seedSource = Random.new()
 local remotes
 
-local function resetTask(state: PlayerState)
+local FREE_HISTORY = 10
+
+local function resetCounters(state: PlayerState)
 	state.shots, state.goals, state.history = 0, 0, {}
-	state.restartTask = false
 end
 
 local function getState(player: Player): PlayerState
@@ -48,7 +49,6 @@ local function getState(player: Player): PlayerState
 			shots = 0,
 			goals = 0,
 			history = {},
-			restartTask = false,
 		}
 		states[player] = state
 	end
@@ -77,7 +77,6 @@ local function progress(state: PlayerState)
 	return {
 		goals = state.goals,
 		shots = state.shots,
-		taskShots = Training.TaskShots,
 		taskGoals = Training.TaskGoals,
 		history = table.clone(state.history),
 	}
@@ -92,6 +91,7 @@ local function sendEpisode(player: Player, state: PlayerState, episode: Episode)
 		payload.hint = {
 			aimX = Training.TutorialAim.X,
 			aimY = Training.TutorialAim.Y,
+			ringRadius = Training.TutorialRingRadius,
 			tapRadius = Training.TutorialTapRadius,
 			powerMin = Training.GuidedPowerMin,
 			powerMax = Training.GuidedPowerMax,
@@ -100,17 +100,16 @@ local function sendEpisode(player: Player, state: PlayerState, episode: Episode)
 	remotes.EpisodeStarted:FireClient(player, payload)
 end
 
-local function startEpisode(player: Player, state: PlayerState)
+-- choice: what the completion menu asked for ("RETRY" or "NEXT"); ignored in other phases.
+local function startEpisode(player: Player, state: PlayerState, choice: string?)
 	if state.phase == "DONE" then
-		state.phase = "TASK" -- "play again" from the completion menu
-		resetTask(state)
-	elseif state.restartTask then
-		resetTask(state)
+		state.phase = if choice == "NEXT" then "FREE" else "TASK"
+		resetCounters(state)
 	end
 	local episode = {
 		id = state.nextEpisodeId,
 		kind = "SHOT",
-		mode = if state.phase == "TUTORIAL" then "TUTORIAL" else "TASK",
+		mode = state.phase,
 		-- Logged so any result can be reproduced from (seed, input, mode).
 		seed = seedSource:NextInteger(1, 2 ^ 31 - 1),
 		startedAt = os.clock(),
@@ -130,7 +129,7 @@ local function reject(player: Player, episodeId: any, reason: string)
 	})
 end
 
-local function onRequestEpisode(player: Player)
+local function onRequestEpisode(player: Player, choice: any)
 	local state = getState(player)
 	if not passesRateLimit(state) then
 		return
@@ -142,18 +141,18 @@ local function onRequestEpisode(player: Player)
 		sendEpisode(player, state, active)
 		return
 	end
-	startEpisode(player, state)
+	startEpisode(player, state, if typeof(choice) == "string" then choice else nil)
 end
 
 -- Updates the training progress after a shot and returns what happens next:
--- TUTORIAL_DONE | TUTORIAL_RETRY | CONTINUE | FAILED | COMPLETED
+-- TUTORIAL_DONE | TUTORIAL_RETRY | CONTINUE | COMPLETED
 local function advance(state: PlayerState, mode: string, outcome: string): string
 	if mode == "TUTORIAL" then
 		if outcome ~= "GOAL" then
 			return "TUTORIAL_RETRY" -- should not happen: guided shots always score
 		end
 		state.phase = "TASK"
-		resetTask(state)
+		resetCounters(state)
 		return "TUTORIAL_DONE"
 	end
 
@@ -162,14 +161,15 @@ local function advance(state: PlayerState, mode: string, outcome: string): strin
 		state.goals += 1
 	end
 	table.insert(state.history, outcome)
+	if mode == "FREE" then
+		if #state.history > FREE_HISTORY then
+			table.remove(state.history, 1)
+		end
+		return "CONTINUE"
+	end
 	if state.goals >= Training.TaskGoals then
 		state.phase = "DONE"
 		return "COMPLETED"
-	end
-	local shotsLeft = Training.TaskShots - state.shots
-	if state.goals + shotsLeft < Training.TaskGoals then
-		state.restartTask = true
-		return "FAILED"
 	end
 	return "CONTINUE"
 end
@@ -213,17 +213,19 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, a
 	local options
 	if active.mode == "TUTORIAL" then
 		options = { guided = { aimX = Training.TutorialAim.X, aimY = Training.TutorialAim.Y } }
-	else
+	elseif active.mode == "TASK" then
 		options = { keeperDelay = Training.TaskKeeperDelay }
+	else
+		stats.keeperSkill = ShotConfig.Goalkeeper.Skill
 	end
 	local result = ShotResolver.resolve(input, stats, Random.new(active.seed), options)
 	local status = advance(state, active.mode, result.outcome)
 
 	local used = result.input
 	print(string.format(
-		"[EpisodeService] %s: episode #%d %s aim=(%.2f, %.2f) power=%.2f -> %s/%s, %d km/h, %s (%d goals from %d/%d task shots)",
+		"[EpisodeService] %s: episode #%d %s aim=(%.2f, %.2f) power=%.2f -> %s/%s, %d km/h, %s (%d goals from %d shots)",
 		player.Name, active.id, active.mode, used.aimX, used.aimY, used.power, result.outcome, result.detail, result.speedKmh,
-		status, state.goals, state.shots, Training.TaskShots
+		status, state.goals, state.shots
 	))
 
 	local sim = result.sim

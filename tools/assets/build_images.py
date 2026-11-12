@@ -7,7 +7,8 @@ ModuleScripts (src/shared/Images/*.lua) and turned into EditableImages on the cl
 Inputs : tools/assets/source/logo.png          the game logo (used exactly as supplied)
          tools/assets/source/banner_logos.jpg  five logo variants for the stadium boards
          tools/assets/source/keeper_sheet.png  goalkeeper character sheet (kit textures)
-Outputs: src/shared/Images/{Logo,Banners,Keeper}.lua and preview PNGs in assets/generated/
+Outputs: src/shared/Images/{Logo,Banners,Keeper,Ui}.lua and preview PNGs in assets/generated/
+         (the tutorial finger is drawn in finger.py)
 
 Run:  python3 tools/assets/build_images.py   (needs Pillow)
 
@@ -21,6 +22,8 @@ import os
 import struct
 
 from PIL import Image, ImageDraw, ImageFilter
+
+from finger import finger_image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
@@ -260,4 +263,6 @@ if __name__ == "__main__":
     write_module("Banners", boards(), "LED board artwork: the supplied logos from tools/assets/source/banner_logos.jpg.")
     textures = keeper_textures()
     write_module("Keeper", textures, "Goalkeeper kit textures cut from tools/assets/source/keeper_sheet.png.")
+    finger, tip = finger_image()
+    write_module("Ui", {"Finger": finger}, f"Tutorial finger (finger.py); fingertip at {tip[0]:.3f}, {tip[1]:.3f} of the image.")
     contact_sheet(textures, os.path.join(OUT_PNG, "keeper_contact_sheet.png"))

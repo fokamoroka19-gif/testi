@@ -48,17 +48,41 @@ local currentEpisode = nil
 local waitingForEpisode = false
 local bestSpeed = 0 -- fastest goal in the current task attempt, for the completion menu
 
-local function requestEpisode()
+-- choice: "RETRY" or "NEXT" from the completion menu, otherwise nil.
+local function requestEpisode(choice: string?)
 	waitingForEpisode = true
-	RequestEpisode:FireServer()
+	RequestEpisode:FireServer(choice)
 end
 
-hud.onContinue = function()
+local function continueWith(choice: string?)
 	if waitingForEpisode then
 		return
 	end
 	hud:hideCard()
-	requestEpisode()
+	requestEpisode(choice)
+end
+
+hud.onContinue = function()
+	continueWith(nil)
+end
+hud.onRetry = function()
+	continueWith("RETRY")
+end
+hud.onNext = function()
+	continueWith("NEXT")
+end
+
+-- Goals panel: in the task, one pip per goal still needed; in free play, the last results.
+local function showProgress(info)
+	if info.mode == "FREE" then
+		hud:setSeries(info.goals, 10, info.history, info.shots)
+	else
+		local goals = {}
+		for _ = 1, info.goals do
+			table.insert(goals, "GOAL")
+		end
+		hud:setSeries(info.goals, info.taskGoals, goals)
+	end
 end
 
 input.onShoot = function(aimX, aimY, power)
@@ -84,8 +108,8 @@ EpisodeStarted.OnClientEvent:Connect(function(episode)
 	visuals:reset()
 	hud:hideCard()
 	hud:setPower(0)
-	hud:setSeries(episode.goals, episode.taskShots, episode.history)
-	hud:setTask(episode.mode, episode.shots, episode.taskShots, episode.taskGoals)
+	showProgress(episode)
+	hud:setMode(episode.mode, episode.taskGoals)
 	if episode.shots == 0 then
 		bestSpeed = 0
 	end
@@ -123,24 +147,18 @@ local function showOutcome(result)
 	local status = result.status
 	local speed = result.speedKmh
 	if status == "COMPLETED" then
-		hud:showComplete({ goals = result.goals, taskShots = result.taskShots, bestSpeed = bestSpeed })
+		hud:showComplete({ goals = result.goals, shots = result.shots, bestSpeed = bestSpeed })
 	elseif status == "TUTORIAL_DONE" then
 		hud:showResult(result.detail, {
-			subtitle = string.format(hud.text.TutorialDone, result.taskGoals, result.taskShots),
+			subtitle = string.format(hud.text.TutorialDone, result.taskGoals),
 			button = hud.text.ToTask,
 			speedKmh = speed,
 		})
 	elseif status == "TUTORIAL_RETRY" then
 		hud:showResult(result.detail, { subtitle = hud.text.TutorialRetry, speedKmh = speed })
-	elseif status == "FAILED" then
-		hud:showResult(result.detail, {
-			subtitle = string.format(hud.text.TaskFailed, result.taskGoals, result.taskShots),
-			button = hud.text.Retry,
-			speedKmh = speed,
-		})
 	else
 		local left = result.taskGoals - result.goals
-		local subtitle = if result.outcome == "GOAL" then string.format(hud.text.TaskLeft, left) else nil
+		local subtitle = if result.mode == "TASK" and result.outcome == "GOAL" then string.format(hud.text.TaskLeft, left) else nil
 		hud:showResult(result.detail, { subtitle = subtitle, speedKmh = speed })
 	end
 end
@@ -162,8 +180,8 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	end
 
 	visuals:playShot(result, function()
-		if result.mode == "TASK" then
-			hud:setSeries(result.goals, result.taskShots, result.history)
+		if result.mode ~= "TUTORIAL" then
+			showProgress(result)
 			if result.outcome == "GOAL" then
 				hud:bumpGoals()
 			end
@@ -194,7 +212,7 @@ RunService.RenderStepped:Connect(function(dt)
 	input:update()
 	if input.enabled then
 		local guided = hint:isActive()
-		local demoPower = hint:update(dt, input.holding, input.power)
+		local demoPower = hint:update(dt, input.holding, input.power, hud.scale)
 		visuals:updateAiming(true, input.aimX, input.aimY, input.power, input.holding)
 		hud:setPower(if input.holding or not demoPower then input.power else demoPower)
 		if guided then

@@ -33,21 +33,20 @@ local TEXT = {
 	NextShot = "ЕЩЁ УДАР  ›",
 	Speed = "%d км/ч",
 	-- Training
-	TutorialTag = "ПОДСКАЗКА",
-	TutorialGoal = "Повтори за пальцем — этот удар точно в цель",
-	TaskTag = "ЗАДАНИЕ  •  УДАР %d ИЗ %d",
-	TaskGoal = 'Забей <font color="#FFBF1F">%d</font> голов из %d',
-	TutorialDone = "Так и бей! Теперь задание: %d голов из %d",
+	GoalsTutorial = "ПОДСКАЗКА",
+	GoalsTask = "ЗАДАНИЕ: ЗАБЕЙ %d",
+	GoalsFree = "ГОЛЫ / УДАРЫ",
+	ModeFree = 'СВОБОДНАЯ ИГРА  •  <font color="#FFBF1F">УДАРЫ</font>',
+	TutorialDone = "Так и бей! Теперь забей %d голов",
 	ToTask = "К ЗАДАНИЮ  ›",
 	TutorialRetry = "Попробуй ещё раз по подсказке",
 	TaskLeft = "Осталось забить: %d",
-	TaskFailed = "Задание не выполнено: нужно %d голов из %d",
-	Retry = "ЗАНОВО  ›",
 	CompleteTitle = "ТРЕНИРОВКА\nПРОЙДЕНА!",
-	CompleteSubtitle = "Удар освоен: %d из %d голов",
+	CompleteSubtitle = "%d голов за %d ударов",
 	CompleteSpeed = "Лучший удар: %d км/ч",
 	CompleteStage = "Этап 1 из 3 пройден",
-	PlayAgain = "ПРОЙТИ ЕЩЁ РАЗ  ›",
+	PlayAgain = "ЕЩЁ РАЗ",
+	Next = "ДАЛЕЕ  ›",
 	Outcomes = {
 		GOAL = { "ГОЛ!", "Отличное попадание в створ" },
 		POST_IN = { "ГОЛ!", "От штанги в сетку!" },
@@ -100,6 +99,13 @@ local FONT_BOLD = Font.new(MONTSERRAT, Enum.FontWeight.Bold, Enum.FontStyle.Ital
 local FONT_MEDIUM = Font.new(MONTSERRAT, Enum.FontWeight.Medium)
 
 local DESIGN_SIZE = Vector2.new(1280, 720)
+-- Phone layout: screens whose short side is under PHONE_HEIGHT get PHONE_BOOST, limited so the
+-- widest row (power panel) and the tallest panel (completion menu) still fit.
+local PHONE_HEIGHT = 500
+local PHONE_BOOST = 1.7
+local PHONE_MIN_WIDTH = 680
+local PHONE_MIN_HEIGHT = 400
+local PHONE_LOGO = 0.8 -- the logo panel is decoration; on phones it gives its room to the goal
 local POWER_SEGMENTS = 20
 local POWER_WARN = 0.85
 
@@ -316,6 +322,9 @@ function ShotHud.new()
 	self.text = TEXT -- shared with the entry script for training messages
 	self.scales = {}
 	self.onContinue = nil :: (() -> ())?
+	self.onRetry = nil :: (() -> ())? -- completion menu buttons
+	self.onNext = nil :: (() -> ())?
+	self.scale = 1
 
 	local gui = create("ScreenGui", {
 		Name = "ShotHud",
@@ -330,19 +339,30 @@ function ShotHud.new()
 	self:_buildLogo()
 	self:_buildGoals()
 	self:_buildPowerPanel()
-	self:_buildTaskBanner()
 	self:_buildCard()
 	self:_buildCompleteMenu()
 
+	-- Measured in GUI units (inside the safe area), so it matches what the panels are laid out in.
 	local function rescale()
-		local viewport = workspace.CurrentCamera.ViewportSize
-		local scale = math.clamp(math.min(viewport.X / DESIGN_SIZE.X, viewport.Y / DESIGN_SIZE.Y), 0.5, 1.3)
+		local size = gui.AbsoluteSize
+		if size.X < 1 or size.Y < 1 then
+			return
+		end
+		local scale = math.min(size.X / DESIGN_SIZE.X, size.Y / DESIGN_SIZE.Y)
+		local phone = math.min(size.X, size.Y) < PHONE_HEIGHT
+		if phone then
+			-- Phones: the design-size fit makes text tiny, so go bigger while everything still fits.
+			scale = math.min(scale * PHONE_BOOST, (size.X - 40) / PHONE_MIN_WIDTH, (size.Y - 20) / PHONE_MIN_HEIGHT)
+		end
+		scale = math.clamp(scale, 0.5, 1.3)
+		self.scale = scale
 		for _, uiScale in self.scales do
 			uiScale.Scale = scale
 		end
+		self.logoScale.Scale = if phone then scale * PHONE_LOGO else scale
 	end
 	rescale()
-	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(rescale)
+	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(rescale)
 	return self
 end
 
@@ -355,7 +375,7 @@ end
 
 function ShotHud:_buildLogo()
 	local root = frame({ Name = "Logo", Position = UDim2.fromOffset(14, 4), Size = UDim2.fromOffset(300, 196), BackgroundTransparency = 1, Parent = self.gui })
-	self:_scaled(root)
+	self.logoScale = self:_scaled(root)
 
 	local mark = frame({ Name = "Wordmark", Size = UDim2.fromOffset(300, 130), BackgroundTransparency = 1, Parent = root })
 	local imageId = logoImageId()
@@ -377,6 +397,7 @@ function ShotHud:_buildLogo()
 	corner(accent, 1)
 	local modeText = text({ Position = UDim2.fromOffset(24, 0), Size = UDim2.new(1, -30, 1, 0), Text = TEXT.Mode, TextSize = 16, Parent = mode })
 	outline(modeText, 1.5)
+	self.modeText = modeText
 
 	local stage = text({ Name = "Stage", Position = UDim2.fromOffset(12, 172), Size = UDim2.fromOffset(112, 20), Text = TEXT.Stage, TextSize = 15, FontFace = FONT_BOLD, TextTransparency = 0.15, Parent = root })
 	outline(stage, 1.5)
@@ -407,8 +428,10 @@ function ShotHud:_buildGoals()
 	self.trophy = trophy
 	emoji(trophy, "🏆", 28)
 
-	local label = text({ Name = "GoalsLabel", Position = UDim2.fromOffset(78, 10), Size = UDim2.fromOffset(120, 18), Text = TEXT.Goals, TextSize = 15, TextColor3 = LILAC, Parent = root })
+	local label = text({ Name = "GoalsLabel", Position = UDim2.fromOffset(78, 10), Size = UDim2.fromOffset(150, 18), Text = TEXT.Goals, TextSize = 15, TextColor3 = LILAC, Parent = root })
+	sizeLimit(label, 15)
 	outline(label, 1.5)
+	self.goalsLabel = label
 
 	-- Centre-anchored holder so the bump scales around the number, not the panel corner.
 	local countHolder = frame({ Name = "Count", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromOffset(76, 46), Size = UDim2.fromOffset(150, 36), BackgroundTransparency = 1, Parent = root })
@@ -510,23 +533,6 @@ function ShotHud:_buildPowerPanel()
 	self.powerWarn = false
 end
 
-function ShotHud:_buildTaskBanner()
-	local root = panel({ Name = "TaskBanner", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 14), Size = UDim2.fromOffset(440, 66), Visible = false }, 10)
-	root.Parent = self.gui
-	self:_scaled(root)
-	self.taskBanner = root
-	local inner = frame({ Name = "Inner", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = root })
-	self.taskPop = create("UIScale", { Parent = inner })
-	local accent = frame({ Name = "Accent", Position = UDim2.fromOffset(14, 14), Size = UDim2.fromOffset(6, 38), BackgroundColor3 = GOLD, Parent = inner })
-	corner(accent, 2)
-	self.taskAccent = accent
-	self.taskTag = text({ Name = "Tag", Position = UDim2.fromOffset(32, 8), Size = UDim2.new(1, -46, 0, 18), Text = "", TextSize = 14, TextColor3 = LILAC, FontFace = FONT_BOLD, Parent = inner })
-	outline(self.taskTag, 1.5)
-	self.taskText = text({ Name = "Goal", Position = UDim2.fromOffset(32, 26), Size = UDim2.new(1, -46, 0, 30), Text = "", TextSize = 22, Parent = inner })
-	sizeLimit(self.taskText, 22)
-	outline(self.taskText, 2)
-end
-
 function ShotHud:_buildCompleteMenu()
 	local root = frame({ Name = "TrainingComplete", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, ZIndex = 20, Parent = self.gui })
 	self.complete = root
@@ -586,13 +592,22 @@ function ShotHud:_buildCompleteMenu()
 	chip(1, "✅", TEXT.CompleteStage, LIME)
 	self.completeSpeed, self.completeSpeedText = chip(2, "⚡", "", GOLD)
 
-	self.completeButton = self:_buildButton(body, TEXT.PlayAgain)
-	self.completeButton.button.Position = UDim2.new(0.5, 0, 0, 296)
-	self.completeButton.button.Size = UDim2.fromOffset(300, 52)
+	-- Two buttons: replay the task (secondary) and go on (primary).
+	self.retryButton = self:_buildButton(body, TEXT.PlayAgain, function()
+		self:_choose(self.onRetry)
+	end, true)
+	self.retryButton.button.Position = UDim2.new(0.5, -116, 0, 296)
+	self.retryButton.button.Size = UDim2.fromOffset(212, 52)
+	self.completeButton = self:_buildButton(body, TEXT.Next, function()
+		self:_choose(self.onNext)
+	end)
+	self.completeButton.button.Position = UDim2.new(0.5, 116, 0, 296)
+	self.completeButton.button.Size = UDim2.fromOffset(212, 52)
 end
 
--- Gold primary button: dark lip below, gradient face clipped by a CanvasGroup with a moving shine.
-function ShotHud:_buildButton(parent: Instance, labelText: string)
+-- Gold primary button (or violet secondary): dark lip below, gradient face clipped by a
+-- CanvasGroup with a moving shine. onActivated defaults to the result card's continue.
+function ShotHud:_buildButton(parent: Instance, labelText: string, onActivated: (() -> ())?, secondary: boolean?)
 	local button = create("TextButton", {
 		Name = "Continue",
 		AnchorPoint = Vector2.new(0.5, 0),
@@ -603,7 +618,7 @@ function ShotHud:_buildButton(parent: Instance, labelText: string)
 		Text = "",
 		Parent = parent,
 	})
-	local lip = frame({ Name = "Lip", Position = UDim2.fromOffset(0, 6), Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = LIP, Parent = button })
+	local lip = frame({ Name = "Lip", Position = UDim2.fromOffset(0, 6), Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = if secondary then rgb(40, 16, 96) else LIP, Parent = button })
 	corner(lip, 9)
 	stroke(lip, INK, 2.5)
 
@@ -611,7 +626,7 @@ function ShotHud:_buildButton(parent: Instance, labelText: string)
 	local face = create("CanvasGroup", { Name = "Face", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, Parent = body })
 	corner(face, 9)
 	local fill = frame({ Name = "Fill", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = face })
-	create("UIGradient", { Color = ColorSequence.new(rgb(255, 214, 74), ORANGE), Rotation = 90, Parent = fill })
+	create("UIGradient", { Color = if secondary then ColorSequence.new(rgb(150, 110, 255), VIOLET) else ColorSequence.new(rgb(255, 214, 74), ORANGE), Rotation = 90, Parent = fill })
 	frame({ Name = "Sheen", Position = UDim2.fromOffset(0, 0), Size = UDim2.new(1, 0, 0.42, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 0.72, Parent = face })
 	local shine = frame({
 		Name = "Shine",
@@ -626,8 +641,12 @@ function ShotHud:_buildButton(parent: Instance, labelText: string)
 	local edge = frame({ Name = "Outline", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = body })
 	corner(edge, 9)
 	stroke(edge, INK, 2.5)
-	local label = text({ Name = "Label", Size = UDim2.fromScale(1, 1), Text = labelText, TextSize = 24, TextColor3 = INK, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
-	outline(label, 1.5, GOLD_LIGHT).Transparency = 0.4
+	local label = text({ Name = "Label", Size = UDim2.fromScale(1, 1), Text = labelText, TextSize = 24, TextColor3 = if secondary then CREAM else INK, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
+	if secondary then
+		outline(label, 2)
+	else
+		outline(label, 1.5, GOLD_LIGHT).Transparency = 0.4
+	end
 
 	local shineTween = TweenService:Create(
 		shine,
@@ -649,7 +668,11 @@ function ShotHud:_buildButton(parent: Instance, labelText: string)
 		setPressed(false)
 	end)
 	button.Activated:Connect(function()
-		self:_continue()
+		if onActivated then
+			onActivated()
+		else
+			self:_continue()
+		end
 	end)
 
 	return { button = button, body = body, shine = shine, label = label, shineTween = shineTween }
@@ -750,14 +773,24 @@ function ShotHud:_buildCard()
 end
 
 function ShotHud:_continue()
-	if (self.card.Visible or self.complete.Visible) and self.onContinue then
+	if self.card.Visible and self.onContinue then
 		self.onContinue()
 	end
 end
 
--- Called by keyboard / gamepad shortcuts.
+function ShotHud:_choose(callback: (() -> ())?)
+	if self.complete.Visible and callback then
+		callback()
+	end
+end
+
+-- Called by keyboard / gamepad shortcuts: the primary button of whatever is open.
 function ShotHud:pressContinue()
-	self:_continue()
+	if self.complete.Visible then
+		self:_choose(self.onNext)
+	else
+		self:_continue()
+	end
 end
 
 function ShotHud:isCardVisible(): boolean
@@ -800,9 +833,11 @@ function ShotHud:setPower(power: number)
 	end
 end
 
-function ShotHud:setSeries(goals: number, seriesLength: number, history: { string }?)
+-- goals: big number; seriesLength: number of result pips; history: outcome per pip.
+-- total: number after the slash (defaults to seriesLength).
+function ShotHud:setSeries(goals: number, seriesLength: number, history: { string }?, total: number?)
 	local shots = history or {}
-	setBigText(self.goalsText, string.format('<font color="#FFBF1F">%d</font> / %d', goals, seriesLength))
+	setBigText(self.goalsText, string.format('<font color="#FFBF1F">%d</font> / %d', goals, total or seriesLength))
 
 	for i = #self.pipFrames + 1, seriesLength do
 		local pip = frame({ Name = "Pip" .. i, LayoutOrder = i, Size = UDim2.fromOffset(18, 18), BackgroundColor3 = NAVY, Parent = self.pips })
@@ -890,22 +925,22 @@ function ShotHud:hideCard()
 	self.cardButton.shineTween:Cancel()
 	self.complete.Visible = false
 	self.completeButton.shineTween:Cancel()
+	self.retryButton.shineTween:Cancel()
 end
 
--- Top banner: the guided shot's hint, or the task with the current shot number.
-function ShotHud:setTask(mode: string, shots: number, taskShots: number, taskGoals: number)
+-- Labels for the current part of the training: TUTORIAL | TASK | FREE.
+function ShotHud:setMode(mode: string, taskGoals: number)
 	if mode == "TUTORIAL" then
-		self.taskTag.Text = TEXT.TutorialTag
-		self.taskText.Text = TEXT.TutorialGoal
-		self.taskAccent.BackgroundColor3 = LIME
+		self.goalsLabel.Text = TEXT.GoalsTutorial
+	elseif mode == "TASK" then
+		self.goalsLabel.Text = string.format(TEXT.GoalsTask, taskGoals)
 	else
-		self.taskTag.Text = string.format(TEXT.TaskTag, math.min(shots + 1, taskShots), taskShots)
-		self.taskText.Text = string.format(TEXT.TaskGoal, taskGoals, taskShots)
-		self.taskAccent.BackgroundColor3 = GOLD
+		self.goalsLabel.Text = TEXT.GoalsFree
 	end
-	self.taskBanner.Visible = true
-	self.taskPop.Scale = 0.85
-	TweenService:Create(self.taskPop, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	self.modeText.Text = if mode == "FREE" then TEXT.ModeFree else TEXT.Mode
+	if mode == "FREE" then
+		self.stageDots[1].BackgroundColor3 = LIME
+	end
 end
 
 -- Highlights the power range that the guided shot asks for (nil hides it).
@@ -922,19 +957,18 @@ function ShotHud:setPowerZone(min: number?, max: number?)
 	zone.Visible = true
 end
 
--- Completion menu after the task is done. stats: { goals, taskShots, bestSpeed }
-function ShotHud:showComplete(stats: { goals: number, taskShots: number, bestSpeed: number? })
+-- Completion menu after the task is done. stats: { goals, shots, bestSpeed }
+function ShotHud:showComplete(stats: { goals: number, shots: number, bestSpeed: number? })
 	self.card.Visible = false
 	self.cardButton.shineTween:Cancel()
-	self.completeSubtitle.Text = string.format(TEXT.CompleteSubtitle, stats.goals, stats.taskShots)
+	self.completeSubtitle.Text = string.format(TEXT.CompleteSubtitle, stats.goals, stats.shots)
 	local hasSpeed = type(stats.bestSpeed) == "number" and stats.bestSpeed > 0
 	self.completeSpeed.Visible = hasSpeed
 	if hasSpeed then
 		self.completeSpeedText.Text = string.format(TEXT.CompleteSpeed, math.floor(stats.bestSpeed + 0.5))
 	end
 	for i, ball in self.completeBalls do
-		ball.Visible = i <= stats.taskShots
-		ball.TextTransparency = if i <= stats.goals then 0 else 0.7
+		ball.Visible = i <= stats.goals
 	end
 	self.stageDots[1].BackgroundColor3 = LIME
 
@@ -951,6 +985,7 @@ function ShotHud:showComplete(stats: { goals: number, taskShots: number, bestSpe
 	self.completeBadge.Rotation = -140
 	TweenService:Create(self.completeBadge, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Rotation = 0 }):Play()
 	playShine(self.completeButton)
+	self.retryButton.body.Position = UDim2.fromOffset(0, 0)
 end
 
 return ShotHud

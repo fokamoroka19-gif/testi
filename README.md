@@ -25,7 +25,7 @@ The server modules can be anywhere under ServerScriptService (next to `Main` or 
 |---|---|---|
 | `src/shared/ShotConfig.lua` | `ReplicatedStorage/Shared/ShotConfig` | ModuleScript |
 | `src/shared/ShotPhysics.lua` | `ReplicatedStorage/Shared/ShotPhysics` | ModuleScript |
-| `src/shared/Images/Logo.lua`, `Banners.lua`, `Keeper.lua` | `ReplicatedStorage/Shared/Images/Logo`, `Banners`, `Keeper` (inside a Folder named `Images`) | ModuleScript |
+| `src/shared/Images/Logo.lua`, `Banners.lua`, `Keeper.lua`, `Ui.lua` | `ReplicatedStorage/Shared/Images/Logo`, `Banners`, `Keeper`, `Ui` (inside a Folder named `Images`) | ModuleScript |
 | `src/server/Main.server.lua` | `ServerScriptService/Main` | Script |
 | `src/server/SceneBuilder.lua` | `ServerScriptService/SceneBuilder` | ModuleScript |
 | `src/server/KeeperBuilder.lua` | `ServerScriptService/KeeperBuilder` | ModuleScript |
@@ -55,23 +55,30 @@ Game Settings → Security → Allow Mesh / Image APIs**, otherwise the game sti
 fallbacks: the text logo, plain LED boards and a keeper in plain kit colours (the Output explains why).
 If you upload the logo to Roblox yourself, put its id in `LOGO_IMAGE` at the top of `ShotHud`.
 
-To change the art, edit `tools/assets/build_images.py` and run `python3 tools/assets/build_images.py`
-(needs Pillow), then rebuild the place file.
+To change the art, edit `tools/assets/build_images.py` (the tutorial finger is drawn in
+`tools/assets/finger.py`) and run `python3 tools/assets/build_images.py` (needs Pillow), then rebuild
+the place file.
 
 ## Shot training
 
 1. **Guided shot.** A pulsing ring on the goal shows where to press, and a finger demonstrates it:
-   press, hold while the power bar fills to the green **ЗОНА УДАРА**, release. Presses away from the
-   ring don't count (the finger shakes and points at it again). This shot always scores: the server
-   keeps the aim and power in a safe range, takes away the random error and makes the keeper late.
-2. **Task.** Score 5 goals from 5 shots against the training keeper. The banner at the top shows the
-   shot number, and the dots under the goals counter show each result. After a miss or a save, the task
-   can't be completed any more, so the card offers **ЗАНОВО** and the task starts again from shot 1.
-3. **Completed.** After the 5th goal a **ТРЕНИРОВКА ПРОЙДЕНА!** menu appears (goals, fastest shot,
-   stage 1 done). **ПРОЙТИ ЕЩЁ РАЗ** starts the task again.
+   press, hold while the power bar fills to the green **ЗОНА УДАРА**, release. The first press away
+   from the ring is ignored (the finger shakes and points at it again). This shot always scores: the
+   server keeps the aim and power in a safe range, takes away the random error and makes the keeper late.
+   The ring, finger and callout are a BillboardGui anchored at the target point, so they line up with
+   the shot on any screen.
+2. **Task.** Score 5 goals against the training keeper, in as many shots as it takes. Misses and saves
+   don't reset anything. The goals panel shows the task and one dot per goal.
+3. **Completed.** After the 5th goal a **ТРЕНИРОВКА ПРОЙДЕНА!** menu appears (goals and shots taken,
+   fastest goal, stage 1 done) with two buttons: **ЕЩЁ РАЗ** replays the task, **ДАЛЕЕ** goes on.
+   The next training stage (pass, roadmap stage 2) doesn't exist yet, so **ДАЛЕЕ** currently opens
+   free play: unlimited shots against the normal keeper, goals / shots and the last 10 results on the panel.
 
 The flow is decided on the server (`EpisodeService`), so a client can't skip the task. Numbers
-(hint position, green zone, task length, training keeper) are in `ShotConfig.Training`.
+(hint position and ring size, green zone, goals needed, training keeper) are in `ShotConfig.Training`.
+
+On phones (short side under 500 px) the HUD is drawn up to 1.7× larger than the plain fit (the logo a bit less), as far as
+the power panel and the completion menu still fit the screen (`PHONE_*` at the top of `ShotHud`).
 
 ## Controls
 
@@ -91,7 +98,7 @@ All on-screen text is in the `TEXT` table at the top of `ShotHud`.
 1. **PC:** press Play. The Output window should show:
    `[SceneBuilder] Stadium built (… objects)`, `[KeeperBuilder] Goalkeeper ready (R15 blocks, … studs tall)`, `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
    `[EpisodeService] <you>: episode #1 started (SHOT TUTORIAL, seed …)`, and after each shot a line like
-   `[EpisodeService] <you>: episode #2 TASK aim=(0.72, 0.55) power=0.64 -> GOAL/GOAL, 98 km/h, CONTINUE (1 goals from 1/5 task shots)`.
+   `[EpisodeService] <you>: episode #2 TASK aim=(0.72, 0.55) power=0.64 -> GOAL/GOAL, 98 km/h, CONTINUE (1 goals from 1 shots)`.
    There should be no red errors.
 2. **Phone layout:** Test → Device emulator, choose a phone in landscape, and repeat.
    The HUD respects screen notches, and no thumbstick or jump button appears.
