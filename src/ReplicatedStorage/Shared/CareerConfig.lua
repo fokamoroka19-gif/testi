@@ -85,10 +85,11 @@ function CareerConfig.kit(club: Club)
 		socks = club.socks,
 		trim = club.print,
 		band = club.print,
+		print = club.print,
 	}
 end
 
--- The main menu's star before a career exists: the New Football Star mascot in white #10.
+-- The New Football Star badge on the career card before a career exists.
 CareerConfig.Mascot = {
 	id = "MASCOT",
 	name = "New Football Star",
@@ -101,7 +102,6 @@ CareerConfig.Mascot = {
 	socks = rgb(244, 238, 250),
 	print = rgb(43, 27, 107),
 } :: Club
-CareerConfig.MascotNumber = 10
 
 -- First opponent of the season: the next club below in the table (wrapping round).
 function CareerConfig.firstOpponent(club: Club): Club

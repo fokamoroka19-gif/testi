@@ -28,9 +28,11 @@ local RED = rgb(255, 45, 85)
 
 local SKIN = rgb(214, 132, 82)
 local HAIR = rgb(52, 32, 26)
--- Our team in gold and purple, the opponent in red.
-local TEAM_KIT = { skin = SKIN, shirt = GOLD, shorts = rgb(43, 18, 80), socks = GOLD, boots = rgb(20, 14, 30), hair = HAIR }
-local OPPONENT_KIT = { skin = SKIN, shirt = RED, shorts = rgb(245, 240, 250), socks = RED, boots = rgb(245, 240, 250), hair = HAIR }
+-- Our team in gold and purple until the career's club kit is set; the rival in red/black stripes
+-- like the character sheet's opponent. Skin and hair come from each character's look.
+local TEAM_KIT = { skin = SKIN, shirt = GOLD, shorts = rgb(43, 18, 80), socks = GOLD, boots = rgb(20, 14, 30), hair = HAIR, trim = rgb(43, 18, 80), band = rgb(43, 18, 80), print = rgb(43, 18, 80) }
+local BLACK = rgb(24, 18, 26)
+local OPPONENT_KIT = { skin = SKIN, shirt = rgb(204, 26, 44), stripes = BLACK, shorts = BLACK, socks = rgb(240, 236, 244), band = BLACK, trim = BLACK, boots = BLACK, print = WHITE, hair = HAIR, number = 9 }
 
 local PassVisuals = {}
 PassVisuals.__index = PassVisuals
@@ -134,8 +136,10 @@ function PassVisuals.new()
 		table.insert(self.ballParts, { patch, CFrame.fromMatrix(dir * BALL_RADIUS * 0.985, dir, dir:Cross(reference).Unit) })
 	end
 
-	local function figure(name: string, kit, textures: string)
-		local model, rootHeight = FigureBuilder.build(name, kit, SCALE, textures)
+	local function figure(name: string, kit, look: string, number: number?)
+		local dressed = table.clone(kit)
+		dressed.number = number or kit.number
+		local model, rootHeight = FigureBuilder.build(name, dressed, SCALE, "head", look)
 		for _, part in model:GetDescendants() do
 			if part:IsA("BasePart") then
 				part.CastShadow = true
@@ -146,15 +150,16 @@ function PassVisuals.new()
 		animator.fadeParts = {}
 		animator.fade = 0
 		for _, d in model:GetDescendants() do
-			if d:IsA("BasePart") or d:IsA("Decal") then
+			if d:IsA("BasePart") or d:IsA("Decal") or d:IsA("SurfaceGui") then
 				table.insert(animator.fadeParts, d)
 			end
 		end
 		return animator
 	end
-	self.passer = figure("Passer", TEAM_KIT, "head")
-	self.mates = { figure("Teammate1", TEAM_KIT, "head"), figure("Teammate2", TEAM_KIT, "head") }
-	self.defender = figure("Defender", OPPONENT_KIT, "head")
+	-- You pass; the teammates receive and shoot; the rival defends.
+	self.passer = figure("Passer", TEAM_KIT, "MAIN", 10)
+	self.mates = { figure("Teammate1", TEAM_KIT, "TEAMMATE", 8), figure("Teammate2", TEAM_KIT, "TEAMMATE", 7) }
+	self.defender = figure("Defender", OPPONENT_KIT, "RIVAL")
 
 	-- Ground markers: where teammates can take the ball, and the defender's reach.
 	self.mateRings = {
@@ -178,10 +183,13 @@ function PassVisuals.new()
 	return self
 end
 
--- The passer and his teammates wear the player's club kit.
-function PassVisuals:setTeamKit(kit)
+-- The passer (you, with your number) and his teammates wear the player's club kit.
+function PassVisuals:setTeamKit(kit, number: number?)
 	for _, animator in { self.passer, self.mates[1], self.mates[2] } do
 		FigureBuilder.applyKit(animator.model, kit)
+	end
+	if number then
+		FigureBuilder.setNumber(self.passer.model, number)
 	end
 end
 
@@ -209,7 +217,11 @@ local function setFade(animator, amount: number)
 	end
 	animator.fade = amount
 	for _, part in animator.fadeParts do
-		part.LocalTransparencyModifier = amount
+		if part:IsA("SurfaceGui") then
+			part.Enabled = amount < 0.5 -- faces and prints can't fade, so they hide with the body
+		else
+			part.LocalTransparencyModifier = amount
+		end
 	end
 end
 

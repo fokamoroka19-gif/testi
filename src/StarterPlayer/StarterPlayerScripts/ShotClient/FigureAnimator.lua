@@ -13,8 +13,8 @@ local JOINT_NAMES = {
 	"LeftHip", "LeftKnee", "LeftAnkle", "RightHip", "RightKnee", "RightAnkle",
 }
 
--- One-shot actions and their length in seconds; WAVE, CHEER and BADGE loop until replaced.
-local DURATION = { KICK = 0.5, TRAP = 0.55, LUNGE = 0.8 }
+-- One-shot actions and their length in seconds; WAVE and CHEER loop until replaced.
+local DURATION = { KICK = 0.5, TRAP = 0.55, LUNGE = 0.8, NOD = 0.8 }
 
 local function J(x: number, y: number, z: number): Vector3
 	return Vector3.new(x, y, z)
@@ -74,9 +74,9 @@ function FigureAnimator:moveTo(position: Vector3, facing: Vector3?, dt: number)
 	end
 end
 
--- KICK | TRAP | LUNGE (one-shot), WAVE | CHEER | BADGE (loop), nil = back to idle/run.
+-- KICK | TRAP | LUNGE | NOD (one-shot), WAVE | CHEER (loop), nil = back to idle/run.
 function FigureAnimator:play(action: string?)
-	if self.action == action and (action == "WAVE" or action == "CHEER" or action == "BADGE") then
+	if self.action == action and (action == "WAVE" or action == "CHEER") then
 		return
 	end
 	self.action = action
@@ -154,14 +154,10 @@ function FigureAnimator:_pose(): (Vector3, number)
 		joints.LeftElbow = J(30, 0, 0)
 		joints.Waist = J(-6, 0, 0)
 		joints.Neck = J(-12, 0, 0)
-	elseif action == "BADGE" then
-		-- Signed: right hand on the club badge, a short nod, then holds the pose.
-		local nod = math.max(0, math.sin(math.min(t, 0.9) / 0.9 * math.pi))
-		joints.RightShoulder = J(48, 0, -30)
-		joints.RightElbow = J(100, 0, 0)
-		joints.RightWrist = J(0, 0, -15)
-		joints.LeftShoulder = J(4, 0, -6)
-		joints.Neck = J(14 * nod, 0, 0)
+	elseif action == "NOD" then
+		-- Contract signed: arms stay relaxed, one short nod towards the camera.
+		local nod = math.max(0, math.sin(math.min(t, 0.8) / 0.8 * math.pi))
+		joints.Neck = J(16 * nod, 0, 0)
 	end
 	return joints, bob - drop
 end

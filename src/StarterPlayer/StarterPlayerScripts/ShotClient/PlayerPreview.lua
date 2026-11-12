@@ -1,7 +1,6 @@
--- The player's footballer on the pitch behind the career menus. Two framings:
---   HERO    main menu: big, facing the camera, left of the buttons (the mascot until a career exists)
---   CREATE  player creation: appears facing the camera (gold flash, sparkles), then turns round to
---           show the surname and number on his back; every change turns him to the back again.
+-- The player's footballer on the pitch during career creation, in the character sheet's MAIN
+-- look and the chosen club's kit. He appears facing the camera (gold flash, sparkles), then turns
+-- round to show the surname and number on his back; every change turns him to the back again.
 -- Everything here is local to this client; CareerMenu drives it and owns the camera.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -17,11 +16,10 @@ local UiKit = require(script.Parent:WaitForChild("UiKit"))
 local SCALE = ShotConfig.Goalkeeper.ModelScale -- same size as the training players
 -- He stands between the shot spot and the camera, with the goal and the stand behind him.
 local STAGE = Vector3.new(0, 0, 56)
--- Camera offset from his feet and the point it looks at. CREATE shifts the camera left so he
--- stands in the right half, next to the form; HERO shifts it right so he stands left of the buttons.
+-- Camera offset from his feet and the point it looks at, shifted left so he stands in the right
+-- half of the screen, next to the creation form.
 local FRAMINGS = {
-	CREATE = { offset = Vector3.new(-4.6, 4.8, 18), look = Vector3.new(-4.6, 4.2, 0), fov = 40 },
-	HERO = { offset = Vector3.new(1.2, 4.9, 15.5), look = Vector3.new(1.2, 4.4, 0), fov = 40 },
+	CREATE = { offset = Vector3.new(-4.6, 4.4, 17), look = Vector3.new(-4.6, 3.7, 0), fov = 40 },
 }
 local FADE_IN = 0.55
 local FRONT_HOLD = 1.5 -- seconds facing the camera before the first turn (CREATE)
@@ -114,7 +112,7 @@ function PlayerPreview.new()
 	return self
 end
 
--- Where the camera looks at him from in a framing (HERO | CREATE), and how far he is.
+-- Where the camera looks at him from, its field of view and how far he is.
 function PlayerPreview.cameraTarget(mode: string): (CFrame, number, number)
 	local framing = FRAMINGS[mode] or FRAMINGS.CREATE
 	return CFrame.lookAt(STAGE + framing.offset, STAGE + framing.look), framing.fov, framing.offset.Magnitude
@@ -175,7 +173,7 @@ function PlayerPreview:_build(club)
 	if self.animator then
 		self.animator.model:Destroy()
 	end
-	local model, rootHeight = FigureBuilder.build("CareerPlayer", CareerConfig.kit(club), SCALE, "head")
+	local model, rootHeight = FigureBuilder.build("CareerPlayer", CareerConfig.kit(club), SCALE, "head", "MAIN")
 	self.fadeParts = {}
 	for _, d in model:GetDescendants() do
 		if d:IsA("BasePart") then
@@ -250,17 +248,6 @@ function PlayerPreview:_appear(club, mode: string)
 	end)
 end
 
--- Main menu: stands facing the camera in his kit. Skips the entrance if he's already there.
-function PlayerPreview:showHero(club, lastName: string, number: number?)
-	if self.visible and self.mode == "HERO" and self.club == club then
-		self:setIdentity(lastName, number, true)
-		return
-	end
-	self:_appear(club, "HERO")
-	self.introAt = nil
-	self:setIdentity(lastName, number, true)
-end
-
 -- Player creation: appears in the club's kit facing the camera, then turns to show the back.
 function PlayerPreview:show(club, lastName: string, number: number?)
 	self:_appear(club, "CREATE")
@@ -287,12 +274,12 @@ function PlayerPreview:setIdentity(lastName: string, number: number?, quiet: boo
 	TweenService:Create(self.numberPop, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 end
 
--- Contract signed: turns to the camera, hand on the badge and a nod.
+-- Contract signed: turns to the camera and gives a short nod.
 function PlayerPreview:celebrate()
 	self.introAt = nil
 	self:showFront()
 	if self.animator then
-		self.animator:play("BADGE")
+		self.animator:play("NOD")
 	end
 	self.sparkles:Emit(24)
 end

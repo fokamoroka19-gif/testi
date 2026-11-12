@@ -116,13 +116,14 @@ local CARD_SIZE = Vector2.new(216, 142)
 local CARD_GAP = 12
 local CARD_TOP = 84
 
--- Camera over the training stadium (the goal is at z = 0, see ShotConfig) for the screens without
--- the player; HERO and CREATE frame the player (PlayerPreview).
+-- Camera over the training stadium (the goal is at z = 0, see ShotConfig); CREATE frames the
+-- player (PlayerPreview).
+local MENU_CAMERA = { from = Vector3.new(0, 9, 92), to = Vector3.new(0, 5.5, 0), fov = 36 }
 local CLUBS_CAMERA = { from = Vector3.new(6, 8, 86), to = Vector3.new(0, 5.5, 0), fov = 36 }
--- Screens with the player keep him sharp and soften the stadium with depth of field instead.
-local BLUR = { HERO = 0, CREATE = 0, CLUBS = 16, NEXT = 12 }
-local DEPTH = { HERO = true, CREATE = true }
--- Screen shade: darker behind the panels. The main menu keeps the middle clear for the player.
+-- The creation screen keeps the player sharp and softens the stadium with depth of field instead.
+local BLUR = { MENU = 6, CREATE = 0, CLUBS = 16, NEXT = 12 }
+local DEPTH = { CREATE = true }
+-- Screen shade: darker behind the panels. The main menu shades both sides and keeps the middle open.
 local SHADE_LEFT = NumberSequence.new({
 	NumberSequenceKeypoint.new(0, 0.12),
 	NumberSequenceKeypoint.new(0.45, 0.55),
@@ -171,7 +172,7 @@ function CareerMenu.new(remote: RemoteFunction)
 	self.selectedClub = nil
 	self.onStartTraining = nil :: ((any) -> ())?
 	self.onSettingsChanged = nil :: ((any) -> ())?
-	self.cameraMode = "HERO"
+	self.cameraMode = "MENU"
 	self.clock = 0
 	self.preview = PlayerPreview.new()
 
@@ -201,7 +202,7 @@ function CareerMenu.new(remote: RemoteFunction)
 		InFocusRadius = 6,
 		Parent = camera,
 	})
-	self.camCFrame, self.camFov = PlayerPreview.cameraTarget("HERO")
+	self.camCFrame, self.camFov = CFrame.lookAt(MENU_CAMERA.from, MENU_CAMERA.to), MENU_CAMERA.fov
 
 	self:_show("MAIN")
 	task.spawn(function()
@@ -242,8 +243,8 @@ end
 
 ---------------------------------------------------------------- main menu
 
--- Spread over the whole screen like the reference main menu: logo top left, the player in the
--- middle (3D, PlayerPreview HERO framing), big buttons on the right, career card bottom left.
+-- Spread over the screen: logo top left, buttons on the right, career card bottom left, the
+-- stadium in between.
 function CareerMenu:_buildMain()
 	local root = frame({ Name = "MAIN", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = self.gui })
 	local function group(name: string, anchor: Vector2, position: UDim2, size: Vector2): Frame
@@ -271,20 +272,20 @@ function CareerMenu:_buildMain()
 	outline(taglineText, 1.2)
 
 	-- Buttons
-	local right = group("Buttons", Vector2.new(1, 0.5), UDim2.new(1, -24, 0.5, 0), Vector2.new(350, 300))
+	local right = group("Buttons", Vector2.new(1, 0.5), UDim2.new(1, -24, 0.5, 0), Vector2.new(290, 236))
 	local c = frame({ Name = "Content", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = right })
 	local pop = create("UIScale", { Parent = c })
-	UiKit.slashes(c, UDim2.new(1, -54, 0, -6), 20, GLOW)
-	self.newButton = UiKit.button(c, { Name = "NewCareer", Position = UDim2.fromOffset(0, 18), Size = UDim2.fromOffset(350, 76), TextSize = 28 }, TEXT.NewCareer, function()
+	UiKit.slashes(c, UDim2.new(1, -48, 0, -6), 18, GLOW)
+	self.newButton = UiKit.button(c, { Name = "NewCareer", Position = UDim2.fromOffset(0, 14), Size = UDim2.fromOffset(290, 60), TextSize = 22 }, TEXT.NewCareer, function()
 		self:_onNewCareer()
 	end, "primary", TEXT.NewCareerSub)
-	self.continueButton = UiKit.button(c, { Name = "Continue", Position = UDim2.fromOffset(0, 106), Size = UDim2.fromOffset(350, 76), TextSize = 24 }, TEXT.Continue, function()
+	self.continueButton = UiKit.button(c, { Name = "Continue", Position = UDim2.fromOffset(0, 84), Size = UDim2.fromOffset(290, 60), TextSize = 19 }, TEXT.Continue, function()
 		self:_onContinue()
 	end, "secondary", TEXT.ContinueNone)
-	self.settingsButton = UiKit.button(c, { Name = "Settings", Position = UDim2.fromOffset(0, 194), Size = UDim2.fromOffset(350, 58), TextSize = 24 }, "⚙  " .. TEXT.Settings, function()
+	self.settingsButton = UiKit.button(c, { Name = "Settings", Position = UDim2.fromOffset(0, 154), Size = UDim2.fromOffset(290, 46), TextSize = 19 }, "⚙  " .. TEXT.Settings, function()
 		self:_openSettings()
 	end, "secondary")
-	self.status = text({ Name = "Status", Position = UDim2.fromOffset(4, 260), Size = UDim2.fromOffset(342, 36), Text = TEXT.Loading, TextSize = 12, FontFace = FONT_MEDIUM, TextColor3 = LILAC, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, Parent = c })
+	self.status = text({ Name = "Status", Position = UDim2.fromOffset(4, 204), Size = UDim2.fromOffset(282, 30), Text = TEXT.Loading, TextSize = 11, FontFace = FONT_MEDIUM, TextColor3 = LILAC, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, Parent = c })
 	outline(self.status, 1)
 	self.newButton:setEnabled(false)
 	self.continueButton:setEnabled(false)
@@ -334,20 +335,6 @@ function CareerMenu:_refreshMain()
 	self.deleteButton.button.Visible = career ~= nil
 	if self.loaded then
 		self.newButton:playShine()
-	end
-	if self.current == "MAIN" then
-		self:_showHero()
-	end
-end
-
--- The main menu's star: the career's player in his club kit, or the mascot.
-function CareerMenu:_showHero()
-	local career = self.career
-	local club = career and CareerConfig.club(career.clubId)
-	if career and club then
-		self.preview:showHero(club, career.lastName, career.number)
-	else
-		self.preview:showHero(CareerConfig.Mascot, "", CareerConfig.MascotNumber)
 	end
 end
 
@@ -992,10 +979,10 @@ function CareerMenu:_show(name: string)
 	local screen = self.screens[name]
 	UiKit.pop(screen.pop, 0.94)
 	self.current = name
-	self.cameraMode = if name == "MAIN" then "HERO" elseif name == "PLAYER" then "CREATE" elseif name == "CLUBS" then "CLUBS" else "NEXT"
+	self.cameraMode = if name == "MAIN" then "MENU" elseif name == "PLAYER" then "CREATE" elseif name == "CLUBS" then "CLUBS" else "NEXT"
 	self.shade.Visible = name ~= "NEXT"
 	self.shadeGradient.Transparency = if name == "MAIN" then SHADE_SIDES else SHADE_LEFT
-	if name ~= "PLAYER" and name ~= "MAIN" then
+	if name ~= "PLAYER" then
 		self.preview:hide()
 	end
 	if name == "MAIN" then
@@ -1052,15 +1039,12 @@ function CareerMenu:update(dt: number)
 	local mode = self.cameraMode
 	local t = self.clock
 	local target, fov, focus
-	if mode == "HERO" or mode == "CREATE" then
+	if mode == "CREATE" then
 		target, fov, focus = PlayerPreview.cameraTarget(mode)
-		if mode == "HERO" then
-			-- Slow drift, small enough to keep him framed.
-			target *= CFrame.new(math.sin(t * 0.21) * 0.35, math.sin(t * 0.17) * 0.15, 0)
-		end
 	else
+		local framing = if mode == "MENU" then MENU_CAMERA else CLUBS_CAMERA
 		local sway = Vector3.new(math.sin(t * 0.13) * 6, math.sin(t * 0.09) * 1.2, 0)
-		target, fov = CFrame.lookAt(CLUBS_CAMERA.from + sway, CLUBS_CAMERA.to), CLUBS_CAMERA.fov
+		target, fov = CFrame.lookAt(framing.from + sway, framing.to), framing.fov
 	end
 	local k = 1 - math.exp(-3 * dt)
 	self.camCFrame = self.camCFrame:Lerp(target, k)

@@ -291,7 +291,7 @@ end
 menu.onStartTraining = function(career)
 	local club = CareerConfig.club(career.clubId)
 	if club then
-		passVisuals:setTeamKit(CareerConfig.kit(club))
+		passVisuals:setTeamKit(CareerConfig.kit(club), career.number)
 	end
 	inTraining = true
 	lastCompletedStage = nil

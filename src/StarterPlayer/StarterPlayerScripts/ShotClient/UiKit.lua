@@ -418,7 +418,7 @@ function UiKit.toggle(parent: Instance, props: { [string]: any }, value: boolean
 end
 
 -- Keeps every registered UIScale at the viewport scale: as big as `layoutSize` (design units of
--- the largest screen) can be while still fitting, between 0.5 and 1.6. boost: "large interface".
+-- the largest screen) can be while still fitting, between 0.5 and 1.15. boost: "large interface".
 function UiKit.scaler(gui: ScreenGui, layoutSize: Vector2)
 	local scaler = { scales = {} :: { UIScale }, boost = 1, scale = 1 }
 	function scaler.rescale(_)
@@ -427,7 +427,7 @@ function UiKit.scaler(gui: ScreenGui, layoutSize: Vector2)
 			return
 		end
 		local fit = math.min((size.X - 40) / layoutSize.X, (size.Y - 24) / layoutSize.Y)
-		local scale = math.clamp(fit, 0.5, 1.6)
+		local scale = math.clamp(fit, 0.5, 1.15)
 		if scaler.boost ~= 1 then
 			scale = math.max(math.min(scale * scaler.boost, fit), 0.5)
 		end
