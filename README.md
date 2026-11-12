@@ -26,12 +26,14 @@ The server modules can be anywhere under ServerScriptService (next to `Main` or 
 | `src/shared/ShotPhysics.lua` | `ReplicatedStorage/Shared/ShotPhysics` | ModuleScript |
 | `src/server/Main.server.lua` | `ServerScriptService/Main` | Script |
 | `src/server/SceneBuilder.lua` | `ServerScriptService/SceneBuilder` | ModuleScript |
+| `src/server/KeeperBuilder.lua` | `ServerScriptService/KeeperBuilder` | ModuleScript |
 | `src/server/Services/EpisodeService.lua` | `ServerScriptService/Services/EpisodeService` | ModuleScript |
 | `src/server/Services/ShotResolver.lua` | `ServerScriptService/Services/ShotResolver` | ModuleScript |
 | `src/client/ShotClient/init.client.lua` | `StarterPlayer/StarterPlayerScripts/ShotClient` | LocalScript |
 | `src/client/ShotClient/InputController.lua` | `.../ShotClient/InputController` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/ShotVisuals.lua` | `.../ShotClient/ShotVisuals` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/ShotHud.lua` | `.../ShotClient/ShotHud` (child of the LocalScript) | ModuleScript |
+| `src/client/ShotClient/KeeperAnimator.lua` | `.../ShotClient/KeeperAnimator` (child of the LocalScript) | ModuleScript |
 
 The default Baseplate and SpawnLocation are removed automatically during play (they would cover the pitch and goal).
 
@@ -52,9 +54,9 @@ All on-screen text is in the `TEXT` table at the top of `ShotHud`.
 ## Testing
 
 1. **PC:** press Play. The Output window should show:
-   `[SceneBuilder] Training ground built (… objects)`, `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
+   `[SceneBuilder] Stadium built (… objects)`, `[KeeperBuilder] Goalkeeper ready (R15, … studs tall)`, `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
    `[EpisodeService] <you>: episode #1 started (SHOT, seed …)`, and after each shot
-   `[EpisodeService] <you>: episode #1 aim=(0.72, 0.55) power=0.64 -> GOAL (1 goals from 1/10 shots)`.
+   `[EpisodeService] <you>: episode #1 aim=(0.72, 0.55) power=0.64 -> GOAL/GOAL, 98 km/h (1 goals from 1/10 shots)`.
    There should be no red errors.
 2. **Phone layout:** Test → Device emulator, choose a phone in landscape, and repeat.
    The HUD respects screen notches, and no thumbstick or jump button appears.
@@ -66,8 +68,22 @@ All on-screen text is in the `TEXT` table at the top of `ShotHud`.
 5. **Reproduce a result:** the seed is printed for every episode. Passing the same seed and input to
    `ShotResolver.resolve` always gives the same outcome.
 
+## Physics
+
+The server simulates every shot step by step (1/240 s): gravity, air drag, and spin. Shots aimed
+towards a post curl back towards the middle, and hard shots get top spin and dip. The ball
+collides with the keeper, posts, crossbar, net (back, sides, roof, side netting), the boards
+behind the goal and the ground (bounces, then rolls). The keeper reacts after a short delay,
+moves at a skill-based speed and, if he gets there, catches comfortable shots or parries the
+rest wide or over the bar. The result comes from what actually happens: a shot can go in off
+the post or be parried onto the frame. The client replays the exact path the server sent.
+
 ## Tuning
 
-All numbers are in `ShotConfig`: goal size, distance, ball speed, gravity, shooting accuracy,
-overpower, goalkeeper skill/reaction/dive speed (`Goalkeeper.Enabled = false` gives the
-"no keeper" variant), and camera. `DefaultShooting = 42` stands in for the player's stat until careers exist (Stage 4).
+All numbers are in `ShotConfig`: goal size, distance, ball speed, physics (drag, curl, dip,
+bounciness), shooting accuracy, overpower, goalkeeper skill/reaction/dive speed/catching
+(`Goalkeeper.Enabled = false` gives the "no keeper" variant), and camera.
+`DefaultShooting = 42` stands in for the player's stat until careers exist (Stage 4).
+
+To use the PNG logo instead of the text-built one, upload it to Roblox (Asset Manager → Images)
+and put its id into `LOGO_IMAGE` at the top of `ShotHud`.

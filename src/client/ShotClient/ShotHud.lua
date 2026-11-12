@@ -1,5 +1,5 @@
--- Screen UI for the shot drill: logo + stage, goals counter, bottom power panel and the
--- result card. Layout is designed at 1280x720 and scaled per panel to the screen.
+-- Screen UI for the shot drill in the purple "pixel UI kit" style: logo + stage, goals counter,
+-- bottom power panel and the result card. Layout is designed at 1280x720 and scaled per panel.
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -7,14 +7,18 @@ local TweenService = game:GetService("TweenService")
 local ShotHud = {}
 ShotHud.__index = ShotHud
 
+-- Optional uploaded logo, e.g. "rbxassetid://1234567890". Empty = logo built from text.
+local LOGO_IMAGE = ""
+
 -- All player-facing text in one place.
 local TEXT = {
 	LogoTop = "NEW",
-	LogoBottom = 'FOOTBALL  <font color="#A3E635">STAR</font> <font color="#A3E635" size="22">★</font>',
-	Mode = 'ОБУЧЕНИЕ  •  <font color="#A3E635">УДАРЫ</font>',
+	LogoMiddle = "FOOTBALL",
+	LogoBottom = "STAR",
+	Mode = 'ОБУЧЕНИЕ  •  <font color="#FFBF1F">УДАРЫ</font>',
 	Stage = "Этап 1 из 3",
 	Goals = "ГОЛЫ",
-	Power = 'СИЛА <font color="#A3E635">%d%%</font>',
+	Power = "СИЛА %d%%",
 	PowerHint = "55–85% — удобно   ·   100% — мяч летит выше",
 	Ready = "Зажми точку у ворот и отпусти для удара",
 	Holding = "Отпусти, чтобы ударить",
@@ -23,8 +27,12 @@ local TEXT = {
 	NextShot = "ЕЩЁ УДАР  ›",
 	NewSeries = "НОВАЯ СЕРИЯ  ›",
 	SeriesOver = "Серия окончена: %d из %d голов",
+	Speed = "%d км/ч",
 	Outcomes = {
 		GOAL = { "ГОЛ!", "Отличное попадание в створ" },
+		POST_IN = { "ГОЛ!", "От штанги в сетку!" },
+		CATCH = { "ПОЙМАЛ!", "Вратарь забрал мяч. Бей ближе к углу" },
+		PARRY = { "ОТБИЛ!", "Вратарь дотянулся. Ещё чуть точнее" },
 		SAVE = { "СЕЙВ!", "Вратарь успел. Целься ближе к углу" },
 		POST = { "ШТАНГА!", "Совсем рядом. Чуть ближе к центру" },
 		BAR = { "ПЕРЕКЛАДИНА!", "Совсем рядом. Чуть ниже" },
@@ -33,25 +41,37 @@ local TEXT = {
 	},
 }
 
-local LIME = Color3.fromRGB(163, 230, 53)
-local LIME_DARK = Color3.fromRGB(104, 160, 24)
+local rgb = Color3.fromRGB
+local NAVY = rgb(18, 11, 36)
+local PANEL_TOP = rgb(43, 18, 80)
+local PANEL_BOTTOM = rgb(27, 15, 51)
+local VIOLET = rgb(90, 47, 194)
+local GLOW = rgb(123, 77, 255)
+local LILAC = rgb(190, 168, 255)
+local RED = rgb(255, 45, 85)
+local RED_LIGHT = rgb(255, 150, 170)
+local GOLD = rgb(255, 191, 31)
+local GOLD_LIGHT = rgb(255, 226, 120)
+local ORANGE = rgb(255, 159, 10)
+local LIP = rgb(178, 84, 0)
+local CREAM = rgb(247, 236, 214)
+local INK = rgb(18, 6, 31)
+local SHADOW = rgb(46, 16, 92)
 local WHITE = Color3.new(1, 1, 1)
-local MUTED = Color3.fromRGB(184, 198, 192)
-local INK = Color3.fromRGB(8, 20, 16)
-local PANEL_LEFT = Color3.fromRGB(24, 52, 45)
-local PANEL_RIGHT = Color3.fromRGB(7, 18, 15)
-local YELLOW = Color3.fromRGB(250, 204, 21)
-local RED = Color3.fromRGB(248, 90, 90)
 
-local OUTCOME_COLORS = {
-	GOAL = LIME,
-	SAVE = WHITE,
-	POST = YELLOW,
-	BAR = YELLOW,
-	WIDE = RED,
-	OVER = RED,
+-- Card look per result kind: title gradient (top -> bottom), glow accent and badge glyph.
+local KIND_STYLE = {
+	GOAL = { top = CREAM, bottom = GOLD, accent = GOLD, icon = "⚽", sparkle = true },
+	POST_IN = { top = CREAM, bottom = GOLD, accent = GOLD, icon = "⚽", sparkle = true },
+	CATCH = { top = CREAM, bottom = LILAC, accent = GLOW, icon = "🧤" },
+	PARRY = { top = CREAM, bottom = LILAC, accent = GLOW, icon = "🧤" },
+	SAVE = { top = CREAM, bottom = LILAC, accent = GLOW, icon = "🧤" },
+	POST = { top = GOLD_LIGHT, bottom = ORANGE, accent = ORANGE, icon = "🥅" },
+	BAR = { top = GOLD_LIGHT, bottom = ORANGE, accent = ORANGE, icon = "🥅" },
+	WIDE = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
+	OVER = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
 }
-local PIP_COLORS = { GOAL = LIME, SAVE = WHITE, POST = YELLOW, MISS = RED }
+local PIP_COLORS = { GOAL = GOLD, SAVE = GLOW, POST = CREAM, MISS = RED }
 
 local MONTSERRAT = "rbxasset://fonts/families/Montserrat.json"
 local FONT_HEAVY = Font.new(MONTSERRAT, Enum.FontWeight.Heavy, Enum.FontStyle.Italic)
@@ -59,6 +79,8 @@ local FONT_BOLD = Font.new(MONTSERRAT, Enum.FontWeight.Bold, Enum.FontStyle.Ital
 local FONT_MEDIUM = Font.new(MONTSERRAT, Enum.FontWeight.Medium)
 
 local DESIGN_SIZE = Vector2.new(1280, 720)
+local POWER_SEGMENTS = 20
+local POWER_WARN = 0.85
 
 local function create(className: string, props: { [string]: any }): any
 	local inst = Instance.new(className)
@@ -84,7 +106,7 @@ local function text(props: { [string]: any }): TextLabel
 	props.BackgroundTransparency = 1
 	props.RichText = true
 	props.FontFace = props.FontFace or FONT_HEAVY
-	props.TextColor3 = props.TextColor3 or WHITE
+	props.TextColor3 = props.TextColor3 or CREAM
 	props.TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Left
 	return create("TextLabel", props)
 end
@@ -93,17 +115,8 @@ local function corner(parent: Instance, radius: number?)
 	create("UICorner", { CornerRadius = if radius then UDim.new(0, radius) else UDim.new(1, 0), Parent = parent })
 end
 
-local function circle(parent: Instance, size: number, props: { [string]: any }?): Frame
-	local p = { Size = UDim2.fromOffset(size, size), Parent = parent }
-	for key, value in props or {} do
-		p[key] = value
-	end
-	local f = frame(p)
-	corner(f)
-	return f
-end
-
-local function stroke(parent: Instance, color: Color3, thickness: number, transparency: number?)
+-- Border stroke for frames and buttons.
+local function stroke(parent: Instance, color: Color3, thickness: number, transparency: number?): UIStroke
 	return create("UIStroke", {
 		Color = color,
 		Thickness = thickness,
@@ -113,98 +126,174 @@ local function stroke(parent: Instance, color: Color3, thickness: number, transp
 	})
 end
 
--- Lime border with a soft outer glow made of stacked, increasingly transparent strokes.
-local function glow(target: GuiObject, radius: number, strength: number?)
-	local s = strength or 1
-	stroke(target, LIME, 2)
-	for _, layer in { { 5, 0.72 }, { 10, 0.86 }, { 16, 0.93 } } do
-		local halo = frame({ Name = "Glow", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = target })
-		corner(halo, radius)
-		stroke(halo, LIME, layer[1], 1 - (1 - layer[2]) * s)
+-- Text outline; mitred joins keep the chunky pixel-kit corners.
+local function outline(label: TextLabel, thickness: number, color: Color3?): UIStroke
+	return create("UIStroke", {
+		Color = color or INK,
+		Thickness = thickness,
+		LineJoinMode = Enum.LineJoinMode.Miter,
+		Parent = label,
+	})
+end
+
+local function sizeLimit(label: TextLabel, maxSize: number)
+	label.TextScaled = true
+	create("UITextSizeConstraint", { MaxTextSize = maxSize, MinTextSize = 8, Parent = label })
+end
+
+-- Outlined text with a hard drop shadow (a sibling label, so it cannot be a child of the text).
+local shadowOf = setmetatable({}, { __mode = "k" })
+
+local function bigText(props: { [string]: any }, thickness: number, offset: Vector2, maxSize: number?): TextLabel
+	local shadowProps = table.clone(props)
+	shadowProps.Name = (props.Name or "Text") .. "Shadow"
+	shadowProps.TextColor3 = SHADOW
+	shadowProps.Position = (props.Position or UDim2.new()) + UDim2.fromOffset(offset.X, offset.Y)
+	shadowProps.Text = string.gsub(props.Text or "", "<[^>]+>", "")
+	local shadow = text(shadowProps)
+	outline(shadow, thickness)
+	local main = text(table.clone(props))
+	outline(main, thickness)
+	if maxSize then
+		sizeLimit(shadow, maxSize)
+		sizeLimit(main, maxSize)
+	end
+	shadowOf[main] = shadow
+	return main
+end
+
+local function setBigText(label: TextLabel, value: string)
+	label.Text = value
+	local shadow = shadowOf[label]
+	if shadow then
+		shadow.Text = string.gsub(value, "<[^>]+>", "")
 	end
 end
 
--- Dark panel with a left-to-right gradient, rounded corners and a lime glow.
-local function panel(props: { [string]: any }, radius: number): Frame
+-- Dark purple panel: vertical gradient, violet border and a soft glow from stacked strokes.
+-- Returns the root and its glow strokes so callers can recolour them.
+local function panel(props: { [string]: any }, radius: number, glowColor: Color3?): (Frame, { UIStroke })
 	props.BackgroundTransparency = 1
 	local root = frame(props)
-	local bg = frame({ Name = "Background", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, ZIndex = 0, Parent = root })
+	local glows = {}
+	for _, layer in { { 4, 0.7 }, { 9, 0.84 }, { 16, 0.93 } } do
+		local halo = frame({ Name = "Glow", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = root })
+		corner(halo, radius)
+		table.insert(glows, stroke(halo, glowColor or GLOW, layer[1], layer[2]))
+	end
+	local bg = frame({ Name = "Background", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 0.04, ZIndex = 0, Parent = root })
 	corner(bg, radius)
-	create("UIGradient", { Color = ColorSequence.new(PANEL_LEFT, PANEL_RIGHT), Parent = bg })
-	glow(root, radius)
-	return root
+	create("UIGradient", { Color = ColorSequence.new(PANEL_TOP, PANEL_BOTTOM), Rotation = 90, Parent = bg })
+	stroke(bg, VIOLET, 2)
+	-- Thin top highlight, like the bevel on the reference panels.
+	frame({
+		Name = "Sheen",
+		Position = UDim2.new(0, radius, 0, 3),
+		Size = UDim2.new(1, -radius * 2, 0, 2),
+		BackgroundColor3 = LILAC,
+		BackgroundTransparency = 0.7,
+		ZIndex = 0,
+		Parent = root,
+	})
+	return root, glows
 end
 
--- Decorative "////" slashes, as in the reference panels.
-local function slashes(parent: Instance, position: UDim2, size: number)
+local function iconBox(parent: Instance, position: UDim2, size: number, accent: Color3): Frame
+	local box = frame({ Name = "IconBox", Position = position, Size = UDim2.fromOffset(size, size), BackgroundColor3 = NAVY, Parent = parent })
+	corner(box, 8)
+	stroke(box, accent, 2)
+	frame({ Name = "Bevel", Position = UDim2.fromOffset(4, 3), Size = UDim2.new(1, -8, 0, 2), BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Parent = box })
+	return box
+end
+
+local function emoji(parent: Instance, glyph: string, size: number): TextLabel
+	return text({
+		Name = "Glyph",
+		Size = UDim2.fromScale(1, 1),
+		Text = glyph,
+		TextSize = size,
+		FontFace = FONT_MEDIUM,
+		TextColor3 = WHITE,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = parent,
+	})
+end
+
+local function crosshairIcon(parent: Instance)
+	local ring = frame({ AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(28, 28), BackgroundTransparency = 1, Parent = parent })
+	corner(ring)
+	stroke(ring, GOLD, 3)
+	local dot = frame({ AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(6, 6), BackgroundColor3 = RED, Parent = ring })
+	corner(dot, 1)
+	for _, tick in { { 0.5, 0, 3, 10 }, { 0.5, 1, 3, 10 }, { 0, 0.5, 10, 3 }, { 1, 0.5, 10, 3 } } do
+		frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(tick[1], tick[2]),
+			Size = UDim2.fromOffset(tick[3], tick[4]),
+			BackgroundColor3 = GOLD,
+			Parent = ring,
+		})
+	end
+end
+
+-- Decorative "////" slashes from the reference panels.
+local function slashes(parent: Instance, position: UDim2, size: number, color: Color3)
 	text({
 		Name = "Slashes",
 		Position = position,
 		Size = UDim2.fromOffset(size * 2.2, size),
 		TextSize = size,
 		Text = "////",
-		TextColor3 = LIME,
-		TextTransparency = 0.82,
+		TextColor3 = color,
+		TextTransparency = 0.75,
 		Parent = parent,
 	})
 end
 
-local function trophyIcon(parent: Instance, position: UDim2): Frame
-	local icon = frame({ Name = "Trophy", Position = position, Size = UDim2.fromOffset(32, 30), BackgroundTransparency = 1, Parent = parent })
-	for _, x in { 2, 22 } do
-		local handle = circle(icon, 9, { Position = UDim2.fromOffset(x, 4), BackgroundTransparency = 1 })
-		stroke(handle, LIME, 2.5)
-	end
-	local cup = frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 1), Size = UDim2.fromOffset(18, 15), BackgroundColor3 = LIME, Parent = icon })
-	corner(cup, 6)
-	frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 15), Size = UDim2.fromOffset(4, 7), BackgroundColor3 = LIME, Parent = icon })
-	local base = frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 22), Size = UDim2.fromOffset(16, 5), BackgroundColor3 = LIME, Parent = icon })
-	corner(base, 2)
-	return icon
+-- Gold arc: a pill-shaped stroke whose middle is faded out, leaving two curved ends.
+local function swoosh(parent: Instance, position: UDim2, size: UDim2, thickness: number, rotation: number)
+	local ring = frame({ Name = "Swoosh", AnchorPoint = Vector2.new(0.5, 0.5), Position = position, Size = size, BackgroundTransparency = 1, ZIndex = 0, Parent = parent })
+	corner(ring)
+	local s = stroke(ring, WHITE, thickness)
+	create("UIGradient", {
+		Color = ColorSequence.new(GOLD_LIGHT, ORANGE),
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.1),
+			NumberSequenceKeypoint.new(0.3, 1),
+			NumberSequenceKeypoint.new(0.58, 1),
+			NumberSequenceKeypoint.new(1, 0),
+		}),
+		Rotation = rotation,
+		Parent = s,
+	})
 end
 
-local function crosshairIcon(parent: Instance, center: UDim2)
-	local ring = circle(parent, 30, { AnchorPoint = Vector2.new(0.5, 0.5), Position = center, BackgroundTransparency = 1 })
-	stroke(ring, LIME, 2.5)
-	circle(ring, 6, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = LIME })
-	for _, tick in { { 0.5, 0, 2.5, 9 }, { 0.5, 1, 2.5, 9 }, { 0, 0.5, 9, 2.5 }, { 1, 0.5, 9, 2.5 } } do
-		frame({
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(tick[1], tick[2]),
-			Size = UDim2.fromOffset(tick[3], tick[4]),
-			BackgroundColor3 = LIME,
-			Parent = ring,
-		})
+local function logoImageId(): string?
+	if LOGO_IMAGE == "" then
+		return nil
 	end
+	return if string.match(LOGO_IMAGE, "^%d+$") then "rbxassetid://" .. LOGO_IMAGE else LOGO_IMAGE
 end
 
--- Football with a small laurel wreath, sitting on the top edge of the result card.
-local function ballBadge(parent: Instance)
-	local badge = frame({ Name = "Badge", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0), Size = UDim2.fromOffset(110, 56), BackgroundTransparency = 1, ZIndex = 3, Parent = parent })
-	for _, side in { -1, 1 } do
-		for k, angle in { -25, 10, 45 } do
-			local rad = math.rad(angle)
-			local leaf = frame({
-				AnchorPoint = Vector2.new(0.5, 0.5),
-				Position = UDim2.new(0.5, side * math.cos(rad) * 34, 0.5, -math.sin(rad) * 30 + 2),
-				Size = UDim2.fromOffset(7, 15 - k),
-				Rotation = side * (angle + 20),
-				BackgroundColor3 = LIME,
-				ZIndex = 3,
-				Parent = badge,
-			})
-			corner(leaf)
-		end
-	end
-	local ball = circle(badge, 46, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = INK, ZIndex = 4 })
-	stroke(ball, LIME, 2)
-	text({ Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, Text = "⚽", TextSize = 28, FontFace = FONT_MEDIUM, ZIndex = 5, Parent = ball })
+-- "NEW / FOOTBALL / STAR ★" stacked and tilted, cream + red with gold swooshes.
+local function buildWordmark(parent: Instance): Frame
+	local tilt = frame({ Name = "Tilt", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), Rotation = -8, BackgroundTransparency = 1, Parent = parent })
+	swoosh(tilt, UDim2.new(0.5, 10, 0.5, 4), UDim2.fromOffset(296, 116), 5, -28)
+	swoosh(tilt, UDim2.new(0.5, 18, 0.5, 8), UDim2.fromOffset(262, 96), 2, -20)
+
+	bigText({ Name = "New", Text = TEXT.LogoTop, TextSize = 34, Position = UDim2.fromOffset(36, 4), Size = UDim2.fromOffset(120, 34), Parent = tilt }, 3, Vector2.new(3, 4))
+	bigText({ Name = "Football", Text = TEXT.LogoMiddle, TextSize = 44, Position = UDim2.fromOffset(10, 34), Size = UDim2.fromOffset(276, 44), Parent = tilt }, 3.5, Vector2.new(3, 4))
+	bigText({ Name = "Star", Text = TEXT.LogoBottom, TextSize = 50, TextColor3 = RED, Position = UDim2.fromOffset(46, 76), Size = UDim2.fromOffset(148, 48), Parent = tilt }, 4, Vector2.new(3, 4))
+
+	local starHolder = frame({ Name = "StarIcon", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(218, 98), Size = UDim2.fromOffset(52, 52), BackgroundTransparency = 1, Parent = tilt })
+	bigText({ Text = "★", TextSize = 48, TextColor3 = GOLD, TextXAlignment = Enum.TextXAlignment.Center, Size = UDim2.fromScale(1, 1), Parent = starHolder }, 3, Vector2.new(2, 3))
+	return starHolder
 end
 
 function ShotHud.new()
 	local self = setmetatable({}, ShotHud)
 	self.scales = {}
-	self.cardToken = 0
+	self.onContinue = nil :: (() -> ())?
 
 	local gui = create("ScreenGui", {
 		Name = "ShotHud",
@@ -227,13 +316,13 @@ function ShotHud.new()
 		for _, uiScale in self.scales do
 			uiScale.Scale = scale
 		end
-		self.baseScale = scale
 	end
 	rescale()
 	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(rescale)
 	return self
 end
 
+-- Viewport scale for a top-level panel. Pop animations use their own nested UIScale.
 function ShotHud:_scaled(target: GuiObject): UIScale
 	local uiScale = create("UIScale", { Parent = target })
 	table.insert(self.scales, uiScale)
@@ -241,133 +330,280 @@ function ShotHud:_scaled(target: GuiObject): UIScale
 end
 
 function ShotHud:_buildLogo()
-	local logo = frame({ Name = "Logo", Position = UDim2.fromOffset(18, 6), Size = UDim2.fromOffset(330, 120), BackgroundTransparency = 1, Parent = self.gui })
-	self:_scaled(logo)
-	local bar = frame({ Position = UDim2.fromOffset(6, 6), Size = UDim2.fromOffset(13, 52), Rotation = 12, BackgroundColor3 = LIME, Parent = logo })
-	corner(bar, 3)
-	text({ Position = UDim2.fromOffset(30, 0), Size = UDim2.fromOffset(300, 30), TextSize = 30, Text = TEXT.LogoTop, Parent = logo })
-	text({ Position = UDim2.fromOffset(30, 28), Size = UDim2.fromOffset(300, 32), TextSize = 30, Text = TEXT.LogoBottom, Parent = logo })
-	frame({ Position = UDim2.fromOffset(30, 70), Size = UDim2.fromOffset(2, 42), BackgroundColor3 = LIME, Parent = logo })
-	text({ Position = UDim2.fromOffset(42, 68), Size = UDim2.fromOffset(280, 20), TextSize = 16, FontFace = FONT_BOLD, Text = TEXT.Mode, Parent = logo })
-	text({ Position = UDim2.fromOffset(42, 92), Size = UDim2.fromOffset(120, 18), TextSize = 14, FontFace = FONT_MEDIUM, TextColor3 = MUTED, Text = TEXT.Stage, Parent = logo })
+	local root = frame({ Name = "Logo", Position = UDim2.fromOffset(14, 4), Size = UDim2.fromOffset(300, 196), BackgroundTransparency = 1, Parent = self.gui })
+	self:_scaled(root)
+
+	local mark = frame({ Name = "Wordmark", Size = UDim2.fromOffset(300, 130), BackgroundTransparency = 1, Parent = root })
+	local imageId = logoImageId()
+	if imageId then
+		create("ImageLabel", { Name = "LogoImage", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = imageId, ScaleType = Enum.ScaleType.Fit, Parent = mark })
+	else
+		local star = buildWordmark(mark)
+		local starScale = create("UIScale", { Parent = star })
+		TweenService:Create(starScale, TweenInfo.new(1.1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { Scale = 1.12 }):Play()
+	end
+
+	local mode = frame({ Name = "Mode", Position = UDim2.fromOffset(8, 136), Size = UDim2.fromOffset(250, 30), BackgroundColor3 = NAVY, BackgroundTransparency = 0.1, Parent = root })
+	corner(mode, 6)
+	stroke(mode, VIOLET, 2)
+	local accent = frame({ Name = "Accent", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), Size = UDim2.fromOffset(6, 14), BackgroundColor3 = RED, Parent = mode })
+	corner(accent, 1)
+	local modeText = text({ Position = UDim2.fromOffset(24, 0), Size = UDim2.new(1, -30, 1, 0), Text = TEXT.Mode, TextSize = 16, Parent = mode })
+	outline(modeText, 1.5)
+
+	local stage = text({ Name = "Stage", Position = UDim2.fromOffset(12, 172), Size = UDim2.fromOffset(112, 20), Text = TEXT.Stage, TextSize = 15, FontFace = FONT_BOLD, TextTransparency = 0.15, Parent = root })
+	outline(stage, 1.5)
 	for i = 1, 3 do
-		local dot = circle(logo, 9, { Position = UDim2.fromOffset(150 + (i - 1) * 16, 96), BackgroundColor3 = LIME, BackgroundTransparency = if i == 1 then 0 else 1 })
-		if i > 1 then
-			stroke(dot, MUTED, 1.5, 0.4)
-		end
+		local current = i == 1
+		local dot = frame({
+			Name = "StageDot" .. i,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromOffset(134 + (i - 1) * 22, 182),
+			Size = if current then UDim2.fromOffset(13, 13) else UDim2.fromOffset(10, 10),
+			BackgroundColor3 = if current then GOLD else NAVY,
+			Rotation = 45,
+			Parent = root,
+		})
+		corner(dot, 2)
+		stroke(dot, if current then INK else VIOLET, 2)
 	end
 end
 
 function ShotHud:_buildGoals()
-	local holder = frame({
-		Name = "GoalsHolder",
-		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -22, 0, 14),
-		Size = UDim2.fromOffset(250, 90),
-		BackgroundTransparency = 1,
-		Parent = self.gui,
-	})
-	self.goalsScale = self:_scaled(holder)
-	local box = panel({ Name = "Goals", Size = UDim2.fromOffset(250, 58), Parent = holder }, 16)
-	trophyIcon(box, UDim2.fromOffset(20, 14))
-	text({ Position = UDim2.fromOffset(70, 0), Size = UDim2.fromOffset(80, 58), TextSize = 20, FontFace = FONT_BOLD, Text = TEXT.Goals, Parent = box })
-	self.goalsText = text({ Position = UDim2.fromOffset(140, 0), Size = UDim2.fromOffset(90, 58), TextSize = 24, TextXAlignment = Enum.TextXAlignment.Right, Text = "", Parent = box })
+	local root = panel({ Name = "Goals", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -18, 0, 14), Size = UDim2.fromOffset(292, 104) }, 10)
+	root.Parent = self.gui
+	self:_scaled(root)
 
-	-- One dot per shot of the series.
-	local pips = frame({ Name = "Pips", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 70), Size = UDim2.fromOffset(234, 12), BackgroundTransparency = 1, Parent = holder })
+	local trophy = iconBox(root, UDim2.fromOffset(14, 12), 50, GOLD)
+	self.trophy = trophy
+	emoji(trophy, "🏆", 28)
+
+	local label = text({ Name = "GoalsLabel", Position = UDim2.fromOffset(78, 10), Size = UDim2.fromOffset(120, 18), Text = TEXT.Goals, TextSize = 15, TextColor3 = LILAC, Parent = root })
+	outline(label, 1.5)
+
+	-- Centre-anchored holder so the bump scales around the number, not the panel corner.
+	local countHolder = frame({ Name = "Count", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromOffset(76, 46), Size = UDim2.fromOffset(150, 36), BackgroundTransparency = 1, Parent = root })
+	self.countScale = create("UIScale", { Parent = countHolder })
+	self.goalsText = bigText({ Text = "0 / 10", TextSize = 32, Size = UDim2.fromScale(1, 1), Parent = countHolder }, 2.5, Vector2.new(2, 3))
+
+	slashes(root, UDim2.fromOffset(222, 14), 22, GLOW)
+
+	self.pips = frame({ Name = "Pips", Position = UDim2.fromOffset(14, 74), Size = UDim2.new(1, -28, 0, 18), BackgroundTransparency = 1, Parent = root })
 	create("UIListLayout", {
 		FillDirection = Enum.FillDirection.Horizontal,
-		HorizontalAlignment = Enum.HorizontalAlignment.Right,
-		Padding = UDim.new(0, 7),
+		Padding = UDim.new(0, 6),
 		SortOrder = Enum.SortOrder.LayoutOrder,
-		Parent = pips,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Parent = self.pips,
 	})
-	self.pips = pips
 	self.pipFrames = {}
+	self.pipStrokes = {}
 end
 
 function ShotHud:_buildPowerPanel()
-	local root = panel({
-		Name = "PowerPanel",
-		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, -14),
-		Size = UDim2.fromOffset(760, 140),
-		Parent = self.gui,
-	}, 20)
+	local root = panel({ Name = "PowerPanel", AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -14), Size = UDim2.fromOffset(680, 116) }, 12)
+	root.Parent = self.gui
 	self:_scaled(root)
 
-	local iconBox = frame({ Position = UDim2.fromOffset(28, 38), Size = UDim2.fromOffset(64, 64), BackgroundColor3 = Color3.fromRGB(22, 44, 38), Parent = root })
-	corner(iconBox, 12)
-	stroke(iconBox, WHITE, 1.5, 0.82)
-	crosshairIcon(iconBox, UDim2.fromScale(0.5, 0.5))
+	local icon = iconBox(root, UDim2.fromOffset(14, 16), 56, GOLD)
+	crosshairIcon(icon)
 
-	self.title = text({ Position = UDim2.fromOffset(116, 14), Size = UDim2.fromOffset(600, 32), TextSize = 25, Text = TEXT.Ready, Parent = root })
+	self.title = text({ Name = "Instruction", Position = UDim2.fromOffset(84, 10), Size = UDim2.new(1, -100, 0, 28), Text = TEXT.Ready, TextSize = 20, Parent = root })
+	sizeLimit(self.title, 20)
+	outline(self.title, 2)
+	self.titleKind = "Ready"
 
-	local pill = frame({ Position = UDim2.fromOffset(116, 56), Size = UDim2.fromOffset(150, 36), BackgroundColor3 = INK, Parent = root })
-	corner(pill, 10)
-	stroke(pill, LIME, 2)
-	create("UIPadding", { PaddingLeft = UDim.new(0, 14), Parent = pill })
-	self.powerText = text({ Size = UDim2.fromScale(1, 1), TextSize = 21, Text = string.format(TEXT.Power, 0), Parent = pill })
+	local pill = frame({ Name = "PowerPill", Position = UDim2.fromOffset(84, 46), Size = UDim2.fromOffset(118, 28), BackgroundColor3 = NAVY, Parent = root })
+	corner(pill, 6)
+	self.pillStroke = stroke(pill, GOLD, 2)
+	self.powerText = text({ Size = UDim2.fromScale(1, 1), Text = string.format(TEXT.Power, 0), TextSize = 16, TextXAlignment = Enum.TextXAlignment.Center, Parent = pill })
+	outline(self.powerText, 1.5)
 
-	local bar = frame({ Position = UDim2.fromOffset(282, 62), Size = UDim2.fromOffset(450, 24), BackgroundColor3 = Color3.fromRGB(38, 52, 49), Parent = root })
-	corner(bar, 12)
-	stroke(bar, Color3.fromRGB(200, 212, 206), 1.5, 0.35)
-	-- Overpower zone marker (85%+): ball rises and is less accurate.
-	frame({ Position = UDim2.new(0.85, 0, 0, 3), Size = UDim2.new(0, 2, 1, -6), BackgroundColor3 = WHITE, BackgroundTransparency = 0.6, Parent = bar })
-	-- CanvasGroup clips the stripes to the rounded fill.
-	local fill = create("CanvasGroup", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = LIME, BorderSizePixel = 0, Parent = bar })
-	corner(fill, 12)
-	text({ Position = UDim2.fromOffset(-6, -4), Size = UDim2.fromOffset(470, 32), TextSize = 30, Text = string.rep("/", 48), TextColor3 = LIME_DARK, TextTransparency = 0.35, Parent = fill })
-	self.powerFill = fill
+	local track = frame({ Name = "PowerBar", Position = UDim2.fromOffset(214, 49), Size = UDim2.new(1, -230, 0, 22), BackgroundColor3 = NAVY, Parent = root })
+	corner(track, 5)
+	stroke(track, INK, 2)
+	local segmentsFrame = frame({ Name = "Segments", Position = UDim2.fromOffset(3, 3), Size = UDim2.new(1, -6, 1, -6), BackgroundTransparency = 1, Parent = track })
+	self.segments = {}
+	self.segmentColors = {}
+	self.segmentOff = {}
+	for i = 1, POWER_SEGMENTS do
+		local warn = (i - 1) / POWER_SEGMENTS >= POWER_WARN - 1e-6
+		local seg = frame({
+			Name = "Segment" .. i,
+			Position = UDim2.new((i - 1) / POWER_SEGMENTS, 1, 0, 0),
+			Size = UDim2.new(1 / POWER_SEGMENTS, -2, 1, 0),
+			Parent = segmentsFrame,
+		})
+		corner(seg, 2)
+		self.segments[i] = seg
+		self.segmentColors[i] = if warn then RED else GOLD:Lerp(ORANGE, (i - 1) / (POWER_SEGMENTS * POWER_WARN))
+		self.segmentOff[i] = if warn then rgb(74, 20, 48) else rgb(44, 28, 78)
+		seg.BackgroundColor3 = self.segmentOff[i]
+	end
+	local marker = frame({ Name = "WarnMarker", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(POWER_WARN, 0.5), Size = UDim2.new(0, 4, 1, 12), BackgroundColor3 = CREAM, ZIndex = 2, Parent = track })
+	corner(marker, 1)
+	stroke(marker, INK, 1.5)
 
-	local info = circle(root, 16, { Position = UDim2.fromOffset(116, 105), BackgroundTransparency = 1 })
-	stroke(info, MUTED, 1.2, 0.2)
-	text({ Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, TextSize = 11, FontFace = FONT_BOLD, TextColor3 = MUTED, Text = "i", Parent = info })
-	text({ Position = UDim2.fromOffset(142, 102), Size = UDim2.fromOffset(500, 22), TextSize = 15, FontFace = FONT_MEDIUM, TextColor3 = MUTED, Text = TEXT.PowerHint, Parent = root })
+	local hint = text({ Name = "Hint", Position = UDim2.fromOffset(84, 84), Size = UDim2.new(1, -100, 0, 18), Text = TEXT.PowerHint, TextSize = 14, FontFace = FONT_MEDIUM, TextTransparency = 0.25, Parent = root })
+	sizeLimit(hint, 14)
 
-	slashes(root, UDim2.fromOffset(640, 4), 30)
-	slashes(root, UDim2.fromOffset(640, 104), 30)
+	slashes(root, UDim2.new(1, -62, 0, 84), 18, GLOW)
+
+	self.lastPercent = -1
+	self.litCount = 0
+	self.powerWarn = false
 end
 
-function ShotHud:_buildCard()
-	local card = panel({
-		Name = "ResultCard",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.42),
-		Size = UDim2.fromOffset(380, 186),
-		Visible = false,
-		Parent = self.gui,
-	}, 20)
-	self.cardScale = self:_scaled(card)
-	ballBadge(card)
-	slashes(card, UDim2.fromOffset(12, 8), 26)
-	slashes(card, UDim2.fromOffset(306, 150), 26)
-
-	self.cardTitle = text({ Position = UDim2.fromOffset(0, 26), Size = UDim2.new(1, 0, 0, 60), TextSize = 54, TextXAlignment = Enum.TextXAlignment.Center, Parent = card })
-	self.cardSubtitle = text({ Position = UDim2.fromOffset(0, 86), Size = UDim2.new(1, 0, 0, 22), TextSize = 17, FontFace = FONT_MEDIUM, TextXAlignment = Enum.TextXAlignment.Center, Parent = card })
-
+-- Gold primary button: dark lip below, gradient face clipped by a CanvasGroup with a moving shine.
+function ShotHud:_buildButton(parent: Instance)
 	local button = create("TextButton", {
 		Name = "Continue",
 		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 118),
-		Size = UDim2.fromOffset(272, 50),
-		BackgroundColor3 = LIME,
-		AutoButtonColor = true,
-		BorderSizePixel = 0,
-		FontFace = FONT_HEAVY,
-		TextSize = 24,
-		TextColor3 = INK,
-		Text = TEXT.NextShot,
-		Parent = card,
+		Position = UDim2.new(0.5, 0, 0, 172),
+		Size = UDim2.fromOffset(280, 52),
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = "",
+		Parent = parent,
 	})
-	corner(button, 12)
-	glow(button, 12, 0.8)
-	self.button = button
-	self.card = card
-	self.onContinue = nil :: (() -> ())?
+	local lip = frame({ Name = "Lip", Position = UDim2.fromOffset(0, 6), Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = LIP, Parent = button })
+	corner(lip, 9)
+	stroke(lip, INK, 2.5)
+
+	local body = frame({ Name = "Body", Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1, Parent = button })
+	local face = create("CanvasGroup", { Name = "Face", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, Parent = body })
+	corner(face, 9)
+	local fill = frame({ Name = "Fill", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = face })
+	create("UIGradient", { Color = ColorSequence.new(rgb(255, 214, 74), ORANGE), Rotation = 90, Parent = fill })
+	frame({ Name = "Sheen", Position = UDim2.fromOffset(0, 0), Size = UDim2.new(1, 0, 0.42, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 0.72, Parent = face })
+	local shine = frame({
+		Name = "Shine",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(-0.3, 0.5),
+		Size = UDim2.new(0, 34, 2, 0),
+		Rotation = 22,
+		BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0.45,
+		Parent = face,
+	})
+	local edge = frame({ Name = "Outline", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = body })
+	corner(edge, 9)
+	stroke(edge, INK, 2.5)
+	local label = text({ Name = "Label", Size = UDim2.fromScale(1, 1), Text = TEXT.NextShot, TextSize = 24, TextColor3 = INK, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
+	outline(label, 1.5, GOLD_LIGHT).Transparency = 0.4
+
+	self.shineTween = TweenService:Create(
+		shine,
+		TweenInfo.new(0.75, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, -1, false, 1.6),
+		{ Position = UDim2.fromScale(1.3, 0.5) }
+	)
+
+	local pressInfo = TweenInfo.new(0.07, Enum.EasingStyle.Quad)
+	local function setPressed(pressed: boolean)
+		TweenService:Create(body, pressInfo, { Position = UDim2.fromOffset(0, if pressed then 5 else 0) }):Play()
+	end
+	button.MouseButton1Down:Connect(function()
+		setPressed(true)
+	end)
+	button.MouseButton1Up:Connect(function()
+		setPressed(false)
+	end)
+	button.MouseLeave:Connect(function()
+		setPressed(false)
+	end)
 	button.Activated:Connect(function()
 		self:_continue()
 	end)
+
+	self.button = button
+	self.buttonBody = body
+	self.shine = shine
+	self.buttonLabel = label
+end
+
+function ShotHud:_buildCard()
+	local card = frame({
+		Name = "ResultCard",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.42),
+		Size = UDim2.fromOffset(400, 240),
+		BackgroundTransparency = 1,
+		Visible = false,
+		ZIndex = 10,
+		Parent = self.gui,
+	})
+	self:_scaled(card)
+	self.card = card
+
+	local body, glows = panel({ Name = "Pop", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1) }, 14)
+	body.Parent = card
+	self.cardGlows = glows
+	self.cardPop = create("UIScale", { Parent = body })
+
+	slashes(body, UDim2.fromOffset(14, 10), 22, GLOW)
+	slashes(body, UDim2.new(1, -62, 0, 10), 22, GLOW)
+
+	-- Badge sitting on the top edge.
+	local badge = frame({ Name = "Badge", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0), Size = UDim2.fromOffset(64, 64), BackgroundTransparency = 1, ZIndex = 3, Parent = body })
+	local diamond = frame({ Name = "Diamond", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(46, 46), Rotation = 45, BackgroundColor3 = NAVY, Parent = badge })
+	corner(diamond, 6)
+	self.badgeStroke = stroke(diamond, GOLD, 3)
+	self.badgeGlow = stroke(frame({ Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = diamond }), GOLD, 8, 0.8)
+	self.badgeIcon = emoji(badge, "⚽", 26)
+	self.badge = badge
+	self.sparkles = {}
+	for _, side in { -1, 1 } do
+		local sparkle = text({
+			Name = "Sparkle",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, side * 52, 0.5, 4),
+			Size = UDim2.fromOffset(24, 24),
+			Text = "★",
+			TextSize = 22,
+			TextColor3 = GOLD,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Parent = badge,
+		})
+		outline(sparkle, 2)
+		table.insert(self.sparkles, sparkle)
+	end
+
+	local titleHolder = frame({ Name = "Title", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0, 66), Size = UDim2.new(1, -36, 0, 64), BackgroundTransparency = 1, Parent = body })
+	self.titlePop = create("UIScale", { Parent = titleHolder })
+	self.cardTitle = bigText({ Text = "", TextSize = 56, TextColor3 = WHITE, TextXAlignment = Enum.TextXAlignment.Center, Size = UDim2.fromScale(1, 1), Parent = titleHolder }, 4, Vector2.new(0, 5), 56)
+	-- The gradient tints the text white -> kind colour; the dark outline stays dark under any tint.
+	self.titleGradient = create("UIGradient", { Rotation = 90, Parent = self.cardTitle })
+
+	self.cardSubtitle = text({ Name = "Subtitle", Position = UDim2.fromOffset(20, 100), Size = UDim2.new(1, -40, 0, 24), Text = "", TextSize = 18, FontFace = FONT_BOLD, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
+	sizeLimit(self.cardSubtitle, 18)
+	outline(self.cardSubtitle, 1.5)
+
+	local chip = frame({
+		Name = "SpeedChip",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 134),
+		Size = UDim2.fromOffset(0, 28),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = NAVY,
+		Visible = false,
+		Parent = body,
+	})
+	corner(chip, 8)
+	stroke(chip, GOLD, 2)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 12), Parent = chip })
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 6),
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = chip,
+	})
+	text({ Name = "Bolt", LayoutOrder = 1, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = "⚡", TextSize = 16, FontFace = FONT_MEDIUM, Parent = chip })
+	self.speedText = text({ Name = "Value", LayoutOrder = 2, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = "", TextSize = 17, Parent = chip })
+	outline(self.speedText, 1.5)
+	self.speedChip = chip
+
+	self:_buildButton(body)
 end
 
 function ShotHud:_continue()
@@ -385,47 +621,126 @@ function ShotHud:isCardVisible(): boolean
 	return self.card.Visible
 end
 
+-- kind: Ready | Holding | Flying | AfterShot. Called every frame while aiming, so it skips repeats.
 function ShotHud:setTitle(kind: string)
+	if self.titleKind == kind then
+		return
+	end
+	self.titleKind = kind
 	self.title.Text = TEXT[kind] or kind
 end
 
+-- Called every frame while aiming: only touches properties that actually changed.
 function ShotHud:setPower(power: number)
 	local p = math.clamp(power, 0, 1)
-	self.powerText.Text = string.format(TEXT.Power, math.floor(p * 100 + 0.5))
-	self.powerFill.Size = UDim2.fromScale(p, 1)
-	self.powerFill.BackgroundColor3 = if p >= 0.85 then Color3.fromRGB(250, 170, 40) else LIME
+	local percent = math.floor(p * 100 + 0.5)
+	if percent == self.lastPercent then
+		return
+	end
+	self.lastPercent = percent
+	self.powerText.Text = string.format(TEXT.Power, percent)
+
+	local lit = math.clamp(math.ceil(p * POWER_SEGMENTS - 1e-6), 0, POWER_SEGMENTS)
+	if lit ~= self.litCount then
+		local from, to = math.min(lit, self.litCount) + 1, math.max(lit, self.litCount)
+		for i = from, to do
+			self.segments[i].BackgroundColor3 = if i <= lit then self.segmentColors[i] else self.segmentOff[i]
+		end
+		self.litCount = lit
+	end
+
+	local warn = p >= POWER_WARN
+	if warn ~= self.powerWarn then
+		self.powerWarn = warn
+		self.pillStroke.Color = if warn then RED else GOLD
+		self.powerText.TextColor3 = if warn then RED_LIGHT else CREAM
+	end
 end
 
-function ShotHud:setSeries(goals: number, seriesLength: number, history: { string })
-	self.goalsText.Text = string.format('<font color="#A3E635">%d</font> / %d', goals, seriesLength)
+function ShotHud:setSeries(goals: number, seriesLength: number, history: { string }?)
+	local shots = history or {}
+	setBigText(self.goalsText, string.format('<font color="#FFBF1F">%d</font> / %d', goals, seriesLength))
+
 	for i = #self.pipFrames + 1, seriesLength do
-		local pip = circle(self.pips, 13, { LayoutOrder = i, BackgroundTransparency = 1 })
-		create("UIStroke", { Color = MUTED, Thickness = 1.5, Transparency = 0.45, Parent = pip })
+		local pip = frame({ Name = "Pip" .. i, LayoutOrder = i, Size = UDim2.fromOffset(18, 18), BackgroundColor3 = NAVY, Parent = self.pips })
+		corner(pip, 4)
+		self.pipStrokes[i] = stroke(pip, VIOLET, 2)
 		self.pipFrames[i] = pip
 	end
+
+	local nextIndex = #shots + 1
 	for i, pip in self.pipFrames do
-		local outcome = history[i]
+		local outcome = shots[i]
 		pip.Visible = i <= seriesLength
-		pip.BackgroundColor3 = if outcome then PIP_COLORS[outcome] or MUTED else MUTED
-		pip.BackgroundTransparency = if outcome then 0 else 1
+		pip.BackgroundColor3 = if outcome then PIP_COLORS[outcome] or CREAM else NAVY
+		local s = self.pipStrokes[i]
+		s.Color = if outcome then INK elseif i == nextIndex then CREAM else VIOLET
+		s.Transparency = 0
+	end
+
+	-- Gentle pulse on the outline of the shot about to be taken.
+	if self.pulseIndex ~= nextIndex then
+		if self.pulseTween then
+			self.pulseTween:Cancel()
+		end
+		self.pulseTween = nil
+		self.pulseIndex = nextIndex
+		local s = self.pipStrokes[nextIndex]
+		if s and nextIndex <= seriesLength then
+			self.pulseTween = TweenService:Create(s, TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { Transparency = 0.75 })
+			self.pulseTween:Play()
+		end
 	end
 end
 
 function ShotHud:bumpGoals()
-	self.goalsScale.Scale = self.baseScale * 1.15
-	TweenService:Create(self.goalsScale, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = self.baseScale }):Play()
+	self.countScale.Scale = 1.45
+	TweenService:Create(self.countScale, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	self.trophy.Rotation = -18
+	TweenService:Create(self.trophy, TweenInfo.new(0.5, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out), { Rotation = 0 }):Play()
 end
 
--- kind: GOAL | SAVE | POST | BAR | WIDE | OVER
-function ShotHud:showResult(kind: string, seriesText: string?)
+-- kind: GOAL | POST_IN | CATCH | PARRY | POST | BAR | WIDE | OVER
+-- details: optional { speedKmh = number }
+function ShotHud:showResult(kind: string, seriesText: string?, details: { speedKmh: number? }?)
+	local style = KIND_STYLE[kind] or KIND_STYLE.WIDE
 	local info = TEXT.Outcomes[kind] or { kind, "" }
-	self.cardTitle.Text = info[1]
-	self.cardTitle.TextColor3 = OUTCOME_COLORS[kind] or WHITE
+
+	setBigText(self.cardTitle, info[1])
+	self.titleGradient.Color = ColorSequence.new(style.top, style.bottom)
 	self.cardSubtitle.Text = seriesText or info[2]
-	self.button.Text = if seriesText then TEXT.NewSeries else TEXT.NextShot
+	self.buttonLabel.Text = if seriesText then TEXT.NewSeries else TEXT.NextShot
+
+	local speed = details and details.speedKmh
+	local hasChip = type(speed) == "number" and speed > 0
+	self.speedChip.Visible = hasChip
+	if hasChip then
+		self.speedText.Text = string.format(TEXT.Speed, math.floor(speed + 0.5))
+	end
+	-- Without the chip the card closes up around the button.
+	self.card.Size = UDim2.fromOffset(400, if hasChip then 240 else 206)
+	self.button.Position = UDim2.new(0.5, 0, 0, if hasChip then 172 else 138)
+	self.buttonBody.Position = UDim2.fromOffset(0, 0)
+
+	for _, s in self.cardGlows do
+		s.Color = style.accent
+	end
+	self.badgeStroke.Color = style.accent
+	self.badgeGlow.Color = style.accent
+	self.badgeIcon.Text = style.icon
+	for _, sparkle in self.sparkles do
+		sparkle.Visible = style.sparkle == true
+	end
+
 	self.card.Visible = true
-	self.cardScale.Scale = self.baseScale * 0.6
-	TweenService:Create(self.cardScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = self.baseScale }):Play()
+	self.cardPop.Scale = 0.55
+	TweenService:Create(self.cardPop, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	self.titlePop.Scale = 1.5
+	TweenService:Create(self.titlePop, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out, 0, false, 0.08), { Scale = 1 }):Play()
+	self.badge.Rotation = -120
+	TweenService:Create(self.badge, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Rotation = 0 }):Play()
+	self.shine.Position = UDim2.fromScale(-0.3, 0.5)
+	self.shineTween:Play()
 end
 
 function ShotHud:seriesText(goals: number, seriesLength: number): string
@@ -434,6 +749,7 @@ end
 
 function ShotHud:hideCard()
 	self.card.Visible = false
+	self.shineTween:Cancel()
 end
 
 return ShotHud

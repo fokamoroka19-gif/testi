@@ -47,17 +47,6 @@ local function requestEpisode()
 	RequestEpisode:FireServer()
 end
 
--- Splits the server outcome into what the card should say (post vs crossbar, wide vs over).
-local function cardKind(result): string
-	local goal = ShotConfig.Goal
-	if result.outcome == "POST" then
-		return if result.target.Y > goal.Height - ShotConfig.Ball.Radius then "BAR" else "POST"
-	elseif result.outcome == "MISS" then
-		return if result.target.Y > goal.Height + goal.PostRadius then "OVER" else "WIDE"
-	end
-	return result.outcome
-end
-
 hud.onContinue = function()
 	if waitingForEpisode then
 		return
@@ -118,7 +107,7 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 		task.delay(CARD_DELAY, function()
 			if not currentEpisode and not waitingForEpisode then
 				local seriesText = if result.seriesOver then hud:seriesText(result.goals, result.seriesLength) else nil
-				hud:showResult(cardKind(result), seriesText)
+				hud:showResult(result.detail, seriesText, { speedKmh = result.speedKmh })
 			end
 		end)
 	end)
@@ -135,6 +124,7 @@ UserInputService.InputBegan:Connect(function(inputObject, gameProcessed)
 	end
 end)
 
+local wasHolding = false
 RunService.RenderStepped:Connect(function(dt)
 	visuals:update(dt)
 	input:update()
@@ -142,6 +132,12 @@ RunService.RenderStepped:Connect(function(dt)
 		visuals:updateAiming(true, input.aimX, input.aimY, input.power, input.holding)
 		hud:setPower(input.power)
 		hud:setTitle(if input.holding then "Holding" else "Ready")
+	end
+	-- The keeper gets set (hop + lower stance) while the player charges.
+	local holding = input.enabled and input.holding
+	if holding ~= wasHolding then
+		wasHolding = holding
+		visuals:setCharging(holding)
 	end
 end)
 

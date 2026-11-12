@@ -57,9 +57,11 @@ for _, name in REMOTE_NAMES do
 end
 
 local SceneBuilder = requireServerModule("SceneBuilder")
+local KeeperBuilder = requireServerModule("KeeperBuilder")
 local EpisodeService = requireServerModule("EpisodeService")
 
-SceneBuilder.build()
+local scene = SceneBuilder.build()
+KeeperBuilder.build(scene)
 EpisodeService.init(remotes)
 
 print("[Main] Stage 1 shot prototype ready")

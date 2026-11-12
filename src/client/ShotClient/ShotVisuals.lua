@@ -1,5 +1,5 @@
--- Client-only 3D visuals: camera, ball, goalkeeper animation, aim crosshair, trajectory
--- preview and goal effects. Everything here is local to this player and has no effect on the outcome.
+-- Client-only 3D visuals: camera, ball replay, goalkeeper animation, aim crosshair, trajectory
+-- preview and effects. Everything here is local to this player and has no effect on the outcome.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -8,20 +8,18 @@ local TweenService = game:GetService("TweenService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
 local ShotPhysics = require(Shared:WaitForChild("ShotPhysics"))
+local KeeperAnimator = require(script.Parent:WaitForChild("KeeperAnimator"))
 
 local Keeper = ShotConfig.Goalkeeper
 local BALL_RADIUS = ShotConfig.Ball.Radius
-local PREVIEW_DOTS = 14
-local FOLLOW_THROUGH_SECONDS = 1.6
-local KEEPER_MIN_Y = 1.2
-local KEEPER_MAX_TILT = math.rad(95)
-local ARMS_READY = math.rad(38)
-local ARMS_DIVE = math.rad(165)
-local BALL_SPIN_RATE = 14 -- radians per second in flight
+local PREVIEW_DOTS = 16
+local AFTER_PATH_SECONDS = 0.4 -- linger after the replayed path ends
 
 local WHITE = Color3.new(1, 1, 1)
-local LIME = Color3.fromRGB(163, 230, 53)
-local YELLOW = Color3.fromRGB(250, 204, 21)
+local GOLD = Color3.fromRGB(255, 191, 31)
+local RED = Color3.fromRGB(255, 45, 85)
+local VIOLET = Color3.fromRGB(123, 77, 255)
+local CREAM = Color3.fromRGB(247, 236, 214)
 
 local ShotVisuals = {}
 ShotVisuals.__index = ShotVisuals
@@ -60,34 +58,60 @@ local function icosahedronDirections(): { Vector3 }
 	return dirs
 end
 
+-- Position on the replayed path at time t (linear between samples).
+local function pathAt(path: { Vector3 }, sampleStep: number, t: number): Vector3
+	local f = t / sampleStep
+	local i = math.floor(f)
+	if i >= #path - 1 then
+		return path[#path]
+	end
+	return path[i + 1]:Lerp(path[i + 2], f - i)
+end
+
 function ShotVisuals.new()
 	local self = setmetatable({}, ShotVisuals)
 	self.token = 0
 	self.clock = 0
 	self.shake = 0
 	self.fovKick = 0
-	self.idle = true
+	self.ballRotation = CFrame.identity
 
 	local folder = create("Folder", { Name = "ShotVisuals", Parent = workspace })
 
-	-- Ball: white sphere with 12 flat dark panels.
+	-- Ball: white sphere with 12 flat dark panels, plus a trail for hard shots.
 	local ballModel = create("Model", { Name = "Ball", Parent = folder })
-	self.ballParts = {
-		{ makePart({ Name = "Shell", Shape = Enum.PartType.Ball, Size = Vector3.one * BALL_RADIUS * 2, Color = WHITE, Parent = ballModel }), CFrame.identity },
-	}
+	local shell = makePart({ Name = "Shell", Shape = Enum.PartType.Ball, Size = Vector3.one * BALL_RADIUS * 2, Color = WHITE, Parent = ballModel })
+	self.ballParts = { { shell, CFrame.identity } }
 	for _, dir in icosahedronDirections() do
 		local reference = if math.abs(dir.Y) < 0.9 then Vector3.yAxis else Vector3.xAxis
-		local up = dir:Cross(reference).Unit
 		local patch = makePart({
 			Name = "Panel",
 			Shape = Enum.PartType.Cylinder,
 			Size = Vector3.new(0.05, BALL_RADIUS * 0.66, BALL_RADIUS * 0.66),
-			Color = Color3.fromRGB(22, 22, 26),
+			Color = Color3.fromRGB(28, 18, 48),
 			CastShadow = false,
 			Parent = ballModel,
 		})
-		table.insert(self.ballParts, { patch, CFrame.fromMatrix(dir * BALL_RADIUS * 0.985, dir, up) })
+		table.insert(self.ballParts, { patch, CFrame.fromMatrix(dir * BALL_RADIUS * 0.985, dir, dir:Cross(reference).Unit) })
 	end
+	-- The trail hangs off a separate carrier so the ball's spin doesn't twist it.
+	local carrier = makePart({ Name = "TrailCarrier", Size = Vector3.one * 0.2, Transparency = 1, Parent = folder })
+	local a0 = create("Attachment", { Position = Vector3.new(0, 0.55, 0), Parent = carrier })
+	local a1 = create("Attachment", { Position = Vector3.new(0, -0.55, 0), Parent = carrier })
+	self.trail = create("Trail", {
+		Attachment0 = a0,
+		Attachment1 = a1,
+		Lifetime = 0.22,
+		MinLength = 0.05,
+		FaceCamera = true,
+		LightEmission = 0.7,
+		Color = ColorSequence.new(CREAM, GOLD),
+		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.35), NumberSequenceKeypoint.new(1, 1) }),
+		WidthScale = NumberSequence.new(1, 0.2),
+		Enabled = false,
+		Parent = carrier,
+	})
+	self.trailCarrier = carrier
 
 	-- Crosshair on the goal plane, the size of the ball, drawn on top of everything.
 	local aimPart = makePart({ Name = "Crosshair", Size = Vector3.new(3, 3, 0.05), Transparency = 1, CastShadow = false, Parent = folder })
@@ -104,20 +128,23 @@ function ShotVisuals.new()
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
 		Size = UDim2.fromScale(2 * BALL_RADIUS / 3, 2 * BALL_RADIUS / 3),
-		BackgroundColor3 = LIME,
+		BackgroundColor3 = GOLD,
 		BackgroundTransparency = 0.82,
 		Parent = aimGui,
 	})
 	create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = ring })
-	create("UIStroke", { Color = LIME, Thickness = 6, Parent = ring })
-	local dot = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(14, 14), BackgroundColor3 = WHITE, Parent = aimGui })
+	create("UIStroke", { Color = GOLD, Thickness = 6, Parent = ring })
+	create("UIStroke", { Color = Color3.fromRGB(43, 18, 80), Thickness = 2, Transparency = 0.2, Parent = create("Frame", {
+		Size = UDim2.new(1, 14, 1, 14), Position = UDim2.fromOffset(-7, -7), BackgroundTransparency = 1, Parent = ring,
+	}) })
+	local dot = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(14, 14), BackgroundColor3 = CREAM, Parent = aimGui })
 	create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = dot })
 	for _, tick in { { 0.5, 0.06, 6, 22 }, { 0.5, 0.94, 6, 22 }, { 0.06, 0.5, 22, 6 }, { 0.94, 0.5, 22, 6 } } do
 		create("Frame", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(tick[1], tick[2]),
 			Size = UDim2.fromOffset(tick[3], tick[4]),
-			BackgroundColor3 = LIME,
+			BackgroundColor3 = GOLD,
 			BorderSizePixel = 0,
 			Parent = aimGui,
 		})
@@ -130,38 +157,47 @@ function ShotVisuals.new()
 			Name = "PreviewDot",
 			Shape = Enum.PartType.Ball,
 			Size = Vector3.one * (0.42 - 0.22 * i / PREVIEW_DOTS),
-			Color = LIME,
+			Color = GOLD,
 			Material = Enum.Material.Neon,
 			CastShadow = false,
 			Transparency = 1,
 			Parent = folder,
 		})
 	end
+	self.previewKey = ""
 
-	local emitterPart = makePart({
-		Name = "Confetti",
-		Size = Vector3.one,
-		Transparency = 1,
-		CFrame = CFrame.new(0, ShotConfig.Goal.Height + 1, -ShotConfig.Goal.NetDepth / 2),
-		Parent = folder,
-	})
-	self.confetti = create("ParticleEmitter", {
-		Enabled = false,
+	local function emitter(name: string, position: Vector3, props: { [string]: any })
+		local holder = makePart({ Name = name, Size = Vector3.one, Transparency = 1, CFrame = CFrame.new(position), Parent = folder })
+		props.Enabled = false
+		props.Parent = holder
+		return create("ParticleEmitter", props), holder
+	end
+	self.confetti = emitter("Confetti", Vector3.new(0, ShotConfig.Goal.Height + 1, -ShotConfig.Goal.NetDepth / 2), {
 		Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, LIME),
-			ColorSequenceKeypoint.new(0.5, WHITE),
-			ColorSequenceKeypoint.new(1, YELLOW),
+			ColorSequenceKeypoint.new(0, GOLD),
+			ColorSequenceKeypoint.new(0.35, RED),
+			ColorSequenceKeypoint.new(0.7, VIOLET),
+			ColorSequenceKeypoint.new(1, CREAM),
 		}),
-		Size = NumberSequence.new(0.5, 0.15),
-		Speed = NumberRange.new(25, 45),
-		SpreadAngle = Vector2.new(70, 70),
+		Size = NumberSequence.new(0.55, 0.15),
+		Speed = NumberRange.new(28, 50),
+		SpreadAngle = Vector2.new(75, 75),
 		EmissionDirection = Enum.NormalId.Top,
 		Acceleration = Vector3.new(0, -40, 0),
 		Drag = 1.5,
-		Lifetime = NumberRange.new(1.5, 2.5),
-		RotSpeed = NumberRange.new(-200, 200),
+		Lifetime = NumberRange.new(1.6, 2.6),
+		RotSpeed = NumberRange.new(-220, 220),
 		LightEmission = 0.6,
-		Parent = emitterPart,
+	})
+	-- Small burst of chalk/grass at bounces and white flashes on the frame.
+	self.impact, self.impactHolder = emitter("Impact", Vector3.zero, {
+		Color = ColorSequence.new(CREAM),
+		Size = NumberSequence.new(0.5, 0),
+		Speed = NumberRange.new(6, 14),
+		SpreadAngle = Vector2.new(180, 180),
+		Acceleration = Vector3.new(0, -30, 0),
+		Lifetime = NumberRange.new(0.25, 0.45),
+		LightEmission = 0.8,
 	})
 
 	self:_findScene()
@@ -175,66 +211,54 @@ function ShotVisuals:_findScene()
 		warn("[ShotVisuals] workspace.FootballScene not found; is the server Main script running?")
 		return
 	end
-
 	local net = scene:FindFirstChild("NetBack", true)
-	if net then
+	if net and net:IsA("BasePart") then
 		self.netBack, self.netBackHome = net, net.CFrame
 	end
-
 	local keeper = Keeper.Enabled and scene:WaitForChild("Goalkeeper", 10)
 	if keeper then
-		self.keeper = keeper
-		self.keeperHome = keeper:GetPivot()
-		self.keeperRotation = self.keeperHome.Rotation
-		self.shoulders = {}
-		for _, info in { { "LeftShoulder", -1 }, { "RightShoulder", 1 } } do
-			local motor = keeper:FindFirstChild(info[1], true)
-			if motor and motor:IsA("Motor6D") then
-				table.insert(self.shoulders, { motor, motor.C0, info[2] })
-			end
-		end
+		self.keeper = KeeperAnimator.new(keeper)
 	end
 end
 
-function ShotVisuals:_setBall(position: Vector3, spin: number)
-	local base = CFrame.new(position) * CFrame.Angles(-spin, 0, 0)
+function ShotVisuals:_setBall(position: Vector3)
+	local base = CFrame.new(position) * self.ballRotation
 	for _, entry in self.ballParts do
 		entry[1].CFrame = base * entry[2]
 	end
+	self.trailCarrier.CFrame = CFrame.new(position)
+	self.ballPosition = position
 end
 
--- offset: body movement from the home position; tilt: lean around the view axis; arms: shoulder angle.
-function ShotVisuals:_poseKeeper(offset: Vector3, tilt: number, arms: number)
-	if not self.keeper then
-		return
+function ShotVisuals:_spinBall(angularVelocity: Vector3, dt: number)
+	local speed = angularVelocity.Magnitude
+	if speed > 1e-3 then
+		self.ballRotation = CFrame.fromAxisAngle(angularVelocity / speed, speed * dt) * self.ballRotation
 	end
-	local position = self.keeperHome.Position + offset
-	self.keeper:PivotTo(CFrame.new(position) * CFrame.Angles(0, 0, tilt) * self.keeperRotation)
-	for _, shoulder in self.shoulders do
-		shoulder[1].C0 = shoulder[2] * CFrame.Angles(0, 0, shoulder[3] * arms)
-	end
-end
-
-function ShotVisuals:_diveKeeper(target: Vector3, alpha: number)
-	local eased = 1 - (1 - alpha) ^ 2
-	local offset = Vector3.new(target.X - Keeper.HomeX, math.max(target.Y, KEEPER_MIN_Y) - Keeper.HomeY, 0)
-	local tilt = math.clamp(math.atan2(-offset.X, offset.Y + Keeper.HomeY), -KEEPER_MAX_TILT, KEEPER_MAX_TILT)
-	local lean = math.clamp(offset.Magnitude / 4, 0, 1)
-	self:_poseKeeper(offset * eased, tilt * lean * eased, ARMS_READY + (ARMS_DIVE - ARMS_READY) * math.min(1, alpha * 2))
 end
 
 function ShotVisuals:reset()
 	self.token += 1
-	self.idle = true
-	self:_setBall(ShotPhysics.ballSpot(), 0)
-	self:_poseKeeper(Vector3.zero, 0, ARMS_READY)
+	self.holdBall = false
+	self.ballRotation = CFrame.identity
+	self.trail.Enabled = false
+	self:_setBall(ShotPhysics.ballSpot())
+	if self.keeper then
+		self.keeper:recover()
+	end
 	if self.netBack then
 		self.netBack.CFrame = self.netBackHome
 	end
 	self:updateAiming(false, 0, 0.5, 0, false)
 end
 
--- Per-frame: camera (with shake and kick) and the keeper's ready stance.
+function ShotVisuals:setCharging(on: boolean)
+	if self.keeper then
+		self.keeper:setCharging(on)
+	end
+end
+
+-- Per-frame: camera (with shake and kick) and the keeper.
 function ShotVisuals:update(dt: number)
 	self.clock += dt
 	self.shake = math.max(0, self.shake - dt * 2.5)
@@ -251,27 +275,44 @@ function ShotVisuals:update(dt: number)
 	end
 	camera.CFrame = base
 
-	if self.idle then
-		local t = self.clock
-		local sway = Vector3.new(math.sin(t * 2.1) * 0.45, math.abs(math.sin(t * 4.2)) * 0.1, 0)
-		self:_poseKeeper(sway, 0, ARMS_READY + math.sin(t * 4.2) * 0.06)
+	if self.keeper then
+		self.keeper:update(dt)
+		if self.holdBall then
+			local hands = self.keeper:handsPosition()
+			if hands then
+				self:_setBall(self.ballPosition:Lerp(hands, math.min(1, dt * 25)))
+			end
+		end
 	end
 end
 
--- Shows the crosshair, and while holding, the predicted (no-error) arc.
+-- Shows the crosshair, and while holding, the predicted arc including curl (no random error).
 function ShotVisuals:updateAiming(enabled: boolean, aimX: number, aimY: number, power: number, holding: boolean)
 	local point = ShotPhysics.aimToGoalPoint(aimX, aimY)
 	self.aimGui.Enabled = enabled
 	self.aimPart.CFrame = CFrame.new(point + Vector3.new(0, 0, 0.25))
 
 	local showArc = enabled and holding
-	local start = ShotPhysics.ballSpot()
-	local flightTime = ShotPhysics.flightTime(start, point, power)
-	local velocity = ShotPhysics.launchVelocity(start, point, flightTime)
 	for i, dot in self.dots do
 		dot.Transparency = if showArc then 0.1 + 0.55 * i / PREVIEW_DOTS else 1
-		if showArc then
-			dot.CFrame = CFrame.new(ShotPhysics.positionAt(start, velocity, flightTime * i / (PREVIEW_DOTS + 1)))
+	end
+	if not showArc then
+		self.previewKey = ""
+		return
+	end
+	-- Re-solve only when the input actually changed.
+	local key = string.format("%.3f|%.3f|%.2f", aimX, aimY, power)
+	if key == self.previewKey then
+		return
+	end
+	self.previewKey = key
+	local points = ShotPhysics.previewPath(point, power, ShotPhysics.spinFor(aimX, power), PREVIEW_DOTS)
+	for i, dot in self.dots do
+		local p = points[i]
+		if p then
+			dot.CFrame = CFrame.new(p)
+		else
+			dot.Transparency = 1
 		end
 	end
 end
@@ -279,99 +320,107 @@ end
 function ShotVisuals:onShotReleased()
 	self.fovKick = 1.8
 	self:updateAiming(false, 0, 0.5, 0, false)
+	if self.keeper then
+		self.keeper:setCharging(false)
+	end
 end
 
-function ShotVisuals:_bulgeNet()
+function ShotVisuals:_bulgeNet(at: Vector3)
 	local net = self.netBack
 	if not net then
 		return
 	end
-	net.CFrame = self.netBackHome * CFrame.new(0, 0, -0.9)
-	TweenService:Create(net, TweenInfo.new(0.6, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out), { CFrame = self.netBackHome }):Play()
+	local depth = math.clamp(1.2 - math.abs(at.X) / ShotConfig.Goal.Width, 0.5, 1.2)
+	net.CFrame = self.netBackHome * CFrame.new(0, 0, -depth)
+	TweenService:Create(net, TweenInfo.new(0.7, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out), { CFrame = self.netBackHome }):Play()
 end
 
--- Velocity right after the ball reaches the goal plane / keeper; purely cosmetic.
-local function velocityAfterImpact(outcome: string, velocity: Vector3, target: Vector3): Vector3
-	if outcome == "GOAL" then
-		return velocity * 0.6
-	elseif outcome == "SAVE" then
-		local side = if target.X >= 0 then 1 else -1
-		return Vector3.new(side * 7, 9, -velocity.Z * 0.25)
-	elseif outcome == "POST" then
-		if target.Y > ShotConfig.Goal.Height - BALL_RADIUS then
-			return Vector3.new(velocity.X * 0.5, 10, -velocity.Z * 0.35) -- crossbar
-		end
-		return Vector3.new(-velocity.X * 0.4, velocity.Y * 0.3 + 3, -velocity.Z * 0.4)
-	end
-	return velocity
+function ShotVisuals:_puff(at: Vector3, count: number)
+	self.impactHolder.CFrame = CFrame.new(at)
+	self.impact:Emit(count)
 end
 
--- Plays the server-decided shot. Calls onImpact when the ball reaches the goal or keeper,
--- and yields until the follow-through ends or reset() is called.
-function ShotVisuals:playShot(result, onImpact: () -> ())
+-- Replays the server-simulated shot. Calls onDecisive at the moment the result is clear,
+-- and yields until the replay ends or reset() is called.
+function ShotVisuals:playShot(result, onDecisive: () -> ())
 	self.token += 1
 	local token = self.token
-	self.idle = false
+	local path: { Vector3 } = result.path
+	local sampleStep: number = result.sampleStep
+	local duration = (#path - 1) * sampleStep
+	local spin: Vector3 = result.spin or Vector3.zero
 
-	local start: Vector3 = result.start
-	local target: Vector3 = result.target
-	local flightTime: number = result.flightTime
-	local velocity = ShotPhysics.launchVelocity(start, target, flightTime)
-
-	-- The keeper stands in front of the line, so a save happens slightly before the goal plane.
-	local endTime = flightTime
-	if result.outcome == "SAVE" then
-		endTime = flightTime * (1 - Keeper.HomeZ / (start.Z - target.Z))
+	if self.keeper then
+		self.keeper:startShot({
+			reaction = result.keeperReaction,
+			impactTime = result.keeperTime or result.decisiveTime,
+			target = result.keeperTarget,
+			kind = result.keeperKind,
+			dives = result.keeperDives,
+		})
 	end
-	local reaction: number = result.keeperReaction
-	local diveDuration = math.max(endTime - reaction, 0.05)
 
-	local t = 0
-	while t < endTime do
-		self:_setBall(ShotPhysics.positionAt(start, velocity, t), t * BALL_SPIN_RATE)
-		self:_diveKeeper(result.keeperTarget, math.clamp((t - reaction) / diveDuration, 0, 1))
-		t += RunService.RenderStepped:Wait()
+	-- Effects keyed to simulation events.
+	local pending = table.clone(result.events)
+	table.sort(pending, function(a, b)
+		return a.t < b.t
+	end)
+	local decisiveFired = false
+	self.trail.Enabled = (result.speedKmh or 0) >= 85
+
+	local t, last = 0, ShotPhysics.ballSpot()
+	while t < duration + AFTER_PATH_SECONDS do
+		local dt = RunService.RenderStepped:Wait()
 		if self.token ~= token then
 			return
 		end
-	end
+		t += dt
 
-	local position = ShotPhysics.positionAt(start, velocity, endTime)
-	local spin = endTime * BALL_SPIN_RATE
-	self:_setBall(position, spin)
-	self:_diveKeeper(result.keeperTarget, 1)
-	if result.outcome == "GOAL" then
-		self.shake = 1
-		self.confetti:Emit(150)
-		self:_bulgeNet()
-	else
-		self.shake = 0.4
-	end
-	onImpact()
+		while pending[1] and pending[1].t <= t do
+			local e = table.remove(pending, 1)
+			if e.kind == "goal" then
+				self.shake = 1
+				self.confetti:Emit(160)
+			elseif e.kind == "net" then
+				self:_bulgeNet(e.pos)
+			elseif e.kind == "frame" then
+				self.shake = math.max(self.shake, 0.6)
+				self:_puff(e.pos, 14)
+			elseif e.kind == "keeper" then
+				self.shake = math.max(self.shake, 0.35)
+				if e.part == "CATCH" then
+					self.holdBall = true -- update() keeps it in the gloves from now on
+					self.trail.Enabled = false
+				else
+					self:_puff(e.pos, 10)
+				end
+			elseif e.kind == "bounce" or e.kind == "board" then
+				self:_puff(e.pos, 6)
+			end
+		end
+		if not decisiveFired and t >= result.decisiveTime then
+			decisiveFired = true
+			onDecisive()
+		end
 
-	-- Follow-through: gravity, ground bounces and the back of the net.
-	local vel = velocityAfterImpact(result.outcome, ShotPhysics.velocityAt(velocity, endTime), target)
-	local netBack = -ShotConfig.Goal.NetDepth + BALL_RADIUS
-	local elapsed = 0
-	while elapsed < FOLLOW_THROUGH_SECONDS do
-		local dt = math.min(RunService.RenderStepped:Wait(), 1 / 20)
-		if self.token ~= token then
-			return
+		if not self.holdBall then
+			local position = pathAt(path, sampleStep, math.min(t, duration))
+			local velocity = (position - last) / math.max(dt, 1e-3)
+			local onGround = position.Y <= BALL_RADIUS + 0.05
+			-- In the air the ball shows its real spin (exaggerated); on the ground it rolls.
+			local angular = if onGround then Vector3.new(velocity.Z, 0, -velocity.X) / BALL_RADIUS else spin * 3 + Vector3.new(-velocity.Magnitude * 0.15, 0, 0)
+			self:_spinBall(angular, dt)
+			if velocity.Magnitude < 40 then
+				self.trail.Enabled = false
+			end
+			self:_setBall(position)
+			last = position
 		end
-		elapsed += dt
-		vel += ShotPhysics.gravity() * dt
-		position += vel * dt
-		if position.Y < BALL_RADIUS then
-			position = Vector3.new(position.X, BALL_RADIUS, position.Z)
-			vel = Vector3.new(vel.X * 0.8, -vel.Y * 0.5, vel.Z * 0.8)
-		end
-		if result.outcome == "GOAL" and position.Z < netBack then
-			position = Vector3.new(position.X, position.Y, netBack)
-			vel = Vector3.new(vel.X * 0.3, vel.Y, 0)
-		end
-		spin += vel.Magnitude / BALL_RADIUS * dt * 0.5
-		self:_setBall(position, spin)
 	end
+	if not decisiveFired then
+		onDecisive()
+	end
+	self.trail.Enabled = false
 end
 
 return ShotVisuals

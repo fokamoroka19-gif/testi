@@ -19,10 +19,10 @@
 local ShotConfig = {}
 
 ShotConfig.Goal = {
-	Width = 24, -- inside width, post to post
-	Height = 8, -- inside height, ground to crossbar
-	PostRadius = 0.35,
-	NetDepth = 6,
+	Width = 30, -- inside width, post to post (oversized for readability; real ratio 3:1)
+	Height = 10, -- inside height, ground to crossbar
+	PostRadius = 0.4,
+	NetDepth = 7,
 	-- Fraction of the ball radius that must overlap the frame to count as POST;
 	-- lighter touches deflect in (goal side) or out (wide side).
 	FrameHitDepth = 0.5,
@@ -32,36 +32,61 @@ ShotConfig.Ball = {
 	Radius = 1,
 }
 
-ShotConfig.ShotDistance = 36 -- goal line to ball spot
+ShotConfig.ShotDistance = 40 -- goal line to ball spot
 
--- Lower than workspace.Gravity on purpose: weak shots get a visible loop, hard shots stay flat.
-ShotConfig.Gravity = 60
-ShotConfig.MinBallSpeed = 40 -- power 0
-ShotConfig.MaxBallSpeed = 110 -- power 1
+-- Positions of solid things the ball can bounce off after crossing the line.
+ShotConfig.Arena = {
+	BoardZ = -20, -- front face of the advertising boards / wall behind the goal
+	BoardHeight = 4,
+}
+
+ShotConfig.Physics = {
+	-- Lower than workspace.Gravity on purpose: weak shots get a visible loop, hard shots stay flat.
+	Gravity = 55,
+	MinBallSpeed = 45, -- power 0
+	MaxBallSpeed = 120, -- power 1
+	Drag = 0.0032, -- quadratic air drag, per stud
+	Magnus = 0.022, -- curve per (rad/s * stud/s)
+	SpinDecay = 0.35, -- per second
+	CurlSpin = 9, -- rad/s of side spin for a shot aimed at the post (curls back towards the centre)
+	DipSpin = 7, -- rad/s of top spin at full power (hard shots dip)
+	SpinJitter = 1.5, -- rad/s random spin, makes no two shots identical
+	GroundRestitution = 0.5,
+	GroundFriction = 0.35, -- fraction of horizontal speed lost per bounce
+	RollingFriction = 9, -- stud/s^2 while rolling
+	FrameRestitution = 0.65, -- posts and crossbar
+	NetDamping = 0.15, -- fraction of speed kept when the ball hits the net
+	BoardRestitution = 0.45,
+	SimStep = 1 / 240,
+	SampleStep = 1 / 60,
+	MaxSimTime = 3.2,
+}
 
 ShotConfig.Accuracy = {
 	-- Standard deviation (studs) of the random offset from the aim point, by Shooting skill.
-	ScatterAtZeroSkill = 2.6,
-	ScatterAtMaxSkill = 0.5,
+	ScatterAtZeroSkill = 3.2,
+	ScatterAtMaxSkill = 0.6,
 	MaxSigmas = 2.5, -- cap so a single shot is never wildly off
 	-- Power above this threshold is less accurate and tends to rise over the bar.
 	OverpowerFrom = 0.85,
-	OverpowerScatter = 1.5,
-	OverpowerLift = 2.5,
+	OverpowerScatter = 1.8,
+	OverpowerLift = 3,
 }
 
 ShotConfig.Goalkeeper = {
 	Enabled = true,
 	Skill = 60, -- 0..100, opponent goalkeeper rating
+	ModelScale = 1.4, -- R15 rig scale; ~7.5 studs tall next to the 10-stud goal
 	HomeX = 0,
-	HomeY = 3.5, -- body centre
-	HomeZ = 1.2, -- stands just in front of the line
-	Reach = 3, -- distance the hands cover without moving
-	ReactionTime = 0.22,
+	HomeY = 4.2, -- body centre (root part) height when standing
+	HomeZ = 1.6, -- stands just in front of the line
+	Reach = 4.2, -- distance from the body centre the gloves cover without moving
+	ReactionTime = 0.2,
 	ReactionJitter = 0.06, -- +/- random part of the reaction time
-	DiveSpeedAtZeroSkill = 10,
-	DiveSpeedAtMaxSkill = 26,
-	ModelScale = 1.15, -- R15 rig scale; ~6 studs tall next to the 8-stud goal
+	DiveSpeedAtZeroSkill = 12,
+	DiveSpeedAtMaxSkill = 30,
+	CatchMaxSpeed = 85, -- slower shots that reach the keeper comfortably are held, not parried
+	CatchMargin = 1.5, -- studs of spare reach needed to hold the ball
 }
 
 -- Placeholder until career data exists (GDD: new players start around OVR 40).
@@ -85,8 +110,8 @@ ShotConfig.Input = {
 
 -- Far and narrow, so the ball sits just above the bottom panel and the goal fills the middle.
 ShotConfig.Camera = {
-	Position = Vector3.new(0, 6, 72),
-	LookAt = Vector3.new(0, 2.5, 0),
+	Position = Vector3.new(0, 6, 82),
+	LookAt = Vector3.new(0, 3, 0),
 	FieldOfView = 28,
 }
 
@@ -97,14 +122,22 @@ return ShotConfig
       <Item class="ModuleScript" referent="3">
         <Properties>
           <string name="Name">ShotPhysics</string>
-          <string name="Source"><![CDATA[-- Pure shot geometry and ball flight. Used by the server to decide outcomes and by the
--- client to draw the exact same arc, so what the player sees matches what was decided.
+          <string name="Source"><![CDATA[-- Shot geometry and ball physics, shared by server and client.
+-- The server runs `simulate` to decide the outcome and sends the sampled path to the client,
+-- which replays it; the client also uses the free-flight solver for the aiming preview.
 
 local ShotConfig = require(script.Parent.ShotConfig)
 
 local Goal = ShotConfig.Goal
+local Arena = ShotConfig.Arena
+local P = ShotConfig.Physics
 local BALL_RADIUS = ShotConfig.Ball.Radius
-local GRAVITY = Vector3.new(0, -ShotConfig.Gravity, 0)
+local GRAVITY = Vector3.new(0, -P.Gravity, 0)
+
+local HALF_WIDTH = Goal.Width / 2
+local POST_X = HALF_WIDTH + Goal.PostRadius
+local BAR_Y = Goal.Height + Goal.PostRadius
+local FRAME_CONTACT = BALL_RADIUS + Goal.PostRadius
 
 local ShotPhysics = {}
 
@@ -115,6 +148,23 @@ ShotPhysics.Zone = {
 	Wide = "WIDE", -- wide or over
 }
 
+export type Event = { kind: string, t: number, pos: Vector3, part: string? }
+export type KeeperResponse = { kind: string, velocity: Vector3? } -- kind: "CATCH" | "PARRY"
+export type SimResult = {
+	path: { Vector3 }, -- ball centre every P.SampleStep seconds, from t = 0
+	events: { Event },
+	goalTime: number?,
+	frameTime: number?,
+	framePart: string?, -- "Post" | "Crossbar"
+	crossTime: number?, -- first time the ball centre reaches the goal plane (z = 0)
+	crossPoint: Vector3?,
+	keeperTime: number?, -- when the ball reached the keeper's plane
+	keeperPoint: Vector3?,
+	keeperKind: string?, -- response returned by the keeper callback, if any
+	held: boolean, -- caught: the path ends in the keeper's hands
+	duration: number,
+}
+
 function ShotPhysics.ballSpot(): Vector3
 	return Vector3.new(0, BALL_RADIUS, ShotConfig.ShotDistance)
 end
@@ -122,43 +172,284 @@ end
 -- Aim X in -1..1 and Y in 0..1 cover exactly the area where the whole ball fits inside the
 -- goal mouth, so aiming at the edge means grazing the frame.
 function ShotPhysics.aimToGoalPoint(aimX: number, aimY: number): Vector3
-	local halfWidth = Goal.Width / 2 - BALL_RADIUS
+	local halfWidth = HALF_WIDTH - BALL_RADIUS
 	local x = math.clamp(aimX, -1, 1) * halfWidth
 	local y = BALL_RADIUS + math.clamp(aimY, 0, 1) * (Goal.Height - 2 * BALL_RADIUS)
 	return Vector3.new(x, y, 0)
 end
 
 function ShotPhysics.goalPointToAim(point: Vector3): (number, number)
-	local halfWidth = Goal.Width / 2 - BALL_RADIUS
+	local halfWidth = HALF_WIDTH - BALL_RADIUS
 	local aimX = math.clamp(point.X / halfWidth, -1, 1)
 	local aimY = math.clamp((point.Y - BALL_RADIUS) / (Goal.Height - 2 * BALL_RADIUS), 0, 1)
 	return aimX, aimY
 end
 
 function ShotPhysics.ballSpeed(power: number): number
-	local p = math.clamp(power, 0, 1)
-	return ShotConfig.MinBallSpeed + (ShotConfig.MaxBallSpeed - ShotConfig.MinBallSpeed) * p
-end
-
-function ShotPhysics.flightTime(start: Vector3, target: Vector3, power: number): number
-	return (target - start).Magnitude / ShotPhysics.ballSpeed(power)
-end
-
--- Initial velocity of a projectile that leaves `start` and is at `target` after `flightTime`.
-function ShotPhysics.launchVelocity(start: Vector3, target: Vector3, flightTime: number): Vector3
-	return (target - start) / flightTime - GRAVITY * (flightTime / 2)
-end
-
-function ShotPhysics.positionAt(start: Vector3, velocity: Vector3, t: number): Vector3
-	return start + velocity * t + GRAVITY * (0.5 * t * t)
-end
-
-function ShotPhysics.velocityAt(velocity: Vector3, t: number): Vector3
-	return velocity + GRAVITY * t
+	return P.MinBallSpeed + (P.MaxBallSpeed - P.MinBallSpeed) * math.clamp(power, 0, 1)
 end
 
 function ShotPhysics.gravity(): Vector3
 	return GRAVITY
+end
+
+-- Spin chosen for a shot: side spin curls shots aimed at a post back towards the middle,
+-- top spin makes hard shots dip. Jitter (from the server's seeded RNG) varies each shot.
+function ShotPhysics.spinFor(aimX: number, power: number, jitterX: number?, jitterY: number?): Vector3
+	local top = -P.DipSpin * math.max(0, (power - 0.5) / 0.5)
+	local side = P.CurlSpin * math.clamp(aimX, -1, 1)
+	return Vector3.new(top + (jitterX or 0), side + (jitterY or 0), 0)
+end
+
+local function acceleration(v: Vector3, spin: Vector3): Vector3
+	return GRAVITY - v * (P.Drag * v.Magnitude) + spin:Cross(v) * P.Magnus
+end
+
+-- One midpoint (RK2) step of free flight.
+local function step(p: Vector3, v: Vector3, spin: Vector3, dt: number): (Vector3, Vector3)
+	local mid = v + acceleration(v, spin) * (dt / 2)
+	return p + mid * dt, v + acceleration(mid, spin) * dt
+end
+
+-- Free flight (no collisions) until the ball centre reaches the goal plane.
+local function crossFree(start: Vector3, v0: Vector3, spin: Vector3, dt: number): (Vector3?, number)
+	local p, v, w, t = start, v0, spin, 0
+	local decay = 1 - P.SpinDecay * dt
+	while t < P.MaxSimTime do
+		local nextP, nextV = step(p, v, w, dt)
+		t += dt
+		if nextP.Z <= 0 then
+			local f = p.Z / (p.Z - nextP.Z)
+			return p:Lerp(nextP, f), t - dt * (1 - f)
+		end
+		p, v, w = nextP, nextV, w * decay
+	end
+	return nil, t
+end
+
+-- Launch velocity whose free flight (with drag and spin) crosses the goal plane at `target`.
+function ShotPhysics.solveLaunch(start: Vector3, target: Vector3, power: number, spin: Vector3, dt: number?): Vector3
+	local stepSize = dt or P.SimStep
+	local flightTime = (target - start).Magnitude / ShotPhysics.ballSpeed(power)
+	-- Drag-free ballistic guess, then correct the miss a few times.
+	local v = (target - start) / flightTime - GRAVITY * (flightTime / 2)
+	for _ = 1, 8 do
+		local cross, t = crossFree(start, v, spin, stepSize)
+		if not cross then
+			break
+		end
+		local miss = target - cross
+		if math.abs(miss.X) + math.abs(miss.Y) < 0.01 then
+			break
+		end
+		v += Vector3.new(miss.X, miss.Y, 0) / t
+	end
+	return v
+end
+
+-- Free-flight points from the ball spot to the goal plane, for the aiming preview.
+function ShotPhysics.previewPath(target: Vector3, power: number, spin: Vector3, count: number): { Vector3 }
+	local dt = 1 / 120
+	local start = ShotPhysics.ballSpot()
+	local v0 = ShotPhysics.solveLaunch(start, target, power, spin, dt)
+	local _, total = crossFree(start, v0, spin, dt)
+	local points = table.create(count)
+	local p, v, w, t = start, v0, spin, 0
+	local nextSample = total / (count + 1)
+	while #points < count and t < total do
+		p, v = step(p, v, w, dt)
+		w *= 1 - P.SpinDecay * dt
+		t += dt
+		if t >= nextSample then
+			table.insert(points, p)
+			nextSample += total / (count + 1)
+		end
+	end
+	return points
+end
+
+local function closestOnSegment(p: Vector3, a: Vector3, b: Vector3): Vector3
+	local ab = b - a
+	local t = math.clamp((p - a):Dot(ab) / ab:Dot(ab), 0, 1)
+	return a + ab * t
+end
+
+local FRAME_SEGMENTS = {
+	{ "Post", Vector3.new(-POST_X, 0, 0), Vector3.new(-POST_X, BAR_Y, 0) },
+	{ "Post", Vector3.new(POST_X, 0, 0), Vector3.new(POST_X, BAR_Y, 0) },
+	{ "Crossbar", Vector3.new(-POST_X, BAR_Y, 0), Vector3.new(POST_X, BAR_Y, 0) },
+}
+
+-- Full flight with collisions: keeper (via callback), posts, crossbar, net, boards and ground.
+-- `keeperPlaneZ`/`keeper` are optional; the callback is called once, when the ball first reaches
+-- that plane, and may return CATCH (path ends there) or PARRY with a new velocity.
+function ShotPhysics.simulate(
+	start: Vector3,
+	v0: Vector3,
+	spin: Vector3,
+	keeperPlaneZ: number?,
+	keeper: ((t: number, pos: Vector3, vel: Vector3) -> KeeperResponse?)?
+): SimResult
+	local dt = P.SimStep
+	local stepsPerSample = math.max(1, math.round(P.SampleStep / dt))
+	local decay = 1 - P.SpinDecay * dt
+	local result: SimResult = { path = { start }, events = {}, held = false, duration = 0 }
+	local events = result.events
+
+	local p, v, w, t = start, v0, spin, 0
+	local stepCount, restTime = 0, 0
+	local keeperChecked = keeperPlaneZ == nil
+	local touchedNet, touchedBoard = false, false
+
+	local function event(kind: string, at: Vector3, part: string?)
+		table.insert(events, { kind = kind, t = t, pos = at, part = part })
+	end
+
+	while t < P.MaxSimTime do
+		local prev = p
+		p, v = step(p, v, w, dt)
+		w *= decay
+		t += dt
+		stepCount += 1
+
+		-- Keeper plane
+		if not keeperChecked and prev.Z > keeperPlaneZ and p.Z <= keeperPlaneZ then
+			keeperChecked = true
+			local f = (prev.Z - keeperPlaneZ) / (prev.Z - p.Z)
+			local at = prev:Lerp(p, f)
+			result.keeperTime, result.keeperPoint = t - dt * (1 - f), at
+			local response = keeper and keeper(result.keeperTime, at, v)
+			if response then
+				result.keeperKind = response.kind
+				event("keeper", at, response.kind)
+				if response.kind == "CATCH" then
+					p = at
+					result.held = true
+					table.insert(result.path, p)
+					break
+				elseif response.velocity then
+					p, v, w = at, response.velocity, w * 0.3
+				end
+			end
+		end
+
+		-- Goal frame: sphere against the post / crossbar cylinders.
+		for _, segment in FRAME_SEGMENTS do
+			local closest = closestOnSegment(p, segment[2], segment[3])
+			local offset = p - closest
+			local distance = offset.Magnitude
+			if distance < FRAME_CONTACT and distance > 1e-4 then
+				local normal = offset / distance
+				local approach = v:Dot(normal)
+				p = closest + normal * FRAME_CONTACT
+				if approach < 0 then
+					local tangent = v - normal * approach
+					v = tangent * 0.9 - normal * (approach * P.FrameRestitution)
+					w = w * 0.5
+					if not result.frameTime then
+						result.frameTime, result.framePart = t, segment[1]
+					end
+					event("frame", p, segment[1])
+				end
+			end
+		end
+
+		-- Goal line
+		if not result.crossTime and prev.Z > 0 and p.Z <= 0 then
+			local f = prev.Z / (prev.Z - p.Z)
+			result.crossTime, result.crossPoint = t - dt * (1 - f), prev:Lerp(p, f)
+		end
+		if not result.goalTime and prev.Z >= -BALL_RADIUS and p.Z < -BALL_RADIUS
+			and math.abs(p.X) < HALF_WIDTH and p.Y < Goal.Height then
+			result.goalTime = t
+			event("goal", p)
+		end
+
+		-- Net: back, sides and roof, from inside the goal; side netting and roof from outside.
+		local inDepth = p.Z < 0 and p.Z > -Goal.NetDepth
+		local function netHit(at: Vector3)
+			if not touchedNet then
+				touchedNet = true
+				event("net", at)
+			end
+		end
+		if math.abs(p.X) < HALF_WIDTH and p.Y < Goal.Height and p.Z < -Goal.NetDepth + BALL_RADIUS and prev.Z >= -Goal.NetDepth + BALL_RADIUS then
+			p = Vector3.new(p.X, p.Y, -Goal.NetDepth + BALL_RADIUS)
+			v = Vector3.new(v.X * 0.4, v.Y * 0.4, -v.Z * P.NetDamping)
+			netHit(p)
+		end
+		if inDepth and p.Y < Goal.Height then
+			local inner = HALF_WIDTH - BALL_RADIUS
+			local outer = HALF_WIDTH + BALL_RADIUS
+			if math.abs(prev.X) <= inner and math.abs(p.X) > inner then
+				p = Vector3.new(math.sign(p.X) * inner, p.Y, p.Z)
+				v = Vector3.new(-v.X * P.NetDamping, v.Y, v.Z * 0.6)
+				netHit(p)
+			elseif math.abs(prev.X) >= outer and math.abs(p.X) < outer then
+				p = Vector3.new(math.sign(p.X) * outer, p.Y, p.Z)
+				v = Vector3.new(-v.X * P.NetDamping, v.Y, v.Z * 0.5)
+				netHit(p)
+			end
+		end
+		if inDepth and math.abs(p.X) < HALF_WIDTH then
+			local under, over = Goal.Height - BALL_RADIUS, Goal.Height + BALL_RADIUS
+			if prev.Y <= under and p.Y > under then
+				p = Vector3.new(p.X, under, p.Z)
+				v = Vector3.new(v.X * 0.6, -v.Y * P.NetDamping, v.Z * 0.6)
+				netHit(p)
+			elseif prev.Y >= over and p.Y < over then
+				p = Vector3.new(p.X, over, p.Z)
+				v = Vector3.new(v.X * 0.5, -v.Y * 0.15, v.Z * 0.5)
+				netHit(p)
+			end
+		end
+
+		-- Advertising boards behind the goal
+		if p.Z < Arena.BoardZ + BALL_RADIUS and prev.Z >= Arena.BoardZ + BALL_RADIUS and p.Y < Arena.BoardHeight + BALL_RADIUS then
+			p = Vector3.new(p.X, p.Y, Arena.BoardZ + BALL_RADIUS)
+			v = Vector3.new(v.X * 0.8, v.Y, -v.Z * P.BoardRestitution)
+			if not touchedBoard then
+				touchedBoard = true
+				event("board", p)
+			end
+		end
+
+		-- Ground: bounce, then roll with friction.
+		if p.Y < BALL_RADIUS then
+			p = Vector3.new(p.X, BALL_RADIUS, p.Z)
+			if v.Y < -3 then
+				local keep = 1 - P.GroundFriction
+				v = Vector3.new(v.X * keep, -v.Y * P.GroundRestitution, v.Z * keep)
+				event("bounce", p)
+			else
+				local flat = Vector3.new(v.X, 0, v.Z)
+				local speed = flat.Magnitude
+				local slowed = math.max(0, speed - P.RollingFriction * dt)
+				v = if speed > 1e-3 then flat * (slowed / speed) else Vector3.zero
+				w = Vector3.new(v.Z, 0, -v.X) / BALL_RADIUS -- rolling, no more curl
+			end
+		end
+
+		if stepCount % stepsPerSample == 0 then
+			table.insert(result.path, p)
+		end
+
+		-- Stop when the ball is resting or has flown into the stands.
+		if v.Magnitude < 0.5 and p.Y <= BALL_RADIUS + 0.01 then
+			restTime += dt
+			if restTime > 0.25 then
+				break
+			end
+		else
+			restTime = 0
+		end
+		if p.Z < Arena.BoardZ - 12 or p.Y < -5 then
+			break
+		end
+	end
+
+	result.duration = t
+	return result
 end
 
 local function distanceToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number
@@ -168,21 +459,18 @@ local function distanceToSegment(px: number, py: number, ax: number, ay: number,
 	return math.sqrt(dx * dx + dy * dy)
 end
 
--- Classifies the ball centre where it crosses the goal plane (Z = 0).
+-- Classifies the ball centre where it crosses the goal plane (Z = 0), ignoring collisions.
 function ShotPhysics.classify(point: Vector3): string
-	local postX = Goal.Width / 2 + Goal.PostRadius
-	local barY = Goal.Height + Goal.PostRadius
 	local x, y = point.X, point.Y
-
 	local frameDistance = math.min(
-		distanceToSegment(x, y, -postX, 0, -postX, barY),
-		distanceToSegment(x, y, postX, 0, postX, barY),
-		distanceToSegment(x, y, -postX, barY, postX, barY)
+		distanceToSegment(x, y, -POST_X, 0, -POST_X, BAR_Y),
+		distanceToSegment(x, y, POST_X, 0, POST_X, BAR_Y),
+		distanceToSegment(x, y, -POST_X, BAR_Y, POST_X, BAR_Y)
 	)
 	if frameDistance < Goal.PostRadius + BALL_RADIUS * (1 - Goal.FrameHitDepth) then
 		return ShotPhysics.Zone.Frame
 	end
-	if math.abs(x) < postX and y < barY then
+	if math.abs(x) < POST_X and y < BAR_Y then
 		return ShotPhysics.Zone.OnTarget
 	end
 	return ShotPhysics.Zone.Wide
@@ -198,7 +486,139 @@ return ShotPhysics
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="Script" referent="5">
+    <Item class="ModuleScript" referent="5">
+      <Properties>
+        <string name="Name">KeeperBuilder</string>
+        <string name="Source"><![CDATA[-- Builds the goalkeeper model on the server. The client animates it locally
+-- (KeeperAnimator); the server never moves it, so all players see their own keeper.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
+
+local Keeper = ShotConfig.Goalkeeper
+
+local SKIN = Color3.fromRGB(234, 192, 160)
+local SHIRT = Color3.fromRGB(255, 191, 31) -- gold
+local SHORTS = Color3.fromRGB(43, 18, 80) -- dark purple
+local GLOVES = Color3.fromRGB(255, 45, 85) -- red
+local BOOTS = Color3.fromRGB(20, 14, 30)
+
+local KIT = {
+	Head = SKIN,
+	UpperTorso = SHIRT,
+	LowerTorso = SHORTS,
+	LeftUpperArm = SHIRT,
+	RightUpperArm = SHIRT,
+	LeftLowerArm = SHIRT,
+	RightLowerArm = SHIRT,
+	LeftHand = GLOVES,
+	RightHand = GLOVES,
+	LeftUpperLeg = SHORTS,
+	RightUpperLeg = SHORTS,
+	LeftLowerLeg = SHIRT,
+	RightLowerLeg = SHIRT,
+	LeftFoot = BOOTS,
+	RightFoot = BOOTS,
+}
+
+local KeeperBuilder = {}
+
+local function makeRig(): Model
+	local description = Instance.new("HumanoidDescription")
+	local model = Players:CreateHumanoidModelFromDescription(description, Enum.HumanoidRigType.R15)
+	model.Name = "Goalkeeper"
+	local bodyColors = model:FindFirstChildOfClass("BodyColors")
+	if bodyColors then
+		bodyColors:Destroy() -- otherwise it overrides the kit colours below
+	end
+	for _, part in model:GetDescendants() do
+		if part:IsA("BasePart") then
+			part.CanCollide = false
+			part.CanQuery = false
+			part.CanTouch = false
+			local color = KIT[part.Name]
+			if color then
+				part.Color = color
+			end
+		end
+	end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+		humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+		-- Stops the default Animator from fighting the procedural animation.
+		local animator = humanoid:FindFirstChildOfClass("Animator")
+		if animator then
+			animator:Destroy()
+		end
+	end
+	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart
+	root.Anchored = true -- anchors the whole rig; the client moves it with PivotTo
+	model.PrimaryPart = root
+	model:ScaleTo(Keeper.ModelScale)
+	model:SetAttribute("Rig", "R15")
+	return model
+end
+
+-- Simple block figure, used only if the R15 rig can't be created.
+local function makeBlocks(): Model
+	local model = Instance.new("Model")
+	model.Name = "Goalkeeper"
+	local s = Keeper.ModelScale
+	local specs = {
+		{ "Torso", Vector3.new(2, 2, 1), Vector3.new(0, 3.9, 0), SHIRT },
+		{ "Head", Vector3.new(1.2, 1.2, 1.2), Vector3.new(0, 5.5, 0), SKIN },
+		{ "LeftLeg", Vector3.new(0.9, 2.9, 0.9), Vector3.new(-0.5, 1.45, 0), SHORTS },
+		{ "RightLeg", Vector3.new(0.9, 2.9, 0.9), Vector3.new(0.5, 1.45, 0), SHORTS },
+		{ "LeftArm", Vector3.new(0.7, 2.2, 0.7), Vector3.new(-1.4, 3.8, 0), SHIRT },
+		{ "RightArm", Vector3.new(0.7, 2.2, 0.7), Vector3.new(1.4, 3.8, 0), SHIRT },
+	}
+	for _, spec in specs do
+		local part = Instance.new("Part")
+		part.Name = spec[1]
+		part.Size = spec[2] * s
+		part.CFrame = CFrame.new(spec[3] * s)
+		part.Color = spec[4]
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Parent = model
+		if spec[1] == "Torso" then
+			model.PrimaryPart = part
+		end
+	end
+	model:SetAttribute("Rig", "Blocks")
+	return model
+end
+
+function KeeperBuilder.build(scene: Instance): Model?
+	if not Keeper.Enabled then
+		return nil
+	end
+	local ok, model = pcall(makeRig)
+	if not ok then
+		warn("[KeeperBuilder] Could not create the R15 goalkeeper, using a simple one:", model)
+		model = makeBlocks()
+	end
+	-- Face the shooter (+Z) and stand with the feet on the ground.
+	local facing = CFrame.Angles(0, math.pi, 0)
+	model:PivotTo(facing)
+	local box, size = model:GetBoundingBox()
+	local lift = -(box.Position.Y - size.Y / 2)
+	model:PivotTo(CFrame.new(Keeper.HomeX, lift, Keeper.HomeZ) * facing)
+	model.Parent = scene
+	print(string.format("[KeeperBuilder] Goalkeeper ready (%s, %.1f studs tall)", model:GetAttribute("Rig"), size.Y))
+	return model
+end
+
+return KeeperBuilder
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="Script" referent="6">
       <Properties>
         <string name="Name">Main</string>
         <token name="RunContext">0</token>
@@ -261,54 +681,100 @@ for _, name in REMOTE_NAMES do
 end
 
 local SceneBuilder = requireServerModule("SceneBuilder")
+local KeeperBuilder = requireServerModule("KeeperBuilder")
 local EpisodeService = requireServerModule("EpisodeService")
 
-SceneBuilder.build()
+local scene = SceneBuilder.build()
+KeeperBuilder.build(scene)
 EpisodeService.init(remotes)
 
 print("[Main] Stage 1 shot prototype ready")
 ]]></string>
       </Properties>
     </Item>
-    <Item class="ModuleScript" referent="6">
+    <Item class="ModuleScript" referent="7">
       <Properties>
         <string name="Name">SceneBuilder</string>
-        <string name="Source"><![CDATA[-- Builds the training ground at runtime: pitch, markings, goal with net, back wall with
--- boards, the goalkeeper and lighting. Goal dimensions come from ShotConfig so the visuals
--- always match the geometry the server uses for outcomes.
+        <string name="Source"><![CDATA[-- Builds the evening stadium at runtime: striped pitch and markings, goal with net, LED boards,
+-- a two-tier stand with crowd, floodlights, a city skyline, a sunset backdrop and dusk lighting.
+-- Goal dimensions come from ShotConfig so the visuals always match the geometry the server uses.
+--
+-- Framed for the fixed shot camera (ShotConfig.Camera): inside the pitch area there are only
+-- flat ground details and the goal; the stand fills the band above the goal and the sky,
+-- floodlights and skyline show above the stand roof.
 
 local Lighting = game:GetService("Lighting")
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
 
 local Goal = ShotConfig.Goal
-local Keeper = ShotConfig.Goalkeeper
+local Arena = ShotConfig.Arena
+local CameraConfig = ShotConfig.Camera
 local VERTICAL = CFrame.Angles(0, 0, math.pi / 2) -- cylinder parts are long along X
 
-local WHITE = Color3.new(1, 1, 1)
-local LIME = Color3.fromRGB(163, 230, 53)
-local WALL = Color3.fromRGB(10, 22, 18)
-local BOARD = Color3.fromRGB(16, 34, 29)
-local GRASS_A = Color3.fromRGB(46, 101, 54)
-local GRASS_B = Color3.fromRGB(41, 92, 49)
-local MONTSERRAT = "rbxasset://fonts/families/Montserrat.json"
+local function rgb(r: number, g: number, b: number): Color3
+	return Color3.fromRGB(r, g, b)
+end
 
+-- Palette from the New Football Star UI kit.
+local NAVY = rgb(18, 11, 36)
+local PURPLE = rgb(43, 18, 80)
+local VIOLET = rgb(90, 47, 194)
+local VIOLET_BRIGHT = rgb(123, 77, 255)
+local RED = rgb(255, 45, 85)
+local GOLD = rgb(255, 191, 31)
+local CREAM = rgb(247, 236, 214)
+local PINK = rgb(255, 79, 163)
+local WHITE = Color3.new(1, 1, 1)
+
+local GRASS_A = rgb(58, 128, 60)
+local GRASS_B = rgb(50, 114, 54)
+local GRASS_EDGE = rgb(42, 96, 47)
+local STEP_A = rgb(43, 18, 80)
+local STEP_B = rgb(36, 15, 66)
+local AISLE = rgb(74, 44, 120)
+local HEAVY_ITALIC = Font.new("rbxasset://fonts/families/Montserrat.json", Enum.FontWeight.Heavy, Enum.FontStyle.Italic)
+
+local SEED = 7404 -- fixed so the crowd, skyline and clouds look the same every session
+
+-- Pitch
 local PITCH_HALF_WIDTH = 120
-local PITCH_BACK, PITCH_FRONT = -16, 130
-local STRIPE_DEPTH = 9
-local WALL_Z, WALL_HEIGHT = -16, 7
+local STRIPE_DEPTH = 8
+local PITCH_BACK = -24 -- a stripe boundary lands on the goal line
+local PITCH_FRONT = 104
+
+-- Stand behind the goal (z is negative behind the goal line).
+local STAND_HALF_WIDTH = 105
+local STAND_FRONT_Z = Arena.BoardZ - 3 -- walkway between the boards and the stand
+local STAND_WALL_HEIGHT = 4.8
+local AISLES = { -56, -20, 20, 56 }
+local AISLE_WIDTH = 2.4
+local SEAT_SPACING = 1.65
+
+local CROWD_SHIRTS = { VIOLET, VIOLET, VIOLET_BRIGHT, RED, RED, GOLD, CREAM, PINK, PURPLE, WHITE, rgb(255, 140, 40) }
+local CROWD_SKIN = { rgb(240, 196, 150), rgb(214, 160, 112), rgb(160, 104, 66), rgb(104, 64, 40) }
+local WINDOW_COLOURS = { GOLD, GOLD, CREAM, rgb(255, 214, 140), PINK, VIOLET_BRIGHT }
+local BUILDING_COLOURS = { rgb(34, 16, 64), rgb(43, 18, 80), rgb(28, 14, 54), rgb(52, 24, 96) }
+
+-- Horizontal half-width the shot camera sees at depth z on screens up to 2.25:1, so crowd
+-- blocks are only spent where they can appear.
+local VIEW_SLOPE = math.tan(math.rad(CameraConfig.FieldOfView / 2)) * 2.25
+local function visibleHalfWidth(z: number): number
+	return (CameraConfig.Position.Z - z) * VIEW_SLOPE
+end
 
 local SceneBuilder = {}
 
 -- Decorative, anchored, no collisions: nothing in Stage 1 relies on Roblox physics.
+-- Shadows are opt-in so the low dusk sun cannot throw the stand's shadow over the goal.
 local function makePart(props: { [string]: any }): Part
 	local part = Instance.new("Part")
 	part.Anchored = true
 	part.CanCollide = false
 	part.CanTouch = false
 	part.CanQuery = false
+	part.CastShadow = false
 	part.TopSurface = Enum.SurfaceType.Smooth
 	part.BottomSurface = Enum.SurfaceType.Smooth
 	part.Material = Enum.Material.SmoothPlastic
@@ -338,6 +804,22 @@ local function folder(name: string, parent: Instance): Folder
 	return create("Folder", { Name = name, Parent = parent })
 end
 
+local function corner(parent: Instance)
+	create("UICorner", { CornerRadius = UDim.new(0.5, 0), Parent = parent })
+end
+
+-- Thin axis-aligned bar between two points.
+local function bar(parent: Instance, name: string, from: Vector3, to: Vector3, thickness: number, color: Color3): Part
+	local delta = to - from
+	return makePart({
+		Name = name,
+		Size = Vector3.new(math.abs(delta.X) + thickness, math.abs(delta.Y) + thickness, math.abs(delta.Z) + thickness),
+		CFrame = CFrame.new((from + to) / 2),
+		Color = color,
+		Parent = parent,
+	})
+end
+
 -- The default "Baseplate" template has a baseplate at ground level (flickers through the
 -- pitch) and a SpawnLocation in the goal mouth. Removed for this play session only.
 local function clearDefaultTemplate()
@@ -348,13 +830,74 @@ local function clearDefaultTemplate()
 	end
 end
 
+type LedStyle = { from: Color3, to: Color3, textColor: Color3, text: string }
+
+-- Self-lit LED panel drawn on the face pointing at the pitch (+Z).
+local function ledFace(part: BasePart, style: LedStyle, pixelsPerStud: number, textHeight: number)
+	local gui = create("SurfaceGui", {
+		Face = Enum.NormalId.Back,
+		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
+		PixelsPerStud = pixelsPerStud,
+		LightInfluence = 0,
+		Brightness = 1.6,
+		Parent = part,
+	})
+	-- The inset leaves a dark seam between neighbouring panels.
+	local panel = create("Frame", {
+		Name = "Panel",
+		Position = UDim2.fromOffset(3, 3),
+		Size = UDim2.new(1, -6, 1, -6),
+		BackgroundColor3 = WHITE,
+		BorderSizePixel = 0,
+		Parent = gui,
+	})
+	create("UIGradient", { Color = ColorSequence.new(style.from, style.to), Rotation = 90, Parent = panel })
+	create("Frame", {
+		Name = "Shine",
+		Size = UDim2.fromScale(1, 0.14),
+		BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0.82,
+		BorderSizePixel = 0,
+		Parent = panel,
+	})
+	create("TextLabel", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.54),
+		Size = UDim2.fromScale(0.92, textHeight),
+		BackgroundTransparency = 1,
+		RichText = true,
+		TextScaled = true,
+		FontFace = HEAVY_ITALIC,
+		TextColor3 = style.textColor,
+		TextStrokeColor3 = NAVY,
+		TextStrokeTransparency = 0.15,
+		Text = style.text,
+		Parent = panel,
+	})
+end
+
+local BOARD_STYLES: { LedStyle } = {
+	{ from = VIOLET_BRIGHT, to = PURPLE, textColor = CREAM, text = 'NEW FOOTBALL <font color="#FF2D55">STAR</font> <font color="#FFBF1F">★</font>' },
+	{ from = GOLD, to = rgb(255, 138, 20), textColor = NAVY, text = '<font color="#FF2D55">★</font> SHOOTING DRILL' },
+	{ from = RED, to = rgb(140, 12, 60), textColor = CREAM, text = 'NFS <font color="#FFBF1F">★</font>' },
+	{ from = PURPLE, to = NAVY, textColor = GOLD, text = "PLAY ▶" },
+	{ from = NAVY, to = VIOLET, textColor = CREAM, text = '<font color="#FFBF1F">NFS</font> ARENA' },
+}
+
+local RIBBON_STYLE: LedStyle = {
+	from = PINK,
+	to = VIOLET,
+	textColor = CREAM,
+	text = 'NEW FOOTBALL STAR  <font color="#FFBF1F">★</font>  NFS  <font color="#FFBF1F">★</font>',
+}
+
 local function buildPitch(scene: Instance)
 	local pitch = folder("Pitch", scene)
 	makePart({
 		Name = "Surround",
-		Size = Vector3.new(600, 1, 600),
-		CFrame = CFrame.new(0, -0.6, 60),
-		Color = Color3.fromRGB(36, 80, 43),
+		Size = Vector3.new(700, 1, 700),
+		CFrame = CFrame.new(0, -0.6, 0),
+		Color = GRASS_EDGE,
 		Material = Enum.Material.Grass,
 		Parent = pitch,
 	})
@@ -369,62 +912,106 @@ local function buildPitch(scene: Instance)
 			Parent = pitch,
 		})
 	end
+end
 
-	-- Real-world scale (goal width 7.32 m = 24 studs), so the ball sits on the penalty spot.
-	local lines = folder("Markings", scene)
+local function buildMarkings(scene: Instance)
+	-- Real-world scale (3.28 studs per metre) measured from the posts, so the boxes keep their
+	-- proportions if the goal is resized.
+	local markings = folder("Markings", scene)
 	local width = 0.45
+	local hw = Goal.Width / 2
 	local function line(x1: number, z1: number, x2: number, z2: number)
 		makePart({
 			Name = "Line",
 			Size = Vector3.new(math.abs(x2 - x1) + width, 0.06, math.abs(z2 - z1) + width),
 			CFrame = CFrame.new((x1 + x2) / 2, 0, (z1 + z2) / 2),
 			Color = WHITE,
-			CastShadow = false,
-			Parent = lines,
+			Parent = markings,
 		})
 	end
-	line(-PITCH_HALF_WIDTH, 0, PITCH_HALF_WIDTH, 0)
-	for _, box in { { 30, 18 }, { 66, 54 } } do -- six-yard box, penalty box
+	line(-PITCH_HALF_WIDTH + 5, 0, PITCH_HALF_WIDTH - 5, 0)
+	local penaltyDepth = 54
+	for _, box in { { hw + 15, 18 }, { hw + 51, penaltyDepth } } do -- six-yard box, penalty box
 		local halfWidth, depth = box[1], box[2]
 		line(-halfWidth, 0, -halfWidth, depth)
 		line(halfWidth, 0, halfWidth, depth)
 		line(-halfWidth, depth, halfWidth, depth)
 	end
 
-	-- Lime ring around the ball spot, drawn as a crisp SurfaceGui circle.
+	-- Penalty arc: the part of a 30-stud circle around the penalty mark outside the box.
+	local spotZ, radius = 36, 30
+	local limit = math.acos((penaltyDepth - spotZ) / radius)
+	local segments = 10
+	local function arcPoint(angle: number): Vector3
+		return Vector3.new(radius * math.sin(angle), 0, spotZ + radius * math.cos(angle))
+	end
+	for i = 0, segments - 1 do
+		local a = arcPoint(-limit + 2 * limit * i / segments)
+		local b = arcPoint(-limit + 2 * limit * (i + 1) / segments)
+		makePart({
+			Name = "Arc",
+			Size = Vector3.new(width, 0.06, (b - a).Magnitude + 0.1),
+			CFrame = CFrame.lookAt((a + b) / 2, b),
+			Color = WHITE,
+			Parent = markings,
+		})
+	end
+
+	-- Glowing gold ring around the ball spot, drawn as a crisp SurfaceGui circle.
 	local spot = makePart({
 		Name = "BallSpotRing",
-		Size = Vector3.new(4, 0.05, 4),
+		Size = Vector3.new(5, 0.05, 5),
 		CFrame = CFrame.new(0, 0.04, ShotConfig.ShotDistance),
 		Transparency = 1,
-		CastShadow = false,
-		Parent = lines,
+		Parent = markings,
 	})
 	local gui = create("SurfaceGui", {
 		Face = Enum.NormalId.Top,
 		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
 		PixelsPerStud = 50,
 		LightInfluence = 0,
-		Brightness = 1.5,
+		Brightness = 2,
 		Parent = spot,
 	})
+	local glow = create("Frame", {
+		Name = "Glow",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(1, -4, 1, -4),
+		BackgroundColor3 = GOLD,
+		BackgroundTransparency = 0.84,
+		BorderSizePixel = 0,
+		Parent = gui,
+	})
+	corner(glow)
 	local ring = create("Frame", {
 		Name = "Ring",
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
-		Size = UDim2.new(1, -12, 1, -12),
-		BackgroundColor3 = LIME,
-		BackgroundTransparency = 0.85,
+		Size = UDim2.fromScale(0.74, 0.74),
+		BackgroundColor3 = VIOLET_BRIGHT,
+		BackgroundTransparency = 0.72,
+		BorderSizePixel = 0,
 		Parent = gui,
 	})
-	create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = ring })
-	create("UIStroke", { Color = LIME, Thickness = 6, Parent = ring })
+	corner(ring)
+	create("UIStroke", { Color = GOLD, Thickness = 7, Parent = ring })
+	local dot = create("Frame", {
+		Name = "Spot",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(0.16, 0.16),
+		BackgroundColor3 = WHITE,
+		BorderSizePixel = 0,
+		Parent = gui,
+	})
+	corner(dot)
 end
 
 -- Transparent panel with a 1-stud grid of lines drawn on one face. SurfaceGui lines are
 -- filtered like a texture, so they stay crisp at distance instead of flickering like thin parts.
 local function netPanel(parent: Instance, name: string, size: Vector3, cframe: CFrame, face: Enum.NormalId, u: number, v: number)
-	local part = makePart({ Name = name, Size = size, CFrame = cframe, Transparency = 1, CastShadow = false, Parent = parent })
+	local part = makePart({ Name = name, Size = size, CFrame = cframe, Transparency = 1, Parent = parent })
 	local gui = create("SurfaceGui", {
 		Face = face,
 		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
@@ -476,6 +1063,7 @@ local function buildGoal(scene: Instance)
 			CFrame = CFrame.new(side * postX, postLength / 2, 0) * VERTICAL,
 			Color = WHITE,
 			Reflectance = 0.05,
+			CastShadow = true,
 			Parent = goal,
 		})
 	end
@@ -486,26 +1074,23 @@ local function buildGoal(scene: Instance)
 		CFrame = CFrame.new(0, H + Goal.PostRadius, 0),
 		Color = WHITE,
 		Reflectance = 0.05,
+		CastShadow = true,
 		Parent = goal,
 	})
 
-	-- Thin support frame at the back of the net.
-	local support = Color3.fromRGB(215, 220, 218)
+	-- Box frame holding the net: back uprights and top, side rails and ground bars.
+	local support = rgb(222, 222, 230)
 	local function rod(from: Vector3, to: Vector3)
-		local delta = to - from
-		makePart({
-			Name = "Support",
-			Size = Vector3.new(math.abs(delta.X) + 0.18, math.abs(delta.Y) + 0.18, math.abs(delta.Z) + 0.18),
-			CFrame = CFrame.new((from + to) / 2),
-			Color = support,
-			Parent = goal,
-		})
+		bar(goal, "Support", from, to, 0.18, support)
 	end
 	rod(Vector3.new(-hw, 0, -D), Vector3.new(-hw, H, -D))
 	rod(Vector3.new(hw, 0, -D), Vector3.new(hw, H, -D))
 	rod(Vector3.new(-hw, H, -D), Vector3.new(hw, H, -D))
 	rod(Vector3.new(-hw, H, 0), Vector3.new(-hw, H, -D))
 	rod(Vector3.new(hw, H, 0), Vector3.new(hw, H, -D))
+	rod(Vector3.new(-hw, 0.05, -D), Vector3.new(hw, 0.05, -D))
+	rod(Vector3.new(-hw, 0.05, 0), Vector3.new(-hw, 0.05, -D))
+	rod(Vector3.new(hw, 0.05, 0), Vector3.new(hw, 0.05, -D))
 
 	local net = folder("Net", goal)
 	-- Faces point into the goal, towards the camera.
@@ -517,148 +1102,419 @@ local function buildGoal(scene: Instance)
 	goal.Parent = scene
 end
 
-local function buildWall(scene: Instance)
-	local wall = folder("Wall", scene)
-	local length = PITCH_HALF_WIDTH * 2
-	makePart({
-		Name = "Wall",
-		Size = Vector3.new(length, WALL_HEIGHT, 1),
-		CFrame = CFrame.new(0, WALL_HEIGHT / 2, WALL_Z - 0.5),
-		Color = WALL,
-		Parent = wall,
-	})
-	makePart({
-		Name = "TopStrip",
-		Size = Vector3.new(length, 0.22, 1.1),
-		CFrame = CFrame.new(0, WALL_HEIGHT + 0.11, WALL_Z - 0.5),
-		Color = LIME,
-		Material = Enum.Material.Neon,
-		CastShadow = false,
-		Parent = wall,
-	})
-
-	for _, x in { -46, -28, 28, 46 } do
+-- LED advertising boards. Their front face is the plane the ball bounces off (Arena.BoardZ).
+local function buildBoards(scene: Instance)
+	local boards = folder("Boards", scene)
+	local height = Arena.BoardHeight
+	local width = 20
+	for index = -5, 5 do
 		local board = makePart({
 			Name = "Board",
-			Size = Vector3.new(16, 3.2, 0.3),
-			CFrame = CFrame.new(x, 3.2, WALL_Z + 0.2),
-			Color = BOARD,
-			Parent = wall,
+			Size = Vector3.new(width, height, 1),
+			CFrame = CFrame.new(index * width, height / 2, Arena.BoardZ - 0.5),
+			Color = NAVY,
+			Parent = boards,
 		})
-		local gui = create("SurfaceGui", {
-			Face = Enum.NormalId.Back, -- faces the pitch (+Z)
-			SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
-			PixelsPerStud = 40,
-			LightInfluence = 0.3,
-			Parent = board,
+		ledFace(board, BOARD_STYLES[index % #BOARD_STYLES + 1], 30, 0.6)
+	end
+	makePart({
+		Name = "TopStrip",
+		Size = Vector3.new(width * 11, 0.18, 0.9),
+		CFrame = CFrame.new(0, height + 0.09, Arena.BoardZ - 0.5),
+		Color = VIOLET_BRIGHT,
+		Material = Enum.Material.Neon,
+		Parent = boards,
+	})
+	makePart({
+		Name = "Walkway",
+		Size = Vector3.new(STAND_HALF_WIDTH * 2, 0.1, Arena.BoardZ - 1 - STAND_FRONT_Z),
+		CFrame = CFrame.new(0, 0.02, (Arena.BoardZ - 1 + STAND_FRONT_Z) / 2),
+		Color = NAVY,
+		Material = Enum.Material.Concrete,
+		Parent = boards,
+	})
+end
+
+local function inAisle(x: number): boolean
+	for _, aisle in AISLES do
+		if math.abs(x - aisle) < AISLE_WIDTH / 2 + 0.6 then
+			return true
+		end
+	end
+	return false
+end
+
+-- One fan: shirt block with a head on top.
+local function addFan(crowd: Instance, rng: Random, x: number, floorY: number, z: number)
+	local body = rng:NextNumber(1.0, 1.5)
+	local shirt = CROWD_SHIRTS[rng:NextInteger(1, #CROWD_SHIRTS)]
+	makePart({ Name = "Fan", Size = Vector3.new(1.25, body, 0.8), CFrame = CFrame.new(x, floorY + body / 2, z), Color = shirt, Parent = crowd })
+	makePart({
+		Name = "Head",
+		Size = Vector3.new(0.7, 0.7, 0.7),
+		CFrame = CFrame.new(x, floorY + body + 0.35, z),
+		Color = CROWD_SKIN[rng:NextInteger(1, #CROWD_SKIN)],
+		Parent = crowd,
+	})
+end
+
+-- Stepped seating rows with fans; returns the z behind the last row and its floor height.
+local function buildTier(stand: Instance, crowd: Instance, rng: Random, frontZ: number, baseY: number, rows: number, tread: number, rise: number): (number, number)
+	local z, top = frontZ, baseY
+	for row = 1, rows do
+		top += rise
+		local centreZ = z - tread / 2
+		makePart({
+			Name = "Step",
+			Size = Vector3.new(STAND_HALF_WIDTH * 2, top, tread),
+			CFrame = CFrame.new(0, top / 2, centreZ),
+			Color = if row % 2 == 0 then STEP_A else STEP_B,
+			Parent = stand,
 		})
-		create("UIStroke", { Color = LIME, Thickness = 2, Transparency = 0.6, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = create("Frame", {
-			Size = UDim2.new(1, -8, 1, -8),
-			Position = UDim2.fromOffset(4, 4),
-			BackgroundTransparency = 1,
-			Parent = gui,
-		}) })
-		create("TextLabel", {
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromScale(0.9, 0.34),
-			BackgroundTransparency = 1,
-			RichText = true,
-			TextScaled = true,
-			FontFace = Font.new(MONTSERRAT, Enum.FontWeight.Heavy, Enum.FontStyle.Italic),
-			TextColor3 = WHITE,
-			Text = '<font color="#A3E635">///  NFS</font> / TRAINING GROUND',
-			Parent = gui,
+		for _, x in AISLES do
+			makePart({ Name = "AisleStep", Size = Vector3.new(AISLE_WIDTH, 0.06, tread), CFrame = CFrame.new(x, top + 0.03, centreZ), Color = AISLE, Parent = stand })
+		end
+		local halfWidth = math.min(visibleHalfWidth(centreZ) + 4, STAND_HALF_WIDTH - 1)
+		local x = -halfWidth
+		while x <= halfWidth do
+			-- A few empty seats keep the crowd from reading as a solid wall.
+			if not inAisle(x) and rng:NextNumber() > 0.07 then
+				addFan(crowd, rng, x + rng:NextNumber(-0.15, 0.15), top, centreZ + rng:NextNumber(-0.25, 0.2))
+			end
+			x += SEAT_SPACING
+		end
+		z -= tread
+	end
+	return z, top
+end
+
+local function neonStrip(parent: Instance, name: string, y: number, z: number, color: Color3, halfWidth: number?)
+	local width = 2 * (halfWidth or STAND_HALF_WIDTH)
+	makePart({ Name = name, Size = Vector3.new(width, 0.28, 0.3), CFrame = CFrame.new(0, y, z), Color = color, Material = Enum.Material.Neon, Parent = parent })
+end
+
+local function buildStand(scene: Instance, rng: Random)
+	local stand = folder("Stand", scene)
+	local crowd = folder("Crowd", stand)
+	local width = STAND_HALF_WIDTH * 2
+
+	makePart({
+		Name = "FrontWall",
+		Size = Vector3.new(width, STAND_WALL_HEIGHT, 1),
+		CFrame = CFrame.new(0, STAND_WALL_HEIGHT / 2, STAND_FRONT_Z - 0.5),
+		Color = PURPLE,
+		Parent = stand,
+	})
+	neonStrip(stand, "WallGlow", STAND_WALL_HEIGHT - 0.1, STAND_FRONT_Z - 0.1, PINK)
+
+	-- Lower tier.
+	local lowerBack, lowerTop = buildTier(stand, crowd, rng, STAND_FRONT_Z - 1, STAND_WALL_HEIGHT, 5, 1.9, 0.8)
+
+	-- Balcony front of the upper tier with an LED ribbon, lifted clear of the lower crowd's heads.
+	local ribbonBottom, ribbonHeight = lowerTop + 2.2, 1.8
+	makePart({
+		Name = "BalconyWall",
+		Size = Vector3.new(width, ribbonBottom, 0.8),
+		CFrame = CFrame.new(0, ribbonBottom / 2, lowerBack - 0.4),
+		Color = NAVY,
+		Parent = stand,
+	})
+	for index = -2, 2 do
+		local ribbon = makePart({
+			Name = "Ribbon",
+			Size = Vector3.new(42, ribbonHeight, 0.8),
+			CFrame = CFrame.new(index * 42, ribbonBottom + ribbonHeight / 2, lowerBack - 0.4),
+			Color = NAVY,
+			Parent = stand,
+		})
+		ledFace(ribbon, RIBBON_STYLE, 20, 0.7)
+	end
+	neonStrip(stand, "RibbonGlow", ribbonBottom + ribbonHeight + 0.14, lowerBack - 0.3, VIOLET_BRIGHT)
+
+	-- Upper tier.
+	local upperBack, upperTop = buildTier(stand, crowd, rng, lowerBack - 0.8, ribbonBottom + ribbonHeight, 4, 2, 0.85)
+
+	-- Roof canopy over the upper tier: dark underside with lamps, neon-trimmed fascia on the front.
+	-- Kept low so the sky, floodlights and skyline get the top fifth of the shot camera's view.
+	local roofY = upperTop + 2.6
+	local roofFront = upperBack + 5
+	local roofDepth = roofFront - (upperBack - 1)
+	makePart({
+		Name = "BackWall",
+		Size = Vector3.new(width, roofY, 1),
+		CFrame = CFrame.new(0, roofY / 2, upperBack - 0.5),
+		Color = NAVY,
+		Parent = stand,
+	})
+	makePart({
+		Name = "Roof",
+		Size = Vector3.new(width, 0.6, roofDepth),
+		CFrame = CFrame.new(0, roofY + 0.3, roofFront - roofDepth / 2),
+		Color = NAVY,
+		Material = Enum.Material.Metal,
+		Parent = stand,
+	})
+	makePart({
+		Name = "Fascia",
+		Size = Vector3.new(width, 1.4, 0.5),
+		CFrame = CFrame.new(0, roofY + 0.3, roofFront - 0.25),
+		Color = PURPLE,
+		Parent = stand,
+	})
+	neonStrip(stand, "FasciaGlowLow", roofY - 0.25, roofFront + 0.1, VIOLET_BRIGHT)
+	neonStrip(stand, "FasciaGlowHigh", roofY + 0.85, roofFront + 0.1, PINK)
+	for x = -80, 80, 10 do
+		makePart({
+			Name = "RoofLamp",
+			Size = Vector3.new(2.4, 0.2, 1),
+			CFrame = CFrame.new(x, roofY - 0.1, roofFront - roofDepth * 0.45),
+			Color = CREAM,
+			Material = Enum.Material.Neon,
+			Parent = stand,
 		})
 	end
 end
 
-local KEEPER_COLORS = {
-	Head = Color3.fromRGB(234, 192, 160),
-	UpperTorso = Color3.fromRGB(255, 140, 0),
-	LowerTorso = Color3.fromRGB(28, 28, 32),
-	LeftUpperArm = Color3.fromRGB(255, 140, 0),
-	RightUpperArm = Color3.fromRGB(255, 140, 0),
-	LeftLowerArm = Color3.fromRGB(255, 140, 0),
-	RightLowerArm = Color3.fromRGB(255, 140, 0),
-	LeftHand = LIME, -- gloves
-	RightHand = LIME,
-	LeftUpperLeg = Color3.fromRGB(28, 28, 32),
-	RightUpperLeg = Color3.fromRGB(28, 28, 32),
-	LeftLowerLeg = Color3.fromRGB(255, 140, 0),
-	RightLowerLeg = Color3.fromRGB(255, 140, 0),
-	LeftFoot = Color3.fromRGB(20, 20, 22),
-	RightFoot = Color3.fromRGB(20, 20, 22),
+-- Floodlight towers rising above the roof, heads tilted at the penalty area.
+local FLOODLIGHTS = {
+	Vector3.new(-38, 28.5, -62),
+	Vector3.new(38, 28.5, -62),
+	Vector3.new(-66, 34.5, -100),
+	Vector3.new(66, 34.5, -100),
 }
 
-local function makeRigKeeper(): Model
-	local description = Instance.new("HumanoidDescription")
-	local model = Players:CreateHumanoidModelFromDescription(description, Enum.HumanoidRigType.R15)
-	model.Name = "Goalkeeper"
-	local bodyColors = model:FindFirstChildOfClass("BodyColors")
-	if bodyColors then
-		bodyColors:Destroy() -- otherwise it overrides the kit colours below
-	end
-	for _, part in model:GetDescendants() do
-		if part:IsA("BasePart") then
-			part.CanCollide = false
-			part.CanQuery = false
-			part.CanTouch = false
-			local color = KEEPER_COLORS[part.Name]
-			if color then
-				part.Color = color
+local function buildFloodlights(scene: Instance)
+	local lights = folder("Floodlights", scene)
+	local aim = Vector3.new(0, 0, 20)
+	for _, head in FLOODLIGHTS do
+		local poleHeight = head.Y - 2.5
+		makePart({
+			Name = "Pole",
+			Size = Vector3.new(1.3, poleHeight, 1.3),
+			CFrame = CFrame.new(head.X, poleHeight / 2, head.Z),
+			Color = PURPLE,
+			Material = Enum.Material.Metal,
+			Parent = lights,
+		})
+		local frame = CFrame.lookAt(head, aim)
+		local panel = makePart({
+			Name = "Head",
+			Size = Vector3.new(10.5, 6.4, 1),
+			CFrame = frame,
+			Color = NAVY,
+			Material = Enum.Material.Metal,
+			Parent = lights,
+		})
+		makePart({
+			Name = "Trim",
+			Size = Vector3.new(10.9, 0.35, 1.1),
+			CFrame = frame * CFrame.new(0, 3.3, 0),
+			Color = VIOLET_BRIGHT,
+			Material = Enum.Material.Neon,
+			Parent = lights,
+		})
+		for col = 0, 3 do
+			for row = 0, 2 do
+				makePart({
+					Name = "Lamp",
+					Size = Vector3.new(2.1, 1.5, 0.3),
+					-- Front face (-Z) of the head points at the pitch.
+					CFrame = frame * CFrame.new(-3.75 + col * 2.5, -1.9 + row * 1.9, -0.55),
+					Color = rgb(255, 248, 230),
+					Material = Enum.Material.Neon,
+					Parent = lights,
+				})
 			end
 		end
+		create("PointLight", { Brightness = 1.6, Range = 45, Color = rgb(255, 236, 214), Shadows = false, Parent = panel })
 	end
-	local humanoid = model:FindFirstChildOfClass("Humanoid")
-	if humanoid then
-		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-		humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
-	end
-	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart
-	root.Anchored = true -- anchors the whole rig; the client moves it with PivotTo
-	model.PrimaryPart = root
-	model:ScaleTo(Keeper.ModelScale)
-	return model
 end
 
--- Simple block figure, used only if the R15 rig can't be created.
-local function makeBlockKeeper(): Model
-	local model = Instance.new("Model")
-	model.Name = "Goalkeeper"
-	local specs = {
-		{ "Torso", Vector3.new(2.2, 2.2, 1.1), Vector3.new(0, 4.2, 0), KEEPER_COLORS.UpperTorso },
-		{ "Head", Vector3.new(1.3, 1.3, 1.3), Vector3.new(0, 6, 0), KEEPER_COLORS.Head },
-		{ "LeftLeg", Vector3.new(0.9, 3, 0.9), Vector3.new(-0.55, 1.5, 0), KEEPER_COLORS.LeftUpperLeg },
-		{ "RightLeg", Vector3.new(0.9, 3, 0.9), Vector3.new(0.55, 1.5, 0), KEEPER_COLORS.RightUpperLeg },
-		{ "LeftArm", Vector3.new(0.75, 2.4, 0.75), Vector3.new(-1.55, 4.1, 0), KEEPER_COLORS.LeftUpperArm },
-		{ "RightArm", Vector3.new(0.75, 2.4, 0.75), Vector3.new(1.55, 4.1, 0), KEEPER_COLORS.RightUpperArm },
+-- Dark purple towers far behind the stadium; lit windows only where they rise above the roof.
+local function buildSkyline(scene: Instance, rng: Random)
+	local skyline = folder("Skyline", scene)
+	local rowsOfTowers = {
+		{ z = -240, minHeight = 44, maxHeight = 60 },
+		{ z = -292, minHeight = 52, maxHeight = 76 },
 	}
-	for _, spec in specs do
-		local part = makePart({ Name = spec[1], Size = spec[2], CFrame = CFrame.new(spec[3]), Color = spec[4], Parent = model })
-		if spec[1] == "Torso" then
-			model.PrimaryPart = part
+	for rowIndex, row in rowsOfTowers do
+		local x = -225 + (rowIndex - 1) * 11
+		while x < 225 do
+			local width = rng:NextNumber(14, 30)
+			local height = rng:NextNumber(row.minHeight, row.maxHeight)
+			local landmark = rng:NextNumber() < 0.15
+			if landmark then
+				height += 14
+			end
+			local centreX = x + width / 2
+			local z = row.z - rng:NextNumber(0, 10)
+			local building = makePart({
+				Name = "Building",
+				Size = Vector3.new(width, height, 16),
+				CFrame = CFrame.new(centreX, height / 2, z),
+				Color = BUILDING_COLOURS[rng:NextInteger(1, #BUILDING_COLOURS)],
+				Parent = skyline,
+			})
+			local gui = create("SurfaceGui", {
+				Face = Enum.NormalId.Back,
+				SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
+				PixelsPerStud = 3,
+				LightInfluence = 0,
+				Brightness = 1.3,
+				Parent = building,
+			})
+			local cols = math.floor((width - 2) / 3)
+			local floors = math.floor(math.min(height - 4, 30) / 3.5)
+			for f = 0, floors - 1 do
+				for c = 0, cols - 1 do
+					if rng:NextNumber() < 0.3 then
+						create("Frame", {
+							Position = UDim2.fromScale((1.6 + c * 3) / width, (2 + f * 3.5) / height),
+							Size = UDim2.fromScale(1.6 / width, 2 / height),
+							BackgroundColor3 = WINDOW_COLOURS[rng:NextInteger(1, #WINDOW_COLOURS)],
+							BorderSizePixel = 0,
+							Parent = gui,
+						})
+					end
+				end
+			end
+			if landmark then
+				makePart({
+					Name = "Spire",
+					Size = Vector3.new(0.8, 9, 0.8),
+					CFrame = CFrame.new(centreX, height + 4.5, z),
+					Color = PURPLE,
+					Parent = skyline,
+				})
+				makePart({
+					Name = "Beacon",
+					Size = Vector3.new(1.2, 1.2, 1.2),
+					CFrame = CFrame.new(centreX, height + 9.4, z),
+					Color = RED,
+					Material = Enum.Material.Neon,
+					Parent = skyline,
+				})
+			end
+			x += width + rng:NextNumber(3, 9)
 		end
 	end
-	return model
 end
 
-local function buildKeeper(scene: Instance)
-	if not Keeper.Enabled then
-		return
+-- Painted sunset behind the skyline. The camera is fixed, so a self-lit card gives a reliable
+-- purple-to-orange sky without sky textures.
+local SKY_Z, SKY_BOTTOM, SKY_TOP, SKY_HALF_WIDTH = -420, 30, 150, 300
+
+local function buildSkyBackdrop(scene: Instance, rng: Random)
+	local sky = folder("Sky", scene)
+	local height = SKY_TOP - SKY_BOTTOM
+	local card = makePart({
+		Name = "SunsetCard",
+		Size = Vector3.new(SKY_HALF_WIDTH * 2, height, 1),
+		CFrame = CFrame.new(0, SKY_BOTTOM + height / 2, SKY_Z),
+		Color = NAVY,
+		Parent = sky,
+	})
+	local gui = create("SurfaceGui", {
+		Face = Enum.NormalId.Back,
+		SizingMode = Enum.SurfaceGuiSizingMode.FixedSize,
+		CanvasSize = Vector2.new(1500, 300),
+		LightInfluence = 0,
+		Brightness = 1.15,
+		Parent = card,
+	})
+	local function scaleY(y: number): number
+		return (SKY_TOP - y) / height
 	end
-	local ok, model = pcall(makeRigKeeper)
-	if not ok then
-		warn("[SceneBuilder] Could not create the R15 goalkeeper, using a simple one:", model)
-		model = makeBlockKeeper()
+	local function scaleX(x: number): number
+		return (x + SKY_HALF_WIDTH) / (SKY_HALF_WIDTH * 2)
 	end
-	-- Face the shooter (+Z) and stand with the feet on the ground.
-	local facing = CFrame.Angles(0, math.pi, 0)
-	model:PivotTo(facing)
-	local box, size = model:GetBoundingBox()
-	local lift = -(box.Position.Y - size.Y / 2)
-	model:PivotTo(CFrame.new(Keeper.HomeX, lift, Keeper.HomeZ) * facing)
-	model.Parent = scene
+	local gradient = create("Frame", { Name = "Gradient", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = gui })
+	create("UIGradient", {
+		Rotation = 90, -- keypoint 0 at the top
+		Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, NAVY),
+			ColorSequenceKeypoint.new(scaleY(124), PURPLE),
+			ColorSequenceKeypoint.new(scaleY(108), VIOLET),
+			ColorSequenceKeypoint.new(scaleY(96), rgb(170, 60, 190)),
+			ColorSequenceKeypoint.new(scaleY(86), rgb(255, 79, 140)),
+			ColorSequenceKeypoint.new(scaleY(76), rgb(255, 122, 70)),
+			ColorSequenceKeypoint.new(scaleY(66), rgb(255, 170, 50)),
+			ColorSequenceKeypoint.new(1, rgb(255, 214, 120)),
+		}),
+		Parent = gradient,
+	})
+
+	-- Setting sun peeking over the roof, right of the goal.
+	for _, disc in { { size = 72, color = GOLD, transparency = 0.75 }, { size = 36, color = rgb(255, 230, 160), transparency = 0 } } do
+		local sun = create("Frame", {
+			Name = "Sun",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(scaleX(85), scaleY(64)),
+			Size = UDim2.fromScale(disc.size / (SKY_HALF_WIDTH * 2), disc.size / height),
+			BackgroundColor3 = disc.color,
+			BackgroundTransparency = disc.transparency,
+			BorderSizePixel = 0,
+			Parent = gui,
+		})
+		corner(sun)
+	end
+
+	-- Blocky two-tone cloud streaks, dark above and lit by the sunset underneath.
+	for _ = 1, 12 do
+		local y = rng:NextNumber(84, 114)
+		local x = rng:NextNumber(-280, 280)
+		local length = rng:NextNumber(40, 120)
+		local thickness = rng:NextNumber(2.5, 5)
+		local high = y > 98
+		create("Frame", {
+			Name = "Cloud",
+			AnchorPoint = Vector2.new(0.5, 1),
+			Position = UDim2.fromScale(scaleX(x), scaleY(y)),
+			Size = UDim2.fromScale(length / (SKY_HALF_WIDTH * 2), thickness / height),
+			BackgroundColor3 = if high then rgb(64, 28, 128) else rgb(150, 50, 160),
+			BackgroundTransparency = 0.2,
+			BorderSizePixel = 0,
+			Parent = gui,
+		})
+		create("Frame", {
+			Name = "CloudLit",
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.fromScale(scaleX(x + length * 0.08), scaleY(y)),
+			Size = UDim2.fromScale(length * 0.7 / (SKY_HALF_WIDTH * 2), 1.2 / height),
+			BackgroundColor3 = if high then PINK else rgb(255, 150, 80),
+			BackgroundTransparency = 0.25,
+			BorderSizePixel = 0,
+			Parent = gui,
+		})
+	end
+end
+
+-- Non-shadow floodlighting on the goal mouth and ball spot, mounted above the top of the frame.
+local function buildPlayLights(scene: Instance)
+	local rig = folder("PlayLights", scene)
+	local lamps = {
+		{ from = Vector3.new(-30, 42, 30), to = Vector3.new(0, 4, 0), brightness = 3, angle = 70 },
+		{ from = Vector3.new(30, 42, 30), to = Vector3.new(0, 4, 0), brightness = 3, angle = 70 },
+		{ from = Vector3.new(0, 38, 62), to = Vector3.new(0, 0, ShotConfig.ShotDistance), brightness = 2, angle = 60 },
+	}
+	for _, lamp in lamps do
+		local anchor = makePart({
+			Name = "LightRig",
+			Size = Vector3.new(1, 1, 1),
+			CFrame = CFrame.lookAt(lamp.from, lamp.to),
+			Transparency = 1,
+			Parent = rig,
+		})
+		create("SpotLight", {
+			Face = Enum.NormalId.Front,
+			Angle = lamp.angle,
+			Brightness = lamp.brightness,
+			Range = 60,
+			Color = rgb(255, 244, 228),
+			Shadows = false,
+			Parent = anchor,
+		})
+	end
 end
 
 local function ensureChild(parent: Instance, className: string, name: string): any
@@ -669,35 +1525,39 @@ local function ensureChild(parent: Instance, className: string, name: string): a
 	return create(className, { Name = name, Parent = parent })
 end
 
+-- Dusk with floodlit brightness: ambient stays high so the goal and keeper read clearly.
 local function setupLighting()
-	Lighting.ClockTime = 13.8
-	Lighting.GeographicLatitude = 25
-	Lighting.Brightness = 2.6
-	Lighting.Ambient = Color3.fromRGB(70, 80, 75)
-	Lighting.OutdoorAmbient = Color3.fromRGB(150, 160, 155)
-	Lighting.EnvironmentDiffuseScale = 0.7
-	Lighting.EnvironmentSpecularScale = 0.5
+	Lighting.ClockTime = 17.9
+	Lighting.GeographicLatitude = 20
+	Lighting.Brightness = 2.4
+	Lighting.Ambient = rgb(96, 82, 132)
+	Lighting.OutdoorAmbient = rgb(156, 138, 190)
+	Lighting.ColorShift_Top = rgb(255, 214, 180)
+	Lighting.ColorShift_Bottom = rgb(90, 60, 160)
+	Lighting.EnvironmentDiffuseScale = 0.5
+	Lighting.EnvironmentSpecularScale = 0.6
+	Lighting.ExposureCompensation = 0.2
 	Lighting.GlobalShadows = true
-	Lighting.ShadowSoftness = 0.25
+	Lighting.ShadowSoftness = 0.3
 
 	local atmosphere = ensureChild(Lighting, "Atmosphere", "Atmosphere")
-	atmosphere.Density = 0.28
-	atmosphere.Offset = 0.2
-	atmosphere.Color = Color3.fromRGB(198, 222, 236)
-	atmosphere.Decay = Color3.fromRGB(120, 140, 155)
-	atmosphere.Glare = 0
-	atmosphere.Haze = 0.6
+	atmosphere.Density = 0.24
+	atmosphere.Offset = 0.1
+	atmosphere.Color = rgb(205, 120, 190)
+	atmosphere.Decay = rgb(110, 70, 170)
+	atmosphere.Glare = 0.3
+	atmosphere.Haze = 1.6
 
 	local bloom = ensureChild(Lighting, "BloomEffect", "Bloom")
-	bloom.Intensity = 0.6
-	bloom.Size = 22
-	bloom.Threshold = 1.4
+	bloom.Intensity = 0.9
+	bloom.Size = 30
+	bloom.Threshold = 1.45
 
 	local grading = ensureChild(Lighting, "ColorCorrectionEffect", "ColorCorrection")
-	grading.Saturation = 0.12
-	grading.Contrast = 0.1
-	grading.Brightness = 0
-	grading.TintColor = Color3.fromRGB(255, 252, 245)
+	grading.Saturation = 0.2
+	grading.Contrast = 0.16
+	grading.Brightness = 0.02
+	grading.TintColor = rgb(246, 234, 255)
 
 	local rays = ensureChild(Lighting, "SunRaysEffect", "SunRays")
 	rays.Intensity = 0.02
@@ -711,16 +1571,22 @@ function SceneBuilder.build(): Folder
 	end
 	clearDefaultTemplate()
 
+	local rng = Random.new(SEED)
 	local scene = Instance.new("Folder")
 	scene.Name = "FootballScene"
 	buildPitch(scene)
+	buildMarkings(scene)
 	buildGoal(scene)
-	buildWall(scene)
-	buildKeeper(scene)
+	buildBoards(scene)
+	buildStand(scene, rng)
+	buildFloodlights(scene)
+	buildSkyline(scene, rng)
+	buildSkyBackdrop(scene, rng)
+	buildPlayLights(scene)
 	scene.Parent = workspace
 
 	setupLighting()
-	print(string.format("[SceneBuilder] Training ground built (%d objects)", #scene:GetDescendants()))
+	print(string.format("[SceneBuilder] Stadium built (%d objects)", #scene:GetDescendants()))
 	return scene
 end
 
@@ -728,11 +1594,11 @@ return SceneBuilder
 ]]></string>
       </Properties>
     </Item>
-    <Item class="Folder" referent="7">
+    <Item class="Folder" referent="8">
       <Properties>
         <string name="Name">Services</string>
       </Properties>
-      <Item class="ModuleScript" referent="8">
+      <Item class="ModuleScript" referent="9">
         <Properties>
           <string name="Name">EpisodeService</string>
           <string name="Source"><![CDATA[-- Owns interactive episodes: hands them out, validates client input and sends back results.
@@ -887,21 +1753,32 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, a
 	local seriesOver = state.shots >= SERIES_LENGTH
 
 	print(string.format(
-		"[EpisodeService] %s: episode #%d aim=(%.2f, %.2f) power=%.2f -> %s (%d goals from %d/%d shots)",
-		player.Name, active.id, input.aimX, input.aimY, input.power, result.outcome, state.goals, state.shots, SERIES_LENGTH
+		"[EpisodeService] %s: episode #%d aim=(%.2f, %.2f) power=%.2f -> %s/%s, %d km/h (%d goals from %d/%d shots)",
+		player.Name, active.id, input.aimX, input.aimY, input.power, result.outcome, result.detail, result.speedKmh,
+		state.goals, state.shots, SERIES_LENGTH
 	))
 	if seriesOver then
 		print(string.format("[EpisodeService] %s: series finished, %d/%d goals", player.Name, state.goals, SERIES_LENGTH))
 	end
 
+	local sim = result.sim
 	remotes.EpisodeResult:FireClient(player, {
 		episodeId = active.id,
 		outcome = result.outcome,
-		start = result.start,
-		target = result.target,
-		flightTime = result.flightTime,
+		detail = result.detail,
+		speedKmh = result.speedKmh,
+		-- The client replays this exact path, so what it shows always matches the outcome.
+		path = sim.path,
+		sampleStep = ShotConfig.Physics.SampleStep,
+		events = sim.events,
+		spin = result.spin,
+		held = sim.held,
+		decisiveTime = result.decisiveTime,
+		keeperTime = sim.keeperTime,
 		keeperTarget = result.keeperTarget,
 		keeperReaction = result.keeperReaction,
+		keeperDives = result.keeperDives,
+		keeperKind = sim.keeperKind,
 		shots = state.shots,
 		goals = state.goals,
 		seriesLength = SERIES_LENGTH,
@@ -927,10 +1804,10 @@ return EpisodeService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="9">
+      <Item class="ModuleScript" referent="10">
         <Properties>
           <string name="Name">ShotResolver</string>
-          <string name="Source"><![CDATA[-- Server-only: turns validated shot input into an outcome. Never runs on the client.
+          <string name="Source"><![CDATA[-- Server-only: turns validated shot input into a fully simulated shot. Never runs on the client.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -938,19 +1815,30 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
 local ShotPhysics = require(Shared:WaitForChild("ShotPhysics"))
 
+local Goal = ShotConfig.Goal
+local Keeper = ShotConfig.Goalkeeper
+
 export type ShotInput = { aimX: number, aimY: number, power: number }
 export type ShotStats = { shooting: number, keeperSkill: number }
 export type ShotResult = {
-	outcome: string, -- "GOAL" | "SAVE" | "POST" | "MISS"
+	outcome: string, -- "GOAL" | "SAVE" | "POST" | "MISS" (series history / scoring)
+	detail: string, -- GOAL | POST_IN | CATCH | PARRY | POST | BAR | WIDE | OVER (what the player sees)
 	start: Vector3,
-	intended: Vector3, -- aim point before inaccuracy
-	target: Vector3, -- where the ball actually crosses the goal plane
-	flightTime: number,
-	keeperTarget: Vector3, -- where the keeper's body centre gets to (goal plane)
+	target: Vector3, -- where the unobstructed flight would cross the goal plane
+	velocity: Vector3,
+	spin: Vector3,
+	speedKmh: number,
+	sim: ShotPhysics.SimResult,
+	decisiveTime: number, -- moment the result is clear (goal, save, frame or the ball passing the line)
+	keeperTarget: Vector3, -- where the keeper's body centre gets to (logic coordinates)
 	keeperReaction: number,
+	keeperDives: boolean,
 }
 
 local ShotResolver = {}
+
+-- Speed readout: the goal is oversized for readability, so use a fixed, believable scale.
+local KMH_PER_STUD_PER_SECOND = 1.0
 
 local function lerp(a: number, b: number, t: number): number
 	return a + (b - a) * t
@@ -965,7 +1853,6 @@ end
 
 function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random): ShotResult
 	local accuracy = ShotConfig.Accuracy
-	local keeper = ShotConfig.Goalkeeper
 
 	-- 1. Inaccuracy: better shooters scatter less; overpowered shots scatter more and rise.
 	local skill = math.clamp(stats.shooting, 0, 100) / 100
@@ -977,48 +1864,96 @@ function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random): 
 	local offsetY = math.clamp(gaussian(rng), -cap, cap) * sigma + overpower * accuracy.OverpowerLift
 
 	local intended = ShotPhysics.aimToGoalPoint(input.aimX, input.aimY)
-	local target = Vector3.new(
-		intended.X + offsetX,
-		math.max(ShotConfig.Ball.Radius, intended.Y + offsetY), -- low shots roll along the ground
-		0
-	)
+	local target = Vector3.new(intended.X + offsetX, math.max(ShotConfig.Ball.Radius, intended.Y + offsetY), 0)
+
+	-- 2. Spin and the launch velocity that flies (with drag and curl) to the target.
+	local jitter = ShotConfig.Physics.SpinJitter
+	local spin = ShotPhysics.spinFor(input.aimX, input.power, (rng:NextNumber() * 2 - 1) * jitter, (rng:NextNumber() * 2 - 1) * jitter)
 	local start = ShotPhysics.ballSpot()
-	local flightTime = ShotPhysics.flightTime(start, target, input.power)
+	local velocity = ShotPhysics.solveLaunch(start, target, input.power, spin)
+
+	-- 3. Goalkeeper: reacts after a short delay, then moves at a skill-based speed. He only
+	-- dives for shots heading for the frame; when the ball reaches him he catches or parries.
+	local reaction = Keeper.ReactionTime + (rng:NextNumber() * 2 - 1) * Keeper.ReactionJitter
+	local diveSpeed = lerp(Keeper.DiveSpeedAtZeroSkill, Keeper.DiveSpeedAtMaxSkill, math.clamp(stats.keeperSkill, 0, 100) / 100)
 	local zone = ShotPhysics.classify(target)
-
-	-- 2. Goalkeeper: reacts after a short delay, then moves towards the ball at a skill-based
-	-- speed. It is a save if his hands reach the crossing point before the ball does.
-	local home = Vector3.new(keeper.HomeX, keeper.HomeY, 0)
-	local toBall = Vector3.new(target.X, target.Y, 0) - home
-	local reaction = keeper.ReactionTime + (rng:NextNumber() * 2 - 1) * keeper.ReactionJitter
-	local diveSpeed = lerp(keeper.DiveSpeedAtZeroSkill, keeper.DiveSpeedAtMaxSkill, math.clamp(stats.keeperSkill, 0, 100) / 100)
-	local canTravel = diveSpeed * math.max(0, flightTime - reaction)
-	local mustTravel = math.max(0, toBall.Magnitude - keeper.Reach)
-
+	local keeperDives = Keeper.Enabled
+		and (zone ~= ShotPhysics.Zone.Wide or (math.abs(target.X) < Goal.Width / 2 + 2.5 and target.Y < Goal.Height + 2.5))
+	local home = Vector3.new(Keeper.HomeX, Keeper.HomeY, 0)
 	local keeperTarget = home
-	if keeper.Enabled and toBall.Magnitude > 1e-3 then
-		keeperTarget = home + toBall.Unit * math.min(canTravel, mustTravel)
+
+	local function keeperResponse(t: number, at: Vector3, vel: Vector3)
+		if not Keeper.Enabled then
+			return nil
+		end
+		local toBall = Vector3.new(at.X, at.Y, 0) - home
+		local distance = toBall.Magnitude
+		local direction = if distance > 1e-3 then toBall / distance else Vector3.zero
+		local canTravel = diveSpeed * math.max(0, t - reaction)
+		local mustTravel = math.max(0, distance - Keeper.Reach)
+		if not keeperDives then
+			keeperTarget = home + direction * math.min(canTravel, 1.5) -- a step towards it, then watches it go
+			return nil
+		end
+		keeperTarget = home + direction * math.min(canTravel, mustTravel)
+		if canTravel < mustTravel then
+			return nil -- beaten
+		end
+
+		local speed = vel.Magnitude
+		local atBody = distance < Keeper.Reach * 0.7 and speed <= Keeper.CatchMaxSpeed * 1.3
+		local comfortable = canTravel - mustTravel >= Keeper.CatchMargin and speed <= Keeper.CatchMaxSpeed
+		if atBody or comfortable then
+			return { kind = "CATCH" }
+		end
+		-- Parry: tip high balls over the bar, push the rest wide and back out.
+		local side = math.sign(at.X - Keeper.HomeX)
+		if side == 0 then
+			side = if rng:NextNumber() < 0.5 then -1 else 1
+		end
+		local parried
+		if at.Y > Goal.Height - 2.5 and math.abs(at.X) < Goal.Width / 2 - 3 then
+			parried = Vector3.new(vel.X * 0.2 + (rng:NextNumber() * 2 - 1) * 3, 16 + rng:NextNumber() * 6, vel.Z * 0.12)
+		else
+			parried = Vector3.new(side * (10 + rng:NextNumber() * 8), 5 + rng:NextNumber() * 7, 2 - vel.Z * 0.18)
+		end
+		return { kind = "PARRY", velocity = parried }
 	end
 
-	local outcome
-	if zone == ShotPhysics.Zone.Frame then
-		outcome = "POST"
-	elseif zone == ShotPhysics.Zone.Wide then
-		outcome = "MISS"
-	elseif keeper.Enabled and canTravel >= mustTravel then
-		outcome = "SAVE"
+	local sim = ShotPhysics.simulate(start, velocity, spin, Keeper.HomeZ, keeperResponse)
+
+	-- 4. Outcome from what actually happened in the simulation.
+	local outcome, detail, decisiveTime
+	if sim.keeperKind == "CATCH" then
+		outcome, detail, decisiveTime = "SAVE", "CATCH", sim.keeperTime
+	elseif sim.goalTime then
+		outcome, decisiveTime = "GOAL", sim.goalTime
+		detail = if sim.frameTime and sim.frameTime < sim.goalTime then "POST_IN" else "GOAL"
+	elseif sim.keeperKind == "PARRY" then
+		outcome, detail, decisiveTime = "SAVE", "PARRY", sim.keeperTime
+	elseif sim.frameTime then
+		outcome, decisiveTime = "POST", sim.frameTime
+		detail = if sim.framePart == "Crossbar" then "BAR" else "POST"
 	else
-		outcome = "GOAL"
+		outcome = "MISS"
+		local cross = sim.crossPoint or target
+		detail = if cross.Y > Goal.Height + Goal.PostRadius and math.abs(cross.X) < Goal.Width / 2 + 2 then "OVER" else "WIDE"
+		decisiveTime = sim.crossTime or sim.duration
 	end
 
 	return {
 		outcome = outcome,
+		detail = detail,
 		start = start,
-		intended = intended,
 		target = target,
-		flightTime = flightTime,
+		velocity = velocity,
+		spin = spin,
+		speedKmh = math.floor(velocity.Magnitude * KMH_PER_STUD_PER_SECOND + 0.5),
+		sim = sim,
+		decisiveTime = decisiveTime,
 		keeperTarget = keeperTarget,
 		keeperReaction = reaction,
+		keeperDives = keeperDives,
 	}
 end
 
@@ -1028,15 +1963,15 @@ return ShotResolver
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="10">
+  <Item class="StarterPlayer" referent="11">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="11">
+    <Item class="StarterPlayerScripts" referent="12">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="LocalScript" referent="12">
+      <Item class="LocalScript" referent="13">
         <Properties>
           <string name="Name">ShotClient</string>
           <string name="Source"><![CDATA[-- Client entry point for the Stage 1 shot: wires input, 3D visuals and HUD to the server remotes.
@@ -1086,17 +2021,6 @@ local waitingForEpisode = false
 local function requestEpisode()
 	waitingForEpisode = true
 	RequestEpisode:FireServer()
-end
-
--- Splits the server outcome into what the card should say (post vs crossbar, wide vs over).
-local function cardKind(result): string
-	local goal = ShotConfig.Goal
-	if result.outcome == "POST" then
-		return if result.target.Y > goal.Height - ShotConfig.Ball.Radius then "BAR" else "POST"
-	elseif result.outcome == "MISS" then
-		return if result.target.Y > goal.Height + goal.PostRadius then "OVER" else "WIDE"
-	end
-	return result.outcome
 end
 
 hud.onContinue = function()
@@ -1159,7 +2083,7 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 		task.delay(CARD_DELAY, function()
 			if not currentEpisode and not waitingForEpisode then
 				local seriesText = if result.seriesOver then hud:seriesText(result.goals, result.seriesLength) else nil
-				hud:showResult(cardKind(result), seriesText)
+				hud:showResult(result.detail, seriesText, { speedKmh = result.speedKmh })
 			end
 		end)
 	end)
@@ -1176,6 +2100,7 @@ UserInputService.InputBegan:Connect(function(inputObject, gameProcessed)
 	end
 end)
 
+local wasHolding = false
 RunService.RenderStepped:Connect(function(dt)
 	visuals:update(dt)
 	input:update()
@@ -1184,13 +2109,19 @@ RunService.RenderStepped:Connect(function(dt)
 		hud:setPower(input.power)
 		hud:setTitle(if input.holding then "Holding" else "Ready")
 	end
+	-- The keeper gets set (hop + lower stance) while the player charges.
+	local holding = input.enabled and input.holding
+	if holding ~= wasHolding then
+		wasHolding = holding
+		visuals:setCharging(holding)
+	end
 end)
 
 requestEpisode()
 print("[ShotClient] ready")
 ]]></string>
         </Properties>
-        <Item class="ModuleScript" referent="13">
+        <Item class="ModuleScript" referent="14">
           <Properties>
             <string name="Name">InputController</string>
             <string name="Source"><![CDATA[-- Turns mouse or touch into a normalized aim (X -1..1, Y 0..1) and power (0..1).
@@ -1310,11 +2241,340 @@ return InputController
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="14">
+        <Item class="ModuleScript" referent="15">
+          <Properties>
+            <string name="Name">KeeperAnimator</string>
+            <string name="Source"><![CDATA[-- Procedural goalkeeper animation for the R15 rig (no animation assets needed).
+-- Poses are joint rotations in degrees around the rig's own axes (X right, Y up, Z back;
+-- +X swings a hanging limb forward, +Z swings it to the rig's right), blended with
+-- exponential smoothing. Dives are authored towards world +X and mirrored for -X.
+-- Client-only: the server's model never moves, every player animates their own keeper.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
+
+local Keeper = ShotConfig.Goalkeeper
+local S = Keeper.ModelScale / 1.4 -- poses below were tuned at scale 1.4
+
+local JOINT_NAMES = {
+	"Waist", "Neck",
+	"LeftShoulder", "LeftElbow", "LeftWrist", "RightShoulder", "RightElbow", "RightWrist",
+	"LeftHip", "LeftKnee", "LeftAnkle", "RightHip", "RightKnee", "RightAnkle",
+}
+
+type Joints = { [string]: Vector3 }
+type Plan = {
+	reaction: number,
+	impactTime: number, -- when the ball reaches the keeper's plane
+	target: Vector3, -- body centre at impact, logic coordinates (see ShotConfig.Goalkeeper)
+	kind: string?, -- "CATCH" | "PARRY" | nil (beaten or not diving)
+	dives: boolean,
+}
+
+local function J(x: number, y: number, z: number): Vector3
+	return Vector3.new(x, y, z)
+end
+
+-- Ready stance; depth 0 = relaxed, 1 = set (player is charging the shot).
+local function readyJoints(depth: number): Joints
+	local hip, knee = 36 + 14 * depth, -(60 + 18 * depth)
+	local spread = 32 + 8 * depth
+	return {
+		Waist = J(-16 - 6 * depth, 0, 0),
+		Neck = J(12 + 4 * depth, 0, 0),
+		LeftShoulder = J(26, 0, -spread), RightShoulder = J(26, 0, spread),
+		LeftElbow = J(38, 0, 0), RightElbow = J(38, 0, 0),
+		LeftWrist = J(-10, 0, 0), RightWrist = J(-10, 0, 0),
+		LeftHip = J(hip, 0, -9), RightHip = J(hip, 0, 9),
+		LeftKnee = J(knee, 0, 0), RightKnee = J(knee, 0, 0),
+		LeftAnkle = J(24 + 4 * depth, 0, 0), RightAnkle = J(24 + 4 * depth, 0, 0),
+	}
+end
+
+local function readyDrop(depth: number): number
+	return -(0.45 + 0.2 * depth) * S
+end
+
+-- Towards world +X, which is the keeper's LEFT (he faces the shooter).
+local LOAD: Joints = {
+	Waist = J(-20, 0, 6), Neck = J(10, 0, 0),
+	LeftShoulder = J(30, 0, -60), RightShoulder = J(30, 0, 40),
+	LeftElbow = J(30, 0, 0), RightElbow = J(30, 0, 0),
+	LeftWrist = J(-15, 0, 0), RightWrist = J(-15, 0, 0),
+	LeftHip = J(28, 0, -24), RightHip = J(52, 0, 6),
+	LeftKnee = J(-40, 0, 0), RightKnee = J(-85, 0, 0),
+	LeftAnkle = J(18, 0, 0), RightAnkle = J(30, 0, 0),
+}
+local FLIGHT: Joints = {
+	Waist = J(-4, 0, 10), Neck = J(6, 0, 12),
+	LeftShoulder = J(12, 0, -158), RightShoulder = J(12, 0, 172),
+	LeftElbow = J(6, 0, 0), RightElbow = J(8, 0, 0),
+	LeftWrist = J(-25, 0, 0), RightWrist = J(-25, 0, 0),
+	LeftHip = J(8, 0, -6), RightHip = J(-6, 0, 28),
+	LeftKnee = J(-18, 0, 0), RightKnee = J(-10, 0, 0),
+	LeftAnkle = J(25, 0, 0), RightAnkle = J(25, 0, 0),
+}
+local HUG: Joints = { -- ball pulled into the chest
+	Waist = J(-22, 0, 4), Neck = J(-8, 0, 6),
+	LeftShoulder = J(66, 0, -18), RightShoulder = J(66, 0, 18),
+	LeftElbow = J(100, 0, 0), RightElbow = J(100, 0, 0),
+	LeftWrist = J(0, 0, 0), RightWrist = J(0, 0, 0),
+	LeftHip = J(48, 0, -8), RightHip = J(55, 0, 8),
+	LeftKnee = J(-75, 0, 0), RightKnee = J(-85, 0, 0),
+	LeftAnkle = J(20, 0, 0), RightAnkle = J(20, 0, 0),
+}
+local LYING: Joints = { -- after a parry or a goal: stretched out on the grass
+	Waist = J(-2, 0, 4), Neck = J(4, 0, 8),
+	LeftShoulder = J(10, 0, -150), RightShoulder = J(14, 0, 162),
+	LeftElbow = J(12, 0, 0), RightElbow = J(15, 0, 0),
+	LeftWrist = J(-10, 0, 0), RightWrist = J(-10, 0, 0),
+	LeftHip = J(14, 0, -4), RightHip = J(22, 0, 14),
+	LeftKnee = J(-30, 0, 0), RightKnee = J(-40, 0, 0),
+	LeftAnkle = J(15, 0, 0), RightAnkle = J(15, 0, 0),
+}
+local DEJECTED: Joints = table.clone(LYING)
+DEJECTED.Neck = J(-30, 0, 4)
+DEJECTED.LeftShoulder = J(40, 0, -60)
+DEJECTED.RightShoulder = J(40, 0, 70)
+
+local JUMP: Joints = { -- central high ball: both arms straight up, knees tucked
+	Waist = J(4, 0, 0), Neck = J(20, 0, 0),
+	LeftShoulder = J(8, 0, -172), RightShoulder = J(8, 0, 172),
+	LeftElbow = J(4, 0, 0), RightElbow = J(4, 0, 0),
+	LeftWrist = J(-20, 0, 0), RightWrist = J(-20, 0, 0),
+	LeftHip = J(40, 0, -6), RightHip = J(40, 0, 6),
+	LeftKnee = J(-80, 0, 0), RightKnee = J(-80, 0, 0),
+	LeftAnkle = J(30, 0, 0), RightAnkle = J(30, 0, 0),
+}
+local BLOCK: Joints = { -- central low/mid ball: get down behind it, hands in front
+	Waist = J(-30, 0, 0), Neck = J(18, 0, 0),
+	LeftShoulder = J(72, 0, -10), RightShoulder = J(72, 0, 10),
+	LeftElbow = J(50, 0, 0), RightElbow = J(50, 0, 0),
+	LeftWrist = J(-15, 0, 0), RightWrist = J(-15, 0, 0),
+	LeftHip = J(78, 0, -14), RightHip = J(78, 0, 14),
+	LeftKnee = J(-105, 0, 0), RightKnee = J(-105, 0, 0),
+	LeftAnkle = J(30, 0, 0), RightAnkle = J(30, 0, 0),
+}
+
+local function mirror(joints: Joints): Joints
+	local out = {}
+	for name, v in joints do
+		local swapped = if string.sub(name, 1, 4) == "Left" then "Right" .. string.sub(name, 5)
+			elseif string.sub(name, 1, 5) == "Right" then "Left" .. string.sub(name, 6)
+			else name
+		out[swapped] = Vector3.new(v.X, -v.Y, -v.Z)
+	end
+	return out
+end
+
+local function blend(a: Joints, b: Joints, t: number): Joints
+	local out = {}
+	for _, name in JOINT_NAMES do
+		local va, vb = a[name] or Vector3.zero, b[name] or Vector3.zero
+		out[name] = va:Lerp(vb, t)
+	end
+	return out
+end
+
+local function smoothstep(t: number): number
+	t = math.clamp(t, 0, 1)
+	return t * t * (3 - 2 * t)
+end
+
+local function easeOut(t: number): number
+	t = math.clamp(t, 0, 1)
+	return 1 - (1 - t) * (1 - t)
+end
+
+local KeeperAnimator = {}
+KeeperAnimator.__index = KeeperAnimator
+
+function KeeperAnimator.new(model: Model)
+	local self = setmetatable({}, KeeperAnimator)
+	self.model = model
+	self.home = model:GetPivot()
+	self.homeRotation = self.home.Rotation
+	self.motors = {}
+	for _, name in JOINT_NAMES do
+		local motor = model:FindFirstChild(name, true)
+		if motor and motor:IsA("Motor6D") then
+			self.motors[name] = { motor = motor, base = motor.C0 }
+		end
+	end
+	self.leftHand = model:FindFirstChild("LeftHand", true)
+	self.rightHand = model:FindFirstChild("RightHand", true)
+
+	-- Current (smoothed) pose.
+	self.joints = readyJoints(0)
+	self.pos = Vector3.new(0, readyDrop(0), 0)
+	self.roll = 0
+	self.yaw = 0
+	self.clock = 0
+	self.state = "ready"
+	self.charging = false
+	self.chargeStarted = -math.huge
+	self.lyingOffset = 0.95 * Keeper.ModelScale - self.home.Position.Y
+	return self
+end
+
+function KeeperAnimator:setCharging(on: boolean)
+	if on and not self.charging then
+		self.chargeStarted = self.clock -- split-step hop as the shooter shapes up
+	end
+	self.charging = on
+end
+
+function KeeperAnimator:startShot(plan: Plan)
+	self.state = "shot"
+	self.plan = plan
+	self.shotTime = 0
+	self.charging = false
+	local offset = Vector3.new(plan.target.X - Keeper.HomeX, plan.target.Y - Keeper.HomeY, 0)
+	offset = Vector3.new(offset.X, math.max(offset.Y, self.lyingOffset * 0.55), 0)
+	self.diveOffset = offset
+	self.side = if offset.X >= 0 then 1 else -1
+	-- Central balls are blocked or jumped for; everything else is a dive.
+	if not plan.dives then
+		self.style = "watch"
+	elseif math.abs(offset.X) < 2.2 then
+		self.style = if offset.Y > 1.2 then "jump" else "block"
+	else
+		self.style = "dive"
+	end
+	-- Lean from the feet towards the ball (world roll; negative leans to +X).
+	local fromFeet = Vector3.new(offset.X, offset.Y + Keeper.HomeY, 0)
+	self.diveRoll = math.clamp(math.deg(math.atan2(-fromFeet.X, fromFeet.Y)), -92, 92)
+end
+
+function KeeperAnimator:recover()
+	self.state = "recover"
+	self.recoverStarted = self.clock
+	self.plan = nil
+end
+
+function KeeperAnimator:handsPosition(): Vector3?
+	if self.leftHand and self.rightHand then
+		return (self.leftHand.Position + self.rightHand.Position) / 2
+	end
+	return nil
+end
+
+-- Desired pose for this frame: joints, root offset, roll, yaw and smoothing rates.
+function KeeperAnimator:_target(): (Joints, Vector3, number, number, number, number)
+	local t = self.clock
+	if self.state ~= "shot" then
+		local depth = if self.charging then 1 else 0
+		local joints = readyJoints(depth)
+		local sway = if self.charging then 0 else math.sin(t * 2.1) * 0.45 * S
+		local bounce = math.abs(math.sin(t * 4.2)) * 0.1 * S
+		-- Weight shifts from foot to foot with the sway.
+		local shift = math.sin(t * 2.1) * 6 * (1 - depth)
+		joints.LeftHip += J(0, 0, -shift)
+		joints.RightHip += J(0, 0, -shift)
+		local hop = t - self.chargeStarted
+		local lift = if hop < 0.32 then math.sin(hop / 0.32 * math.pi) * 0.6 * S else 0
+		local pos = Vector3.new(sway, readyDrop(depth) + bounce + lift, 0)
+		local rate = if self.state == "recover" and t - self.recoverStarted < 0.6 then 9 else 14
+		return joints, pos, 0, 0, rate, rate
+	end
+
+	local plan = self.plan :: Plan
+	local st = self.shotTime
+	local side = self.side
+	local offset = self.diveOffset
+	local function sided(joints: Joints): Joints
+		return if side > 0 then joints else mirror(joints)
+	end
+
+	if self.style == "watch" then
+		local joints = readyJoints(0.4)
+		joints.Neck += J(0, 40 * side, 0)
+		joints.Waist += J(0, 15 * side, 0)
+		local step = smoothstep((st - plan.reaction) / 0.4)
+		return joints, Vector3.new(offset.X * step, readyDrop(0.4), 0), 0, 0, 12, 12
+	end
+
+	local reach = math.max(plan.impactTime - plan.reaction, 0.12)
+	local alpha = (st - plan.reaction) / reach
+	local after = st - plan.impactTime
+	local caught = plan.kind == "CATCH"
+
+	if alpha < 0 then
+		return readyJoints(1), Vector3.new(0, readyDrop(1), 0), 0, 0, 16, 16
+	end
+
+	if self.style == "jump" or self.style == "block" then
+		local high = self.style == "jump"
+		local pose = if high then JUMP else BLOCK
+		local landed = math.clamp(after / 0.35, 0, 1)
+		local up = easeOut(alpha) * offset.Y
+		local pos = Vector3.new(offset.X * easeOut(alpha), if high then up else readyDrop(1) - 0.35 * S, 0)
+		if after > 0 then
+			pos = Vector3.new(offset.X, if high then up * (1 - landed * landed) else pos.Y, 0)
+			pose = if caught then HUG else blend(pose, readyJoints(1), landed * 0.5)
+		end
+		return pose, pos, 0, 0, 22, 26
+	end
+
+	-- Side dive: load, launch, stretch to the ball, then land on the side.
+	local loadEnd = 0.18
+	if alpha < loadEnd then
+		local k = alpha / loadEnd
+		local pos = Vector3.new(offset.X * 0.06 * k, readyDrop(1) - 0.25 * S * k, 0)
+		return sided(blend(readyJoints(1), LOAD, k)), pos, self.diveRoll * 0.08 * k, 0, 28, 28
+	end
+	if after <= 0 then
+		local u = (alpha - loadEnd) / (1 - loadEnd)
+		local arc = if offset.Y > -1 then math.sin(u * math.pi) * 0.9 * S else 0
+		local pos = offset * easeOut(u) + Vector3.new(0, arc, 0)
+		return sided(blend(LOAD, FLIGHT, smoothstep(u * 1.6))), pos, self.diveRoll * smoothstep(u), 0, 30, 30
+	end
+
+	-- Landing: fall to the ground on the dive side, keep sliding a little.
+	local land = math.clamp(after / 0.42, 0, 1)
+	local fall = land * land
+	local x = offset.X + side * 0.7 * S * easeOut(land)
+	local y = offset.Y + (self.lyingOffset - offset.Y) * fall
+	local roll = self.diveRoll + (-90 * side - self.diveRoll) * smoothstep(land)
+	local pose = if caught then HUG elseif plan.kind == "PARRY" then LYING else (if after > 1.1 then DEJECTED else LYING)
+	return sided(pose), Vector3.new(x, y, 0), roll, 0, 18, 12
+end
+
+function KeeperAnimator:update(dt: number)
+	self.clock += dt
+	if self.state == "shot" then
+		self.shotTime += dt
+	end
+	local joints, pos, roll, yaw, rootRate, jointRate = self:_target()
+
+	local jk = 1 - math.exp(-jointRate * dt)
+	local rk = 1 - math.exp(-rootRate * dt)
+	for _, name in JOINT_NAMES do
+		local current = self.joints[name] or Vector3.zero
+		self.joints[name] = current:Lerp(joints[name] or Vector3.zero, jk)
+	end
+	self.pos = self.pos:Lerp(pos, rk)
+	self.roll += (roll - self.roll) * rk
+	self.yaw += (yaw - self.yaw) * rk
+
+	local root = CFrame.new(self.home.Position + self.pos) * CFrame.Angles(0, 0, math.rad(self.roll)) * self.homeRotation
+	self.model:PivotTo(root * CFrame.Angles(0, math.rad(self.yaw), 0))
+	for name, entry in self.motors do
+		local a = self.joints[name]
+		entry.motor.C0 = entry.base * CFrame.Angles(math.rad(a.X), math.rad(a.Y), math.rad(a.Z))
+	end
+end
+
+return KeeperAnimator
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="16">
           <Properties>
             <string name="Name">ShotHud</string>
-            <string name="Source"><![CDATA[-- Screen UI for the shot drill: logo + stage, goals counter, bottom power panel and the
--- result card. Layout is designed at 1280x720 and scaled per panel to the screen.
+            <string name="Source"><![CDATA[-- Screen UI for the shot drill in the purple "pixel UI kit" style: logo + stage, goals counter,
+-- bottom power panel and the result card. Layout is designed at 1280x720 and scaled per panel.
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -1322,14 +2582,18 @@ local TweenService = game:GetService("TweenService")
 local ShotHud = {}
 ShotHud.__index = ShotHud
 
+-- Optional uploaded logo, e.g. "rbxassetid://1234567890". Empty = logo built from text.
+local LOGO_IMAGE = ""
+
 -- All player-facing text in one place.
 local TEXT = {
 	LogoTop = "NEW",
-	LogoBottom = 'FOOTBALL  <font color="#A3E635">STAR</font> <font color="#A3E635" size="22">★</font>',
-	Mode = 'ОБУЧЕНИЕ  •  <font color="#A3E635">УДАРЫ</font>',
+	LogoMiddle = "FOOTBALL",
+	LogoBottom = "STAR",
+	Mode = 'ОБУЧЕНИЕ  •  <font color="#FFBF1F">УДАРЫ</font>',
 	Stage = "Этап 1 из 3",
 	Goals = "ГОЛЫ",
-	Power = 'СИЛА <font color="#A3E635">%d%%</font>',
+	Power = "СИЛА %d%%",
 	PowerHint = "55–85% — удобно   ·   100% — мяч летит выше",
 	Ready = "Зажми точку у ворот и отпусти для удара",
 	Holding = "Отпусти, чтобы ударить",
@@ -1338,8 +2602,12 @@ local TEXT = {
 	NextShot = "ЕЩЁ УДАР  ›",
 	NewSeries = "НОВАЯ СЕРИЯ  ›",
 	SeriesOver = "Серия окончена: %d из %d голов",
+	Speed = "%d км/ч",
 	Outcomes = {
 		GOAL = { "ГОЛ!", "Отличное попадание в створ" },
+		POST_IN = { "ГОЛ!", "От штанги в сетку!" },
+		CATCH = { "ПОЙМАЛ!", "Вратарь забрал мяч. Бей ближе к углу" },
+		PARRY = { "ОТБИЛ!", "Вратарь дотянулся. Ещё чуть точнее" },
 		SAVE = { "СЕЙВ!", "Вратарь успел. Целься ближе к углу" },
 		POST = { "ШТАНГА!", "Совсем рядом. Чуть ближе к центру" },
 		BAR = { "ПЕРЕКЛАДИНА!", "Совсем рядом. Чуть ниже" },
@@ -1348,25 +2616,37 @@ local TEXT = {
 	},
 }
 
-local LIME = Color3.fromRGB(163, 230, 53)
-local LIME_DARK = Color3.fromRGB(104, 160, 24)
+local rgb = Color3.fromRGB
+local NAVY = rgb(18, 11, 36)
+local PANEL_TOP = rgb(43, 18, 80)
+local PANEL_BOTTOM = rgb(27, 15, 51)
+local VIOLET = rgb(90, 47, 194)
+local GLOW = rgb(123, 77, 255)
+local LILAC = rgb(190, 168, 255)
+local RED = rgb(255, 45, 85)
+local RED_LIGHT = rgb(255, 150, 170)
+local GOLD = rgb(255, 191, 31)
+local GOLD_LIGHT = rgb(255, 226, 120)
+local ORANGE = rgb(255, 159, 10)
+local LIP = rgb(178, 84, 0)
+local CREAM = rgb(247, 236, 214)
+local INK = rgb(18, 6, 31)
+local SHADOW = rgb(46, 16, 92)
 local WHITE = Color3.new(1, 1, 1)
-local MUTED = Color3.fromRGB(184, 198, 192)
-local INK = Color3.fromRGB(8, 20, 16)
-local PANEL_LEFT = Color3.fromRGB(24, 52, 45)
-local PANEL_RIGHT = Color3.fromRGB(7, 18, 15)
-local YELLOW = Color3.fromRGB(250, 204, 21)
-local RED = Color3.fromRGB(248, 90, 90)
 
-local OUTCOME_COLORS = {
-	GOAL = LIME,
-	SAVE = WHITE,
-	POST = YELLOW,
-	BAR = YELLOW,
-	WIDE = RED,
-	OVER = RED,
+-- Card look per result kind: title gradient (top -> bottom), glow accent and badge glyph.
+local KIND_STYLE = {
+	GOAL = { top = CREAM, bottom = GOLD, accent = GOLD, icon = "⚽", sparkle = true },
+	POST_IN = { top = CREAM, bottom = GOLD, accent = GOLD, icon = "⚽", sparkle = true },
+	CATCH = { top = CREAM, bottom = LILAC, accent = GLOW, icon = "🧤" },
+	PARRY = { top = CREAM, bottom = LILAC, accent = GLOW, icon = "🧤" },
+	SAVE = { top = CREAM, bottom = LILAC, accent = GLOW, icon = "🧤" },
+	POST = { top = GOLD_LIGHT, bottom = ORANGE, accent = ORANGE, icon = "🥅" },
+	BAR = { top = GOLD_LIGHT, bottom = ORANGE, accent = ORANGE, icon = "🥅" },
+	WIDE = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
+	OVER = { top = RED_LIGHT, bottom = RED, accent = RED, icon = "❌" },
 }
-local PIP_COLORS = { GOAL = LIME, SAVE = WHITE, POST = YELLOW, MISS = RED }
+local PIP_COLORS = { GOAL = GOLD, SAVE = GLOW, POST = CREAM, MISS = RED }
 
 local MONTSERRAT = "rbxasset://fonts/families/Montserrat.json"
 local FONT_HEAVY = Font.new(MONTSERRAT, Enum.FontWeight.Heavy, Enum.FontStyle.Italic)
@@ -1374,6 +2654,8 @@ local FONT_BOLD = Font.new(MONTSERRAT, Enum.FontWeight.Bold, Enum.FontStyle.Ital
 local FONT_MEDIUM = Font.new(MONTSERRAT, Enum.FontWeight.Medium)
 
 local DESIGN_SIZE = Vector2.new(1280, 720)
+local POWER_SEGMENTS = 20
+local POWER_WARN = 0.85
 
 local function create(className: string, props: { [string]: any }): any
 	local inst = Instance.new(className)
@@ -1399,7 +2681,7 @@ local function text(props: { [string]: any }): TextLabel
 	props.BackgroundTransparency = 1
 	props.RichText = true
 	props.FontFace = props.FontFace or FONT_HEAVY
-	props.TextColor3 = props.TextColor3 or WHITE
+	props.TextColor3 = props.TextColor3 or CREAM
 	props.TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Left
 	return create("TextLabel", props)
 end
@@ -1408,17 +2690,8 @@ local function corner(parent: Instance, radius: number?)
 	create("UICorner", { CornerRadius = if radius then UDim.new(0, radius) else UDim.new(1, 0), Parent = parent })
 end
 
-local function circle(parent: Instance, size: number, props: { [string]: any }?): Frame
-	local p = { Size = UDim2.fromOffset(size, size), Parent = parent }
-	for key, value in props or {} do
-		p[key] = value
-	end
-	local f = frame(p)
-	corner(f)
-	return f
-end
-
-local function stroke(parent: Instance, color: Color3, thickness: number, transparency: number?)
+-- Border stroke for frames and buttons.
+local function stroke(parent: Instance, color: Color3, thickness: number, transparency: number?): UIStroke
 	return create("UIStroke", {
 		Color = color,
 		Thickness = thickness,
@@ -1428,98 +2701,174 @@ local function stroke(parent: Instance, color: Color3, thickness: number, transp
 	})
 end
 
--- Lime border with a soft outer glow made of stacked, increasingly transparent strokes.
-local function glow(target: GuiObject, radius: number, strength: number?)
-	local s = strength or 1
-	stroke(target, LIME, 2)
-	for _, layer in { { 5, 0.72 }, { 10, 0.86 }, { 16, 0.93 } } do
-		local halo = frame({ Name = "Glow", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = target })
-		corner(halo, radius)
-		stroke(halo, LIME, layer[1], 1 - (1 - layer[2]) * s)
+-- Text outline; mitred joins keep the chunky pixel-kit corners.
+local function outline(label: TextLabel, thickness: number, color: Color3?): UIStroke
+	return create("UIStroke", {
+		Color = color or INK,
+		Thickness = thickness,
+		LineJoinMode = Enum.LineJoinMode.Miter,
+		Parent = label,
+	})
+end
+
+local function sizeLimit(label: TextLabel, maxSize: number)
+	label.TextScaled = true
+	create("UITextSizeConstraint", { MaxTextSize = maxSize, MinTextSize = 8, Parent = label })
+end
+
+-- Outlined text with a hard drop shadow (a sibling label, so it cannot be a child of the text).
+local shadowOf = setmetatable({}, { __mode = "k" })
+
+local function bigText(props: { [string]: any }, thickness: number, offset: Vector2, maxSize: number?): TextLabel
+	local shadowProps = table.clone(props)
+	shadowProps.Name = (props.Name or "Text") .. "Shadow"
+	shadowProps.TextColor3 = SHADOW
+	shadowProps.Position = (props.Position or UDim2.new()) + UDim2.fromOffset(offset.X, offset.Y)
+	shadowProps.Text = string.gsub(props.Text or "", "<[^>]+>", "")
+	local shadow = text(shadowProps)
+	outline(shadow, thickness)
+	local main = text(table.clone(props))
+	outline(main, thickness)
+	if maxSize then
+		sizeLimit(shadow, maxSize)
+		sizeLimit(main, maxSize)
+	end
+	shadowOf[main] = shadow
+	return main
+end
+
+local function setBigText(label: TextLabel, value: string)
+	label.Text = value
+	local shadow = shadowOf[label]
+	if shadow then
+		shadow.Text = string.gsub(value, "<[^>]+>", "")
 	end
 end
 
--- Dark panel with a left-to-right gradient, rounded corners and a lime glow.
-local function panel(props: { [string]: any }, radius: number): Frame
+-- Dark purple panel: vertical gradient, violet border and a soft glow from stacked strokes.
+-- Returns the root and its glow strokes so callers can recolour them.
+local function panel(props: { [string]: any }, radius: number, glowColor: Color3?): (Frame, { UIStroke })
 	props.BackgroundTransparency = 1
 	local root = frame(props)
-	local bg = frame({ Name = "Background", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, ZIndex = 0, Parent = root })
+	local glows = {}
+	for _, layer in { { 4, 0.7 }, { 9, 0.84 }, { 16, 0.93 } } do
+		local halo = frame({ Name = "Glow", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = root })
+		corner(halo, radius)
+		table.insert(glows, stroke(halo, glowColor or GLOW, layer[1], layer[2]))
+	end
+	local bg = frame({ Name = "Background", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 0.04, ZIndex = 0, Parent = root })
 	corner(bg, radius)
-	create("UIGradient", { Color = ColorSequence.new(PANEL_LEFT, PANEL_RIGHT), Parent = bg })
-	glow(root, radius)
-	return root
+	create("UIGradient", { Color = ColorSequence.new(PANEL_TOP, PANEL_BOTTOM), Rotation = 90, Parent = bg })
+	stroke(bg, VIOLET, 2)
+	-- Thin top highlight, like the bevel on the reference panels.
+	frame({
+		Name = "Sheen",
+		Position = UDim2.new(0, radius, 0, 3),
+		Size = UDim2.new(1, -radius * 2, 0, 2),
+		BackgroundColor3 = LILAC,
+		BackgroundTransparency = 0.7,
+		ZIndex = 0,
+		Parent = root,
+	})
+	return root, glows
 end
 
--- Decorative "////" slashes, as in the reference panels.
-local function slashes(parent: Instance, position: UDim2, size: number)
+local function iconBox(parent: Instance, position: UDim2, size: number, accent: Color3): Frame
+	local box = frame({ Name = "IconBox", Position = position, Size = UDim2.fromOffset(size, size), BackgroundColor3 = NAVY, Parent = parent })
+	corner(box, 8)
+	stroke(box, accent, 2)
+	frame({ Name = "Bevel", Position = UDim2.fromOffset(4, 3), Size = UDim2.new(1, -8, 0, 2), BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Parent = box })
+	return box
+end
+
+local function emoji(parent: Instance, glyph: string, size: number): TextLabel
+	return text({
+		Name = "Glyph",
+		Size = UDim2.fromScale(1, 1),
+		Text = glyph,
+		TextSize = size,
+		FontFace = FONT_MEDIUM,
+		TextColor3 = WHITE,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = parent,
+	})
+end
+
+local function crosshairIcon(parent: Instance)
+	local ring = frame({ AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(28, 28), BackgroundTransparency = 1, Parent = parent })
+	corner(ring)
+	stroke(ring, GOLD, 3)
+	local dot = frame({ AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(6, 6), BackgroundColor3 = RED, Parent = ring })
+	corner(dot, 1)
+	for _, tick in { { 0.5, 0, 3, 10 }, { 0.5, 1, 3, 10 }, { 0, 0.5, 10, 3 }, { 1, 0.5, 10, 3 } } do
+		frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(tick[1], tick[2]),
+			Size = UDim2.fromOffset(tick[3], tick[4]),
+			BackgroundColor3 = GOLD,
+			Parent = ring,
+		})
+	end
+end
+
+-- Decorative "////" slashes from the reference panels.
+local function slashes(parent: Instance, position: UDim2, size: number, color: Color3)
 	text({
 		Name = "Slashes",
 		Position = position,
 		Size = UDim2.fromOffset(size * 2.2, size),
 		TextSize = size,
 		Text = "////",
-		TextColor3 = LIME,
-		TextTransparency = 0.82,
+		TextColor3 = color,
+		TextTransparency = 0.75,
 		Parent = parent,
 	})
 end
 
-local function trophyIcon(parent: Instance, position: UDim2): Frame
-	local icon = frame({ Name = "Trophy", Position = position, Size = UDim2.fromOffset(32, 30), BackgroundTransparency = 1, Parent = parent })
-	for _, x in { 2, 22 } do
-		local handle = circle(icon, 9, { Position = UDim2.fromOffset(x, 4), BackgroundTransparency = 1 })
-		stroke(handle, LIME, 2.5)
-	end
-	local cup = frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 1), Size = UDim2.fromOffset(18, 15), BackgroundColor3 = LIME, Parent = icon })
-	corner(cup, 6)
-	frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 15), Size = UDim2.fromOffset(4, 7), BackgroundColor3 = LIME, Parent = icon })
-	local base = frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 22), Size = UDim2.fromOffset(16, 5), BackgroundColor3 = LIME, Parent = icon })
-	corner(base, 2)
-	return icon
+-- Gold arc: a pill-shaped stroke whose middle is faded out, leaving two curved ends.
+local function swoosh(parent: Instance, position: UDim2, size: UDim2, thickness: number, rotation: number)
+	local ring = frame({ Name = "Swoosh", AnchorPoint = Vector2.new(0.5, 0.5), Position = position, Size = size, BackgroundTransparency = 1, ZIndex = 0, Parent = parent })
+	corner(ring)
+	local s = stroke(ring, WHITE, thickness)
+	create("UIGradient", {
+		Color = ColorSequence.new(GOLD_LIGHT, ORANGE),
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.1),
+			NumberSequenceKeypoint.new(0.3, 1),
+			NumberSequenceKeypoint.new(0.58, 1),
+			NumberSequenceKeypoint.new(1, 0),
+		}),
+		Rotation = rotation,
+		Parent = s,
+	})
 end
 
-local function crosshairIcon(parent: Instance, center: UDim2)
-	local ring = circle(parent, 30, { AnchorPoint = Vector2.new(0.5, 0.5), Position = center, BackgroundTransparency = 1 })
-	stroke(ring, LIME, 2.5)
-	circle(ring, 6, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = LIME })
-	for _, tick in { { 0.5, 0, 2.5, 9 }, { 0.5, 1, 2.5, 9 }, { 0, 0.5, 9, 2.5 }, { 1, 0.5, 9, 2.5 } } do
-		frame({
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(tick[1], tick[2]),
-			Size = UDim2.fromOffset(tick[3], tick[4]),
-			BackgroundColor3 = LIME,
-			Parent = ring,
-		})
+local function logoImageId(): string?
+	if LOGO_IMAGE == "" then
+		return nil
 	end
+	return if string.match(LOGO_IMAGE, "^%d+$") then "rbxassetid://" .. LOGO_IMAGE else LOGO_IMAGE
 end
 
--- Football with a small laurel wreath, sitting on the top edge of the result card.
-local function ballBadge(parent: Instance)
-	local badge = frame({ Name = "Badge", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0), Size = UDim2.fromOffset(110, 56), BackgroundTransparency = 1, ZIndex = 3, Parent = parent })
-	for _, side in { -1, 1 } do
-		for k, angle in { -25, 10, 45 } do
-			local rad = math.rad(angle)
-			local leaf = frame({
-				AnchorPoint = Vector2.new(0.5, 0.5),
-				Position = UDim2.new(0.5, side * math.cos(rad) * 34, 0.5, -math.sin(rad) * 30 + 2),
-				Size = UDim2.fromOffset(7, 15 - k),
-				Rotation = side * (angle + 20),
-				BackgroundColor3 = LIME,
-				ZIndex = 3,
-				Parent = badge,
-			})
-			corner(leaf)
-		end
-	end
-	local ball = circle(badge, 46, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = INK, ZIndex = 4 })
-	stroke(ball, LIME, 2)
-	text({ Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, Text = "⚽", TextSize = 28, FontFace = FONT_MEDIUM, ZIndex = 5, Parent = ball })
+-- "NEW / FOOTBALL / STAR ★" stacked and tilted, cream + red with gold swooshes.
+local function buildWordmark(parent: Instance): Frame
+	local tilt = frame({ Name = "Tilt", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), Rotation = -8, BackgroundTransparency = 1, Parent = parent })
+	swoosh(tilt, UDim2.new(0.5, 10, 0.5, 4), UDim2.fromOffset(296, 116), 5, -28)
+	swoosh(tilt, UDim2.new(0.5, 18, 0.5, 8), UDim2.fromOffset(262, 96), 2, -20)
+
+	bigText({ Name = "New", Text = TEXT.LogoTop, TextSize = 34, Position = UDim2.fromOffset(36, 4), Size = UDim2.fromOffset(120, 34), Parent = tilt }, 3, Vector2.new(3, 4))
+	bigText({ Name = "Football", Text = TEXT.LogoMiddle, TextSize = 44, Position = UDim2.fromOffset(10, 34), Size = UDim2.fromOffset(276, 44), Parent = tilt }, 3.5, Vector2.new(3, 4))
+	bigText({ Name = "Star", Text = TEXT.LogoBottom, TextSize = 50, TextColor3 = RED, Position = UDim2.fromOffset(46, 76), Size = UDim2.fromOffset(148, 48), Parent = tilt }, 4, Vector2.new(3, 4))
+
+	local starHolder = frame({ Name = "StarIcon", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(218, 98), Size = UDim2.fromOffset(52, 52), BackgroundTransparency = 1, Parent = tilt })
+	bigText({ Text = "★", TextSize = 48, TextColor3 = GOLD, TextXAlignment = Enum.TextXAlignment.Center, Size = UDim2.fromScale(1, 1), Parent = starHolder }, 3, Vector2.new(2, 3))
+	return starHolder
 end
 
 function ShotHud.new()
 	local self = setmetatable({}, ShotHud)
 	self.scales = {}
-	self.cardToken = 0
+	self.onContinue = nil :: (() -> ())?
 
 	local gui = create("ScreenGui", {
 		Name = "ShotHud",
@@ -1542,13 +2891,13 @@ function ShotHud.new()
 		for _, uiScale in self.scales do
 			uiScale.Scale = scale
 		end
-		self.baseScale = scale
 	end
 	rescale()
 	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(rescale)
 	return self
 end
 
+-- Viewport scale for a top-level panel. Pop animations use their own nested UIScale.
 function ShotHud:_scaled(target: GuiObject): UIScale
 	local uiScale = create("UIScale", { Parent = target })
 	table.insert(self.scales, uiScale)
@@ -1556,133 +2905,280 @@ function ShotHud:_scaled(target: GuiObject): UIScale
 end
 
 function ShotHud:_buildLogo()
-	local logo = frame({ Name = "Logo", Position = UDim2.fromOffset(18, 6), Size = UDim2.fromOffset(330, 120), BackgroundTransparency = 1, Parent = self.gui })
-	self:_scaled(logo)
-	local bar = frame({ Position = UDim2.fromOffset(6, 6), Size = UDim2.fromOffset(13, 52), Rotation = 12, BackgroundColor3 = LIME, Parent = logo })
-	corner(bar, 3)
-	text({ Position = UDim2.fromOffset(30, 0), Size = UDim2.fromOffset(300, 30), TextSize = 30, Text = TEXT.LogoTop, Parent = logo })
-	text({ Position = UDim2.fromOffset(30, 28), Size = UDim2.fromOffset(300, 32), TextSize = 30, Text = TEXT.LogoBottom, Parent = logo })
-	frame({ Position = UDim2.fromOffset(30, 70), Size = UDim2.fromOffset(2, 42), BackgroundColor3 = LIME, Parent = logo })
-	text({ Position = UDim2.fromOffset(42, 68), Size = UDim2.fromOffset(280, 20), TextSize = 16, FontFace = FONT_BOLD, Text = TEXT.Mode, Parent = logo })
-	text({ Position = UDim2.fromOffset(42, 92), Size = UDim2.fromOffset(120, 18), TextSize = 14, FontFace = FONT_MEDIUM, TextColor3 = MUTED, Text = TEXT.Stage, Parent = logo })
+	local root = frame({ Name = "Logo", Position = UDim2.fromOffset(14, 4), Size = UDim2.fromOffset(300, 196), BackgroundTransparency = 1, Parent = self.gui })
+	self:_scaled(root)
+
+	local mark = frame({ Name = "Wordmark", Size = UDim2.fromOffset(300, 130), BackgroundTransparency = 1, Parent = root })
+	local imageId = logoImageId()
+	if imageId then
+		create("ImageLabel", { Name = "LogoImage", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = imageId, ScaleType = Enum.ScaleType.Fit, Parent = mark })
+	else
+		local star = buildWordmark(mark)
+		local starScale = create("UIScale", { Parent = star })
+		TweenService:Create(starScale, TweenInfo.new(1.1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { Scale = 1.12 }):Play()
+	end
+
+	local mode = frame({ Name = "Mode", Position = UDim2.fromOffset(8, 136), Size = UDim2.fromOffset(250, 30), BackgroundColor3 = NAVY, BackgroundTransparency = 0.1, Parent = root })
+	corner(mode, 6)
+	stroke(mode, VIOLET, 2)
+	local accent = frame({ Name = "Accent", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), Size = UDim2.fromOffset(6, 14), BackgroundColor3 = RED, Parent = mode })
+	corner(accent, 1)
+	local modeText = text({ Position = UDim2.fromOffset(24, 0), Size = UDim2.new(1, -30, 1, 0), Text = TEXT.Mode, TextSize = 16, Parent = mode })
+	outline(modeText, 1.5)
+
+	local stage = text({ Name = "Stage", Position = UDim2.fromOffset(12, 172), Size = UDim2.fromOffset(112, 20), Text = TEXT.Stage, TextSize = 15, FontFace = FONT_BOLD, TextTransparency = 0.15, Parent = root })
+	outline(stage, 1.5)
 	for i = 1, 3 do
-		local dot = circle(logo, 9, { Position = UDim2.fromOffset(150 + (i - 1) * 16, 96), BackgroundColor3 = LIME, BackgroundTransparency = if i == 1 then 0 else 1 })
-		if i > 1 then
-			stroke(dot, MUTED, 1.5, 0.4)
-		end
+		local current = i == 1
+		local dot = frame({
+			Name = "StageDot" .. i,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromOffset(134 + (i - 1) * 22, 182),
+			Size = if current then UDim2.fromOffset(13, 13) else UDim2.fromOffset(10, 10),
+			BackgroundColor3 = if current then GOLD else NAVY,
+			Rotation = 45,
+			Parent = root,
+		})
+		corner(dot, 2)
+		stroke(dot, if current then INK else VIOLET, 2)
 	end
 end
 
 function ShotHud:_buildGoals()
-	local holder = frame({
-		Name = "GoalsHolder",
-		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -22, 0, 14),
-		Size = UDim2.fromOffset(250, 90),
-		BackgroundTransparency = 1,
-		Parent = self.gui,
-	})
-	self.goalsScale = self:_scaled(holder)
-	local box = panel({ Name = "Goals", Size = UDim2.fromOffset(250, 58), Parent = holder }, 16)
-	trophyIcon(box, UDim2.fromOffset(20, 14))
-	text({ Position = UDim2.fromOffset(70, 0), Size = UDim2.fromOffset(80, 58), TextSize = 20, FontFace = FONT_BOLD, Text = TEXT.Goals, Parent = box })
-	self.goalsText = text({ Position = UDim2.fromOffset(140, 0), Size = UDim2.fromOffset(90, 58), TextSize = 24, TextXAlignment = Enum.TextXAlignment.Right, Text = "", Parent = box })
+	local root = panel({ Name = "Goals", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -18, 0, 14), Size = UDim2.fromOffset(292, 104) }, 10)
+	root.Parent = self.gui
+	self:_scaled(root)
 
-	-- One dot per shot of the series.
-	local pips = frame({ Name = "Pips", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 70), Size = UDim2.fromOffset(234, 12), BackgroundTransparency = 1, Parent = holder })
+	local trophy = iconBox(root, UDim2.fromOffset(14, 12), 50, GOLD)
+	self.trophy = trophy
+	emoji(trophy, "🏆", 28)
+
+	local label = text({ Name = "GoalsLabel", Position = UDim2.fromOffset(78, 10), Size = UDim2.fromOffset(120, 18), Text = TEXT.Goals, TextSize = 15, TextColor3 = LILAC, Parent = root })
+	outline(label, 1.5)
+
+	-- Centre-anchored holder so the bump scales around the number, not the panel corner.
+	local countHolder = frame({ Name = "Count", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromOffset(76, 46), Size = UDim2.fromOffset(150, 36), BackgroundTransparency = 1, Parent = root })
+	self.countScale = create("UIScale", { Parent = countHolder })
+	self.goalsText = bigText({ Text = "0 / 10", TextSize = 32, Size = UDim2.fromScale(1, 1), Parent = countHolder }, 2.5, Vector2.new(2, 3))
+
+	slashes(root, UDim2.fromOffset(222, 14), 22, GLOW)
+
+	self.pips = frame({ Name = "Pips", Position = UDim2.fromOffset(14, 74), Size = UDim2.new(1, -28, 0, 18), BackgroundTransparency = 1, Parent = root })
 	create("UIListLayout", {
 		FillDirection = Enum.FillDirection.Horizontal,
-		HorizontalAlignment = Enum.HorizontalAlignment.Right,
-		Padding = UDim.new(0, 7),
+		Padding = UDim.new(0, 6),
 		SortOrder = Enum.SortOrder.LayoutOrder,
-		Parent = pips,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Parent = self.pips,
 	})
-	self.pips = pips
 	self.pipFrames = {}
+	self.pipStrokes = {}
 end
 
 function ShotHud:_buildPowerPanel()
-	local root = panel({
-		Name = "PowerPanel",
-		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, -14),
-		Size = UDim2.fromOffset(760, 140),
-		Parent = self.gui,
-	}, 20)
+	local root = panel({ Name = "PowerPanel", AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -14), Size = UDim2.fromOffset(680, 116) }, 12)
+	root.Parent = self.gui
 	self:_scaled(root)
 
-	local iconBox = frame({ Position = UDim2.fromOffset(28, 38), Size = UDim2.fromOffset(64, 64), BackgroundColor3 = Color3.fromRGB(22, 44, 38), Parent = root })
-	corner(iconBox, 12)
-	stroke(iconBox, WHITE, 1.5, 0.82)
-	crosshairIcon(iconBox, UDim2.fromScale(0.5, 0.5))
+	local icon = iconBox(root, UDim2.fromOffset(14, 16), 56, GOLD)
+	crosshairIcon(icon)
 
-	self.title = text({ Position = UDim2.fromOffset(116, 14), Size = UDim2.fromOffset(600, 32), TextSize = 25, Text = TEXT.Ready, Parent = root })
+	self.title = text({ Name = "Instruction", Position = UDim2.fromOffset(84, 10), Size = UDim2.new(1, -100, 0, 28), Text = TEXT.Ready, TextSize = 20, Parent = root })
+	sizeLimit(self.title, 20)
+	outline(self.title, 2)
+	self.titleKind = "Ready"
 
-	local pill = frame({ Position = UDim2.fromOffset(116, 56), Size = UDim2.fromOffset(150, 36), BackgroundColor3 = INK, Parent = root })
-	corner(pill, 10)
-	stroke(pill, LIME, 2)
-	create("UIPadding", { PaddingLeft = UDim.new(0, 14), Parent = pill })
-	self.powerText = text({ Size = UDim2.fromScale(1, 1), TextSize = 21, Text = string.format(TEXT.Power, 0), Parent = pill })
+	local pill = frame({ Name = "PowerPill", Position = UDim2.fromOffset(84, 46), Size = UDim2.fromOffset(118, 28), BackgroundColor3 = NAVY, Parent = root })
+	corner(pill, 6)
+	self.pillStroke = stroke(pill, GOLD, 2)
+	self.powerText = text({ Size = UDim2.fromScale(1, 1), Text = string.format(TEXT.Power, 0), TextSize = 16, TextXAlignment = Enum.TextXAlignment.Center, Parent = pill })
+	outline(self.powerText, 1.5)
 
-	local bar = frame({ Position = UDim2.fromOffset(282, 62), Size = UDim2.fromOffset(450, 24), BackgroundColor3 = Color3.fromRGB(38, 52, 49), Parent = root })
-	corner(bar, 12)
-	stroke(bar, Color3.fromRGB(200, 212, 206), 1.5, 0.35)
-	-- Overpower zone marker (85%+): ball rises and is less accurate.
-	frame({ Position = UDim2.new(0.85, 0, 0, 3), Size = UDim2.new(0, 2, 1, -6), BackgroundColor3 = WHITE, BackgroundTransparency = 0.6, Parent = bar })
-	-- CanvasGroup clips the stripes to the rounded fill.
-	local fill = create("CanvasGroup", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = LIME, BorderSizePixel = 0, Parent = bar })
-	corner(fill, 12)
-	text({ Position = UDim2.fromOffset(-6, -4), Size = UDim2.fromOffset(470, 32), TextSize = 30, Text = string.rep("/", 48), TextColor3 = LIME_DARK, TextTransparency = 0.35, Parent = fill })
-	self.powerFill = fill
+	local track = frame({ Name = "PowerBar", Position = UDim2.fromOffset(214, 49), Size = UDim2.new(1, -230, 0, 22), BackgroundColor3 = NAVY, Parent = root })
+	corner(track, 5)
+	stroke(track, INK, 2)
+	local segmentsFrame = frame({ Name = "Segments", Position = UDim2.fromOffset(3, 3), Size = UDim2.new(1, -6, 1, -6), BackgroundTransparency = 1, Parent = track })
+	self.segments = {}
+	self.segmentColors = {}
+	self.segmentOff = {}
+	for i = 1, POWER_SEGMENTS do
+		local warn = (i - 1) / POWER_SEGMENTS >= POWER_WARN - 1e-6
+		local seg = frame({
+			Name = "Segment" .. i,
+			Position = UDim2.new((i - 1) / POWER_SEGMENTS, 1, 0, 0),
+			Size = UDim2.new(1 / POWER_SEGMENTS, -2, 1, 0),
+			Parent = segmentsFrame,
+		})
+		corner(seg, 2)
+		self.segments[i] = seg
+		self.segmentColors[i] = if warn then RED else GOLD:Lerp(ORANGE, (i - 1) / (POWER_SEGMENTS * POWER_WARN))
+		self.segmentOff[i] = if warn then rgb(74, 20, 48) else rgb(44, 28, 78)
+		seg.BackgroundColor3 = self.segmentOff[i]
+	end
+	local marker = frame({ Name = "WarnMarker", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(POWER_WARN, 0.5), Size = UDim2.new(0, 4, 1, 12), BackgroundColor3 = CREAM, ZIndex = 2, Parent = track })
+	corner(marker, 1)
+	stroke(marker, INK, 1.5)
 
-	local info = circle(root, 16, { Position = UDim2.fromOffset(116, 105), BackgroundTransparency = 1 })
-	stroke(info, MUTED, 1.2, 0.2)
-	text({ Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, TextSize = 11, FontFace = FONT_BOLD, TextColor3 = MUTED, Text = "i", Parent = info })
-	text({ Position = UDim2.fromOffset(142, 102), Size = UDim2.fromOffset(500, 22), TextSize = 15, FontFace = FONT_MEDIUM, TextColor3 = MUTED, Text = TEXT.PowerHint, Parent = root })
+	local hint = text({ Name = "Hint", Position = UDim2.fromOffset(84, 84), Size = UDim2.new(1, -100, 0, 18), Text = TEXT.PowerHint, TextSize = 14, FontFace = FONT_MEDIUM, TextTransparency = 0.25, Parent = root })
+	sizeLimit(hint, 14)
 
-	slashes(root, UDim2.fromOffset(640, 4), 30)
-	slashes(root, UDim2.fromOffset(640, 104), 30)
+	slashes(root, UDim2.new(1, -62, 0, 84), 18, GLOW)
+
+	self.lastPercent = -1
+	self.litCount = 0
+	self.powerWarn = false
 end
 
-function ShotHud:_buildCard()
-	local card = panel({
-		Name = "ResultCard",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.42),
-		Size = UDim2.fromOffset(380, 186),
-		Visible = false,
-		Parent = self.gui,
-	}, 20)
-	self.cardScale = self:_scaled(card)
-	ballBadge(card)
-	slashes(card, UDim2.fromOffset(12, 8), 26)
-	slashes(card, UDim2.fromOffset(306, 150), 26)
-
-	self.cardTitle = text({ Position = UDim2.fromOffset(0, 26), Size = UDim2.new(1, 0, 0, 60), TextSize = 54, TextXAlignment = Enum.TextXAlignment.Center, Parent = card })
-	self.cardSubtitle = text({ Position = UDim2.fromOffset(0, 86), Size = UDim2.new(1, 0, 0, 22), TextSize = 17, FontFace = FONT_MEDIUM, TextXAlignment = Enum.TextXAlignment.Center, Parent = card })
-
+-- Gold primary button: dark lip below, gradient face clipped by a CanvasGroup with a moving shine.
+function ShotHud:_buildButton(parent: Instance)
 	local button = create("TextButton", {
 		Name = "Continue",
 		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 118),
-		Size = UDim2.fromOffset(272, 50),
-		BackgroundColor3 = LIME,
-		AutoButtonColor = true,
-		BorderSizePixel = 0,
-		FontFace = FONT_HEAVY,
-		TextSize = 24,
-		TextColor3 = INK,
-		Text = TEXT.NextShot,
-		Parent = card,
+		Position = UDim2.new(0.5, 0, 0, 172),
+		Size = UDim2.fromOffset(280, 52),
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = "",
+		Parent = parent,
 	})
-	corner(button, 12)
-	glow(button, 12, 0.8)
-	self.button = button
-	self.card = card
-	self.onContinue = nil :: (() -> ())?
+	local lip = frame({ Name = "Lip", Position = UDim2.fromOffset(0, 6), Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = LIP, Parent = button })
+	corner(lip, 9)
+	stroke(lip, INK, 2.5)
+
+	local body = frame({ Name = "Body", Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1, Parent = button })
+	local face = create("CanvasGroup", { Name = "Face", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, Parent = body })
+	corner(face, 9)
+	local fill = frame({ Name = "Fill", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = face })
+	create("UIGradient", { Color = ColorSequence.new(rgb(255, 214, 74), ORANGE), Rotation = 90, Parent = fill })
+	frame({ Name = "Sheen", Position = UDim2.fromOffset(0, 0), Size = UDim2.new(1, 0, 0.42, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 0.72, Parent = face })
+	local shine = frame({
+		Name = "Shine",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(-0.3, 0.5),
+		Size = UDim2.new(0, 34, 2, 0),
+		Rotation = 22,
+		BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0.45,
+		Parent = face,
+	})
+	local edge = frame({ Name = "Outline", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = body })
+	corner(edge, 9)
+	stroke(edge, INK, 2.5)
+	local label = text({ Name = "Label", Size = UDim2.fromScale(1, 1), Text = TEXT.NextShot, TextSize = 24, TextColor3 = INK, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
+	outline(label, 1.5, GOLD_LIGHT).Transparency = 0.4
+
+	self.shineTween = TweenService:Create(
+		shine,
+		TweenInfo.new(0.75, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, -1, false, 1.6),
+		{ Position = UDim2.fromScale(1.3, 0.5) }
+	)
+
+	local pressInfo = TweenInfo.new(0.07, Enum.EasingStyle.Quad)
+	local function setPressed(pressed: boolean)
+		TweenService:Create(body, pressInfo, { Position = UDim2.fromOffset(0, if pressed then 5 else 0) }):Play()
+	end
+	button.MouseButton1Down:Connect(function()
+		setPressed(true)
+	end)
+	button.MouseButton1Up:Connect(function()
+		setPressed(false)
+	end)
+	button.MouseLeave:Connect(function()
+		setPressed(false)
+	end)
 	button.Activated:Connect(function()
 		self:_continue()
 	end)
+
+	self.button = button
+	self.buttonBody = body
+	self.shine = shine
+	self.buttonLabel = label
+end
+
+function ShotHud:_buildCard()
+	local card = frame({
+		Name = "ResultCard",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.42),
+		Size = UDim2.fromOffset(400, 240),
+		BackgroundTransparency = 1,
+		Visible = false,
+		ZIndex = 10,
+		Parent = self.gui,
+	})
+	self:_scaled(card)
+	self.card = card
+
+	local body, glows = panel({ Name = "Pop", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1) }, 14)
+	body.Parent = card
+	self.cardGlows = glows
+	self.cardPop = create("UIScale", { Parent = body })
+
+	slashes(body, UDim2.fromOffset(14, 10), 22, GLOW)
+	slashes(body, UDim2.new(1, -62, 0, 10), 22, GLOW)
+
+	-- Badge sitting on the top edge.
+	local badge = frame({ Name = "Badge", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0), Size = UDim2.fromOffset(64, 64), BackgroundTransparency = 1, ZIndex = 3, Parent = body })
+	local diamond = frame({ Name = "Diamond", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(46, 46), Rotation = 45, BackgroundColor3 = NAVY, Parent = badge })
+	corner(diamond, 6)
+	self.badgeStroke = stroke(diamond, GOLD, 3)
+	self.badgeGlow = stroke(frame({ Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = diamond }), GOLD, 8, 0.8)
+	self.badgeIcon = emoji(badge, "⚽", 26)
+	self.badge = badge
+	self.sparkles = {}
+	for _, side in { -1, 1 } do
+		local sparkle = text({
+			Name = "Sparkle",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, side * 52, 0.5, 4),
+			Size = UDim2.fromOffset(24, 24),
+			Text = "★",
+			TextSize = 22,
+			TextColor3 = GOLD,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Parent = badge,
+		})
+		outline(sparkle, 2)
+		table.insert(self.sparkles, sparkle)
+	end
+
+	local titleHolder = frame({ Name = "Title", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0, 66), Size = UDim2.new(1, -36, 0, 64), BackgroundTransparency = 1, Parent = body })
+	self.titlePop = create("UIScale", { Parent = titleHolder })
+	self.cardTitle = bigText({ Text = "", TextSize = 56, TextColor3 = WHITE, TextXAlignment = Enum.TextXAlignment.Center, Size = UDim2.fromScale(1, 1), Parent = titleHolder }, 4, Vector2.new(0, 5), 56)
+	-- The gradient tints the text white -> kind colour; the dark outline stays dark under any tint.
+	self.titleGradient = create("UIGradient", { Rotation = 90, Parent = self.cardTitle })
+
+	self.cardSubtitle = text({ Name = "Subtitle", Position = UDim2.fromOffset(20, 100), Size = UDim2.new(1, -40, 0, 24), Text = "", TextSize = 18, FontFace = FONT_BOLD, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
+	sizeLimit(self.cardSubtitle, 18)
+	outline(self.cardSubtitle, 1.5)
+
+	local chip = frame({
+		Name = "SpeedChip",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 134),
+		Size = UDim2.fromOffset(0, 28),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = NAVY,
+		Visible = false,
+		Parent = body,
+	})
+	corner(chip, 8)
+	stroke(chip, GOLD, 2)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 12), Parent = chip })
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 6),
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = chip,
+	})
+	text({ Name = "Bolt", LayoutOrder = 1, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = "⚡", TextSize = 16, FontFace = FONT_MEDIUM, Parent = chip })
+	self.speedText = text({ Name = "Value", LayoutOrder = 2, Size = UDim2.fromScale(0, 1), AutomaticSize = Enum.AutomaticSize.X, Text = "", TextSize = 17, Parent = chip })
+	outline(self.speedText, 1.5)
+	self.speedChip = chip
+
+	self:_buildButton(body)
 end
 
 function ShotHud:_continue()
@@ -1700,47 +3196,126 @@ function ShotHud:isCardVisible(): boolean
 	return self.card.Visible
 end
 
+-- kind: Ready | Holding | Flying | AfterShot. Called every frame while aiming, so it skips repeats.
 function ShotHud:setTitle(kind: string)
+	if self.titleKind == kind then
+		return
+	end
+	self.titleKind = kind
 	self.title.Text = TEXT[kind] or kind
 end
 
+-- Called every frame while aiming: only touches properties that actually changed.
 function ShotHud:setPower(power: number)
 	local p = math.clamp(power, 0, 1)
-	self.powerText.Text = string.format(TEXT.Power, math.floor(p * 100 + 0.5))
-	self.powerFill.Size = UDim2.fromScale(p, 1)
-	self.powerFill.BackgroundColor3 = if p >= 0.85 then Color3.fromRGB(250, 170, 40) else LIME
+	local percent = math.floor(p * 100 + 0.5)
+	if percent == self.lastPercent then
+		return
+	end
+	self.lastPercent = percent
+	self.powerText.Text = string.format(TEXT.Power, percent)
+
+	local lit = math.clamp(math.ceil(p * POWER_SEGMENTS - 1e-6), 0, POWER_SEGMENTS)
+	if lit ~= self.litCount then
+		local from, to = math.min(lit, self.litCount) + 1, math.max(lit, self.litCount)
+		for i = from, to do
+			self.segments[i].BackgroundColor3 = if i <= lit then self.segmentColors[i] else self.segmentOff[i]
+		end
+		self.litCount = lit
+	end
+
+	local warn = p >= POWER_WARN
+	if warn ~= self.powerWarn then
+		self.powerWarn = warn
+		self.pillStroke.Color = if warn then RED else GOLD
+		self.powerText.TextColor3 = if warn then RED_LIGHT else CREAM
+	end
 end
 
-function ShotHud:setSeries(goals: number, seriesLength: number, history: { string })
-	self.goalsText.Text = string.format('<font color="#A3E635">%d</font> / %d', goals, seriesLength)
+function ShotHud:setSeries(goals: number, seriesLength: number, history: { string }?)
+	local shots = history or {}
+	setBigText(self.goalsText, string.format('<font color="#FFBF1F">%d</font> / %d', goals, seriesLength))
+
 	for i = #self.pipFrames + 1, seriesLength do
-		local pip = circle(self.pips, 13, { LayoutOrder = i, BackgroundTransparency = 1 })
-		create("UIStroke", { Color = MUTED, Thickness = 1.5, Transparency = 0.45, Parent = pip })
+		local pip = frame({ Name = "Pip" .. i, LayoutOrder = i, Size = UDim2.fromOffset(18, 18), BackgroundColor3 = NAVY, Parent = self.pips })
+		corner(pip, 4)
+		self.pipStrokes[i] = stroke(pip, VIOLET, 2)
 		self.pipFrames[i] = pip
 	end
+
+	local nextIndex = #shots + 1
 	for i, pip in self.pipFrames do
-		local outcome = history[i]
+		local outcome = shots[i]
 		pip.Visible = i <= seriesLength
-		pip.BackgroundColor3 = if outcome then PIP_COLORS[outcome] or MUTED else MUTED
-		pip.BackgroundTransparency = if outcome then 0 else 1
+		pip.BackgroundColor3 = if outcome then PIP_COLORS[outcome] or CREAM else NAVY
+		local s = self.pipStrokes[i]
+		s.Color = if outcome then INK elseif i == nextIndex then CREAM else VIOLET
+		s.Transparency = 0
+	end
+
+	-- Gentle pulse on the outline of the shot about to be taken.
+	if self.pulseIndex ~= nextIndex then
+		if self.pulseTween then
+			self.pulseTween:Cancel()
+		end
+		self.pulseTween = nil
+		self.pulseIndex = nextIndex
+		local s = self.pipStrokes[nextIndex]
+		if s and nextIndex <= seriesLength then
+			self.pulseTween = TweenService:Create(s, TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { Transparency = 0.75 })
+			self.pulseTween:Play()
+		end
 	end
 end
 
 function ShotHud:bumpGoals()
-	self.goalsScale.Scale = self.baseScale * 1.15
-	TweenService:Create(self.goalsScale, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = self.baseScale }):Play()
+	self.countScale.Scale = 1.45
+	TweenService:Create(self.countScale, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	self.trophy.Rotation = -18
+	TweenService:Create(self.trophy, TweenInfo.new(0.5, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out), { Rotation = 0 }):Play()
 end
 
--- kind: GOAL | SAVE | POST | BAR | WIDE | OVER
-function ShotHud:showResult(kind: string, seriesText: string?)
+-- kind: GOAL | POST_IN | CATCH | PARRY | POST | BAR | WIDE | OVER
+-- details: optional { speedKmh = number }
+function ShotHud:showResult(kind: string, seriesText: string?, details: { speedKmh: number? }?)
+	local style = KIND_STYLE[kind] or KIND_STYLE.WIDE
 	local info = TEXT.Outcomes[kind] or { kind, "" }
-	self.cardTitle.Text = info[1]
-	self.cardTitle.TextColor3 = OUTCOME_COLORS[kind] or WHITE
+
+	setBigText(self.cardTitle, info[1])
+	self.titleGradient.Color = ColorSequence.new(style.top, style.bottom)
 	self.cardSubtitle.Text = seriesText or info[2]
-	self.button.Text = if seriesText then TEXT.NewSeries else TEXT.NextShot
+	self.buttonLabel.Text = if seriesText then TEXT.NewSeries else TEXT.NextShot
+
+	local speed = details and details.speedKmh
+	local hasChip = type(speed) == "number" and speed > 0
+	self.speedChip.Visible = hasChip
+	if hasChip then
+		self.speedText.Text = string.format(TEXT.Speed, math.floor(speed + 0.5))
+	end
+	-- Without the chip the card closes up around the button.
+	self.card.Size = UDim2.fromOffset(400, if hasChip then 240 else 206)
+	self.button.Position = UDim2.new(0.5, 0, 0, if hasChip then 172 else 138)
+	self.buttonBody.Position = UDim2.fromOffset(0, 0)
+
+	for _, s in self.cardGlows do
+		s.Color = style.accent
+	end
+	self.badgeStroke.Color = style.accent
+	self.badgeGlow.Color = style.accent
+	self.badgeIcon.Text = style.icon
+	for _, sparkle in self.sparkles do
+		sparkle.Visible = style.sparkle == true
+	end
+
 	self.card.Visible = true
-	self.cardScale.Scale = self.baseScale * 0.6
-	TweenService:Create(self.cardScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = self.baseScale }):Play()
+	self.cardPop.Scale = 0.55
+	TweenService:Create(self.cardPop, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	self.titlePop.Scale = 1.5
+	TweenService:Create(self.titlePop, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out, 0, false, 0.08), { Scale = 1 }):Play()
+	self.badge.Rotation = -120
+	TweenService:Create(self.badge, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Rotation = 0 }):Play()
+	self.shine.Position = UDim2.fromScale(-0.3, 0.5)
+	self.shineTween:Play()
 end
 
 function ShotHud:seriesText(goals: number, seriesLength: number): string
@@ -1749,17 +3324,18 @@ end
 
 function ShotHud:hideCard()
 	self.card.Visible = false
+	self.shineTween:Cancel()
 end
 
 return ShotHud
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="15">
+        <Item class="ModuleScript" referent="17">
           <Properties>
             <string name="Name">ShotVisuals</string>
-            <string name="Source"><![CDATA[-- Client-only 3D visuals: camera, ball, goalkeeper animation, aim crosshair, trajectory
--- preview and goal effects. Everything here is local to this player and has no effect on the outcome.
+            <string name="Source"><![CDATA[-- Client-only 3D visuals: camera, ball replay, goalkeeper animation, aim crosshair, trajectory
+-- preview and effects. Everything here is local to this player and has no effect on the outcome.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -1768,20 +3344,18 @@ local TweenService = game:GetService("TweenService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
 local ShotPhysics = require(Shared:WaitForChild("ShotPhysics"))
+local KeeperAnimator = require(script.Parent:WaitForChild("KeeperAnimator"))
 
 local Keeper = ShotConfig.Goalkeeper
 local BALL_RADIUS = ShotConfig.Ball.Radius
-local PREVIEW_DOTS = 14
-local FOLLOW_THROUGH_SECONDS = 1.6
-local KEEPER_MIN_Y = 1.2
-local KEEPER_MAX_TILT = math.rad(95)
-local ARMS_READY = math.rad(38)
-local ARMS_DIVE = math.rad(165)
-local BALL_SPIN_RATE = 14 -- radians per second in flight
+local PREVIEW_DOTS = 16
+local AFTER_PATH_SECONDS = 0.4 -- linger after the replayed path ends
 
 local WHITE = Color3.new(1, 1, 1)
-local LIME = Color3.fromRGB(163, 230, 53)
-local YELLOW = Color3.fromRGB(250, 204, 21)
+local GOLD = Color3.fromRGB(255, 191, 31)
+local RED = Color3.fromRGB(255, 45, 85)
+local VIOLET = Color3.fromRGB(123, 77, 255)
+local CREAM = Color3.fromRGB(247, 236, 214)
 
 local ShotVisuals = {}
 ShotVisuals.__index = ShotVisuals
@@ -1820,34 +3394,60 @@ local function icosahedronDirections(): { Vector3 }
 	return dirs
 end
 
+-- Position on the replayed path at time t (linear between samples).
+local function pathAt(path: { Vector3 }, sampleStep: number, t: number): Vector3
+	local f = t / sampleStep
+	local i = math.floor(f)
+	if i >= #path - 1 then
+		return path[#path]
+	end
+	return path[i + 1]:Lerp(path[i + 2], f - i)
+end
+
 function ShotVisuals.new()
 	local self = setmetatable({}, ShotVisuals)
 	self.token = 0
 	self.clock = 0
 	self.shake = 0
 	self.fovKick = 0
-	self.idle = true
+	self.ballRotation = CFrame.identity
 
 	local folder = create("Folder", { Name = "ShotVisuals", Parent = workspace })
 
-	-- Ball: white sphere with 12 flat dark panels.
+	-- Ball: white sphere with 12 flat dark panels, plus a trail for hard shots.
 	local ballModel = create("Model", { Name = "Ball", Parent = folder })
-	self.ballParts = {
-		{ makePart({ Name = "Shell", Shape = Enum.PartType.Ball, Size = Vector3.one * BALL_RADIUS * 2, Color = WHITE, Parent = ballModel }), CFrame.identity },
-	}
+	local shell = makePart({ Name = "Shell", Shape = Enum.PartType.Ball, Size = Vector3.one * BALL_RADIUS * 2, Color = WHITE, Parent = ballModel })
+	self.ballParts = { { shell, CFrame.identity } }
 	for _, dir in icosahedronDirections() do
 		local reference = if math.abs(dir.Y) < 0.9 then Vector3.yAxis else Vector3.xAxis
-		local up = dir:Cross(reference).Unit
 		local patch = makePart({
 			Name = "Panel",
 			Shape = Enum.PartType.Cylinder,
 			Size = Vector3.new(0.05, BALL_RADIUS * 0.66, BALL_RADIUS * 0.66),
-			Color = Color3.fromRGB(22, 22, 26),
+			Color = Color3.fromRGB(28, 18, 48),
 			CastShadow = false,
 			Parent = ballModel,
 		})
-		table.insert(self.ballParts, { patch, CFrame.fromMatrix(dir * BALL_RADIUS * 0.985, dir, up) })
+		table.insert(self.ballParts, { patch, CFrame.fromMatrix(dir * BALL_RADIUS * 0.985, dir, dir:Cross(reference).Unit) })
 	end
+	-- The trail hangs off a separate carrier so the ball's spin doesn't twist it.
+	local carrier = makePart({ Name = "TrailCarrier", Size = Vector3.one * 0.2, Transparency = 1, Parent = folder })
+	local a0 = create("Attachment", { Position = Vector3.new(0, 0.55, 0), Parent = carrier })
+	local a1 = create("Attachment", { Position = Vector3.new(0, -0.55, 0), Parent = carrier })
+	self.trail = create("Trail", {
+		Attachment0 = a0,
+		Attachment1 = a1,
+		Lifetime = 0.22,
+		MinLength = 0.05,
+		FaceCamera = true,
+		LightEmission = 0.7,
+		Color = ColorSequence.new(CREAM, GOLD),
+		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.35), NumberSequenceKeypoint.new(1, 1) }),
+		WidthScale = NumberSequence.new(1, 0.2),
+		Enabled = false,
+		Parent = carrier,
+	})
+	self.trailCarrier = carrier
 
 	-- Crosshair on the goal plane, the size of the ball, drawn on top of everything.
 	local aimPart = makePart({ Name = "Crosshair", Size = Vector3.new(3, 3, 0.05), Transparency = 1, CastShadow = false, Parent = folder })
@@ -1864,20 +3464,23 @@ function ShotVisuals.new()
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
 		Size = UDim2.fromScale(2 * BALL_RADIUS / 3, 2 * BALL_RADIUS / 3),
-		BackgroundColor3 = LIME,
+		BackgroundColor3 = GOLD,
 		BackgroundTransparency = 0.82,
 		Parent = aimGui,
 	})
 	create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = ring })
-	create("UIStroke", { Color = LIME, Thickness = 6, Parent = ring })
-	local dot = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(14, 14), BackgroundColor3 = WHITE, Parent = aimGui })
+	create("UIStroke", { Color = GOLD, Thickness = 6, Parent = ring })
+	create("UIStroke", { Color = Color3.fromRGB(43, 18, 80), Thickness = 2, Transparency = 0.2, Parent = create("Frame", {
+		Size = UDim2.new(1, 14, 1, 14), Position = UDim2.fromOffset(-7, -7), BackgroundTransparency = 1, Parent = ring,
+	}) })
+	local dot = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(14, 14), BackgroundColor3 = CREAM, Parent = aimGui })
 	create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = dot })
 	for _, tick in { { 0.5, 0.06, 6, 22 }, { 0.5, 0.94, 6, 22 }, { 0.06, 0.5, 22, 6 }, { 0.94, 0.5, 22, 6 } } do
 		create("Frame", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(tick[1], tick[2]),
 			Size = UDim2.fromOffset(tick[3], tick[4]),
-			BackgroundColor3 = LIME,
+			BackgroundColor3 = GOLD,
 			BorderSizePixel = 0,
 			Parent = aimGui,
 		})
@@ -1890,38 +3493,47 @@ function ShotVisuals.new()
 			Name = "PreviewDot",
 			Shape = Enum.PartType.Ball,
 			Size = Vector3.one * (0.42 - 0.22 * i / PREVIEW_DOTS),
-			Color = LIME,
+			Color = GOLD,
 			Material = Enum.Material.Neon,
 			CastShadow = false,
 			Transparency = 1,
 			Parent = folder,
 		})
 	end
+	self.previewKey = ""
 
-	local emitterPart = makePart({
-		Name = "Confetti",
-		Size = Vector3.one,
-		Transparency = 1,
-		CFrame = CFrame.new(0, ShotConfig.Goal.Height + 1, -ShotConfig.Goal.NetDepth / 2),
-		Parent = folder,
-	})
-	self.confetti = create("ParticleEmitter", {
-		Enabled = false,
+	local function emitter(name: string, position: Vector3, props: { [string]: any })
+		local holder = makePart({ Name = name, Size = Vector3.one, Transparency = 1, CFrame = CFrame.new(position), Parent = folder })
+		props.Enabled = false
+		props.Parent = holder
+		return create("ParticleEmitter", props), holder
+	end
+	self.confetti = emitter("Confetti", Vector3.new(0, ShotConfig.Goal.Height + 1, -ShotConfig.Goal.NetDepth / 2), {
 		Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, LIME),
-			ColorSequenceKeypoint.new(0.5, WHITE),
-			ColorSequenceKeypoint.new(1, YELLOW),
+			ColorSequenceKeypoint.new(0, GOLD),
+			ColorSequenceKeypoint.new(0.35, RED),
+			ColorSequenceKeypoint.new(0.7, VIOLET),
+			ColorSequenceKeypoint.new(1, CREAM),
 		}),
-		Size = NumberSequence.new(0.5, 0.15),
-		Speed = NumberRange.new(25, 45),
-		SpreadAngle = Vector2.new(70, 70),
+		Size = NumberSequence.new(0.55, 0.15),
+		Speed = NumberRange.new(28, 50),
+		SpreadAngle = Vector2.new(75, 75),
 		EmissionDirection = Enum.NormalId.Top,
 		Acceleration = Vector3.new(0, -40, 0),
 		Drag = 1.5,
-		Lifetime = NumberRange.new(1.5, 2.5),
-		RotSpeed = NumberRange.new(-200, 200),
+		Lifetime = NumberRange.new(1.6, 2.6),
+		RotSpeed = NumberRange.new(-220, 220),
 		LightEmission = 0.6,
-		Parent = emitterPart,
+	})
+	-- Small burst of chalk/grass at bounces and white flashes on the frame.
+	self.impact, self.impactHolder = emitter("Impact", Vector3.zero, {
+		Color = ColorSequence.new(CREAM),
+		Size = NumberSequence.new(0.5, 0),
+		Speed = NumberRange.new(6, 14),
+		SpreadAngle = Vector2.new(180, 180),
+		Acceleration = Vector3.new(0, -30, 0),
+		Lifetime = NumberRange.new(0.25, 0.45),
+		LightEmission = 0.8,
 	})
 
 	self:_findScene()
@@ -1935,66 +3547,54 @@ function ShotVisuals:_findScene()
 		warn("[ShotVisuals] workspace.FootballScene not found; is the server Main script running?")
 		return
 	end
-
 	local net = scene:FindFirstChild("NetBack", true)
-	if net then
+	if net and net:IsA("BasePart") then
 		self.netBack, self.netBackHome = net, net.CFrame
 	end
-
 	local keeper = Keeper.Enabled and scene:WaitForChild("Goalkeeper", 10)
 	if keeper then
-		self.keeper = keeper
-		self.keeperHome = keeper:GetPivot()
-		self.keeperRotation = self.keeperHome.Rotation
-		self.shoulders = {}
-		for _, info in { { "LeftShoulder", -1 }, { "RightShoulder", 1 } } do
-			local motor = keeper:FindFirstChild(info[1], true)
-			if motor and motor:IsA("Motor6D") then
-				table.insert(self.shoulders, { motor, motor.C0, info[2] })
-			end
-		end
+		self.keeper = KeeperAnimator.new(keeper)
 	end
 end
 
-function ShotVisuals:_setBall(position: Vector3, spin: number)
-	local base = CFrame.new(position) * CFrame.Angles(-spin, 0, 0)
+function ShotVisuals:_setBall(position: Vector3)
+	local base = CFrame.new(position) * self.ballRotation
 	for _, entry in self.ballParts do
 		entry[1].CFrame = base * entry[2]
 	end
+	self.trailCarrier.CFrame = CFrame.new(position)
+	self.ballPosition = position
 end
 
--- offset: body movement from the home position; tilt: lean around the view axis; arms: shoulder angle.
-function ShotVisuals:_poseKeeper(offset: Vector3, tilt: number, arms: number)
-	if not self.keeper then
-		return
+function ShotVisuals:_spinBall(angularVelocity: Vector3, dt: number)
+	local speed = angularVelocity.Magnitude
+	if speed > 1e-3 then
+		self.ballRotation = CFrame.fromAxisAngle(angularVelocity / speed, speed * dt) * self.ballRotation
 	end
-	local position = self.keeperHome.Position + offset
-	self.keeper:PivotTo(CFrame.new(position) * CFrame.Angles(0, 0, tilt) * self.keeperRotation)
-	for _, shoulder in self.shoulders do
-		shoulder[1].C0 = shoulder[2] * CFrame.Angles(0, 0, shoulder[3] * arms)
-	end
-end
-
-function ShotVisuals:_diveKeeper(target: Vector3, alpha: number)
-	local eased = 1 - (1 - alpha) ^ 2
-	local offset = Vector3.new(target.X - Keeper.HomeX, math.max(target.Y, KEEPER_MIN_Y) - Keeper.HomeY, 0)
-	local tilt = math.clamp(math.atan2(-offset.X, offset.Y + Keeper.HomeY), -KEEPER_MAX_TILT, KEEPER_MAX_TILT)
-	local lean = math.clamp(offset.Magnitude / 4, 0, 1)
-	self:_poseKeeper(offset * eased, tilt * lean * eased, ARMS_READY + (ARMS_DIVE - ARMS_READY) * math.min(1, alpha * 2))
 end
 
 function ShotVisuals:reset()
 	self.token += 1
-	self.idle = true
-	self:_setBall(ShotPhysics.ballSpot(), 0)
-	self:_poseKeeper(Vector3.zero, 0, ARMS_READY)
+	self.holdBall = false
+	self.ballRotation = CFrame.identity
+	self.trail.Enabled = false
+	self:_setBall(ShotPhysics.ballSpot())
+	if self.keeper then
+		self.keeper:recover()
+	end
 	if self.netBack then
 		self.netBack.CFrame = self.netBackHome
 	end
 	self:updateAiming(false, 0, 0.5, 0, false)
 end
 
--- Per-frame: camera (with shake and kick) and the keeper's ready stance.
+function ShotVisuals:setCharging(on: boolean)
+	if self.keeper then
+		self.keeper:setCharging(on)
+	end
+end
+
+-- Per-frame: camera (with shake and kick) and the keeper.
 function ShotVisuals:update(dt: number)
 	self.clock += dt
 	self.shake = math.max(0, self.shake - dt * 2.5)
@@ -2011,27 +3611,44 @@ function ShotVisuals:update(dt: number)
 	end
 	camera.CFrame = base
 
-	if self.idle then
-		local t = self.clock
-		local sway = Vector3.new(math.sin(t * 2.1) * 0.45, math.abs(math.sin(t * 4.2)) * 0.1, 0)
-		self:_poseKeeper(sway, 0, ARMS_READY + math.sin(t * 4.2) * 0.06)
+	if self.keeper then
+		self.keeper:update(dt)
+		if self.holdBall then
+			local hands = self.keeper:handsPosition()
+			if hands then
+				self:_setBall(self.ballPosition:Lerp(hands, math.min(1, dt * 25)))
+			end
+		end
 	end
 end
 
--- Shows the crosshair, and while holding, the predicted (no-error) arc.
+-- Shows the crosshair, and while holding, the predicted arc including curl (no random error).
 function ShotVisuals:updateAiming(enabled: boolean, aimX: number, aimY: number, power: number, holding: boolean)
 	local point = ShotPhysics.aimToGoalPoint(aimX, aimY)
 	self.aimGui.Enabled = enabled
 	self.aimPart.CFrame = CFrame.new(point + Vector3.new(0, 0, 0.25))
 
 	local showArc = enabled and holding
-	local start = ShotPhysics.ballSpot()
-	local flightTime = ShotPhysics.flightTime(start, point, power)
-	local velocity = ShotPhysics.launchVelocity(start, point, flightTime)
 	for i, dot in self.dots do
 		dot.Transparency = if showArc then 0.1 + 0.55 * i / PREVIEW_DOTS else 1
-		if showArc then
-			dot.CFrame = CFrame.new(ShotPhysics.positionAt(start, velocity, flightTime * i / (PREVIEW_DOTS + 1)))
+	end
+	if not showArc then
+		self.previewKey = ""
+		return
+	end
+	-- Re-solve only when the input actually changed.
+	local key = string.format("%.3f|%.3f|%.2f", aimX, aimY, power)
+	if key == self.previewKey then
+		return
+	end
+	self.previewKey = key
+	local points = ShotPhysics.previewPath(point, power, ShotPhysics.spinFor(aimX, power), PREVIEW_DOTS)
+	for i, dot in self.dots do
+		local p = points[i]
+		if p then
+			dot.CFrame = CFrame.new(p)
+		else
+			dot.Transparency = 1
 		end
 	end
 end
@@ -2039,99 +3656,107 @@ end
 function ShotVisuals:onShotReleased()
 	self.fovKick = 1.8
 	self:updateAiming(false, 0, 0.5, 0, false)
+	if self.keeper then
+		self.keeper:setCharging(false)
+	end
 end
 
-function ShotVisuals:_bulgeNet()
+function ShotVisuals:_bulgeNet(at: Vector3)
 	local net = self.netBack
 	if not net then
 		return
 	end
-	net.CFrame = self.netBackHome * CFrame.new(0, 0, -0.9)
-	TweenService:Create(net, TweenInfo.new(0.6, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out), { CFrame = self.netBackHome }):Play()
+	local depth = math.clamp(1.2 - math.abs(at.X) / ShotConfig.Goal.Width, 0.5, 1.2)
+	net.CFrame = self.netBackHome * CFrame.new(0, 0, -depth)
+	TweenService:Create(net, TweenInfo.new(0.7, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out), { CFrame = self.netBackHome }):Play()
 end
 
--- Velocity right after the ball reaches the goal plane / keeper; purely cosmetic.
-local function velocityAfterImpact(outcome: string, velocity: Vector3, target: Vector3): Vector3
-	if outcome == "GOAL" then
-		return velocity * 0.6
-	elseif outcome == "SAVE" then
-		local side = if target.X >= 0 then 1 else -1
-		return Vector3.new(side * 7, 9, -velocity.Z * 0.25)
-	elseif outcome == "POST" then
-		if target.Y > ShotConfig.Goal.Height - BALL_RADIUS then
-			return Vector3.new(velocity.X * 0.5, 10, -velocity.Z * 0.35) -- crossbar
-		end
-		return Vector3.new(-velocity.X * 0.4, velocity.Y * 0.3 + 3, -velocity.Z * 0.4)
-	end
-	return velocity
+function ShotVisuals:_puff(at: Vector3, count: number)
+	self.impactHolder.CFrame = CFrame.new(at)
+	self.impact:Emit(count)
 end
 
--- Plays the server-decided shot. Calls onImpact when the ball reaches the goal or keeper,
--- and yields until the follow-through ends or reset() is called.
-function ShotVisuals:playShot(result, onImpact: () -> ())
+-- Replays the server-simulated shot. Calls onDecisive at the moment the result is clear,
+-- and yields until the replay ends or reset() is called.
+function ShotVisuals:playShot(result, onDecisive: () -> ())
 	self.token += 1
 	local token = self.token
-	self.idle = false
+	local path: { Vector3 } = result.path
+	local sampleStep: number = result.sampleStep
+	local duration = (#path - 1) * sampleStep
+	local spin: Vector3 = result.spin or Vector3.zero
 
-	local start: Vector3 = result.start
-	local target: Vector3 = result.target
-	local flightTime: number = result.flightTime
-	local velocity = ShotPhysics.launchVelocity(start, target, flightTime)
-
-	-- The keeper stands in front of the line, so a save happens slightly before the goal plane.
-	local endTime = flightTime
-	if result.outcome == "SAVE" then
-		endTime = flightTime * (1 - Keeper.HomeZ / (start.Z - target.Z))
+	if self.keeper then
+		self.keeper:startShot({
+			reaction = result.keeperReaction,
+			impactTime = result.keeperTime or result.decisiveTime,
+			target = result.keeperTarget,
+			kind = result.keeperKind,
+			dives = result.keeperDives,
+		})
 	end
-	local reaction: number = result.keeperReaction
-	local diveDuration = math.max(endTime - reaction, 0.05)
 
-	local t = 0
-	while t < endTime do
-		self:_setBall(ShotPhysics.positionAt(start, velocity, t), t * BALL_SPIN_RATE)
-		self:_diveKeeper(result.keeperTarget, math.clamp((t - reaction) / diveDuration, 0, 1))
-		t += RunService.RenderStepped:Wait()
+	-- Effects keyed to simulation events.
+	local pending = table.clone(result.events)
+	table.sort(pending, function(a, b)
+		return a.t < b.t
+	end)
+	local decisiveFired = false
+	self.trail.Enabled = (result.speedKmh or 0) >= 85
+
+	local t, last = 0, ShotPhysics.ballSpot()
+	while t < duration + AFTER_PATH_SECONDS do
+		local dt = RunService.RenderStepped:Wait()
 		if self.token ~= token then
 			return
 		end
-	end
+		t += dt
 
-	local position = ShotPhysics.positionAt(start, velocity, endTime)
-	local spin = endTime * BALL_SPIN_RATE
-	self:_setBall(position, spin)
-	self:_diveKeeper(result.keeperTarget, 1)
-	if result.outcome == "GOAL" then
-		self.shake = 1
-		self.confetti:Emit(150)
-		self:_bulgeNet()
-	else
-		self.shake = 0.4
-	end
-	onImpact()
+		while pending[1] and pending[1].t <= t do
+			local e = table.remove(pending, 1)
+			if e.kind == "goal" then
+				self.shake = 1
+				self.confetti:Emit(160)
+			elseif e.kind == "net" then
+				self:_bulgeNet(e.pos)
+			elseif e.kind == "frame" then
+				self.shake = math.max(self.shake, 0.6)
+				self:_puff(e.pos, 14)
+			elseif e.kind == "keeper" then
+				self.shake = math.max(self.shake, 0.35)
+				if e.part == "CATCH" then
+					self.holdBall = true -- update() keeps it in the gloves from now on
+					self.trail.Enabled = false
+				else
+					self:_puff(e.pos, 10)
+				end
+			elseif e.kind == "bounce" or e.kind == "board" then
+				self:_puff(e.pos, 6)
+			end
+		end
+		if not decisiveFired and t >= result.decisiveTime then
+			decisiveFired = true
+			onDecisive()
+		end
 
-	-- Follow-through: gravity, ground bounces and the back of the net.
-	local vel = velocityAfterImpact(result.outcome, ShotPhysics.velocityAt(velocity, endTime), target)
-	local netBack = -ShotConfig.Goal.NetDepth + BALL_RADIUS
-	local elapsed = 0
-	while elapsed < FOLLOW_THROUGH_SECONDS do
-		local dt = math.min(RunService.RenderStepped:Wait(), 1 / 20)
-		if self.token ~= token then
-			return
+		if not self.holdBall then
+			local position = pathAt(path, sampleStep, math.min(t, duration))
+			local velocity = (position - last) / math.max(dt, 1e-3)
+			local onGround = position.Y <= BALL_RADIUS + 0.05
+			-- In the air the ball shows its real spin (exaggerated); on the ground it rolls.
+			local angular = if onGround then Vector3.new(velocity.Z, 0, -velocity.X) / BALL_RADIUS else spin * 3 + Vector3.new(-velocity.Magnitude * 0.15, 0, 0)
+			self:_spinBall(angular, dt)
+			if velocity.Magnitude < 40 then
+				self.trail.Enabled = false
+			end
+			self:_setBall(position)
+			last = position
 		end
-		elapsed += dt
-		vel += ShotPhysics.gravity() * dt
-		position += vel * dt
-		if position.Y < BALL_RADIUS then
-			position = Vector3.new(position.X, BALL_RADIUS, position.Z)
-			vel = Vector3.new(vel.X * 0.8, -vel.Y * 0.5, vel.Z * 0.8)
-		end
-		if result.outcome == "GOAL" and position.Z < netBack then
-			position = Vector3.new(position.X, position.Y, netBack)
-			vel = Vector3.new(vel.X * 0.3, vel.Y, 0)
-		end
-		spin += vel.Magnitude / BALL_RADIUS * dt * 0.5
-		self:_setBall(position, spin)
 	end
+	if not decisiveFired then
+		onDecisive()
+	end
+	self.trail.Enabled = false
 end
 
 return ShotVisuals
