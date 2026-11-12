@@ -204,6 +204,21 @@ local function setFade(animator, amount: number)
 	for _, part in animator.fadeParts do
 		part.LocalTransparencyModifier = amount
 	end
+	for _, d in animator.model:GetDescendants() do
+		if d:IsA("SurfaceGui") then
+			d.Enabled = amount < 0.5 -- shirt name / number
+		end
+	end
+end
+
+-- Our team in the player's club kit; the passer (the player) wears his name and number.
+function PassVisuals:setTeam(kit, shirtName: string, number: number, trim: Color3)
+	FigureBuilder.applyKit(self.passer.model, kit)
+	FigureBuilder.setShirt(self.passer.model, shirtName, number, trim)
+	for i, mate in self.mates do
+		FigureBuilder.applyKit(mate.model, kit)
+		FigureBuilder.setShirt(mate.model, "", if number == 8 + (i - 1) * 3 then 23 + i else 8 + (i - 1) * 3, trim)
+	end
 end
 
 function PassVisuals:_figures()
