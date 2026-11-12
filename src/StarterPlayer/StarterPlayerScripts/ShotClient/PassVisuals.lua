@@ -261,6 +261,19 @@ function PassVisuals:followUpKick()
 	end
 end
 
+-- The shot after the pass went in: the scorer celebrates.
+function PassVisuals:celebrateGoal()
+	local fu = self.followUp
+	if fu then
+		local scorer = self.mates[fu.receiver]
+		task.delay(0.3, function()
+			if self.followUp == fu then
+				scorer:play("CHEER")
+			end
+		end)
+	end
+end
+
 function PassVisuals:_updateFollowUp(dt: number)
 	local fu = self.followUp
 	local receiver = self.mates[fu.receiver]
@@ -442,15 +455,8 @@ function PassVisuals:_updateReplay(dt: number)
 	end
 	if not replay.decided and t >= result.eventTime then
 		replay.decided = true
-		if result.detail == "GOOD" then
-			self.passer:play("CHEER")
-			local receiver = result.receiver and self.mates[result.receiver]
-			task.delay(0.45, function()
-				if self.replay == replay and receiver then
-					receiver:play("CHEER")
-				end
-			end)
-		elseif result.detail == "INTERCEPTED" then
+		-- A good pass is just received (the TRAP above); celebrating is for goals.
+		if result.detail == "INTERCEPTED" then
 			task.delay(0.6, function()
 				if self.replay == replay then
 					self.defender:play("CHEER")

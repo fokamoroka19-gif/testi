@@ -32,6 +32,15 @@ local TEXT = {
 	Loading = "Загрузка профиля…",
 	SessionOnly = "Сохранения недоступны: прогресс останется только до выхода",
 	LoadFailed = "Нет связи с сервером. Попробуй перезайти",
+	CardLine = "№%d %s  ·  OVR %d  ·  УР. %d",
+	CardNext = {
+		SHOT = "Далее: тренировка — удар",
+		PASS = "Далее: тренировка — пас",
+		DONE = "Далее: первый матч сезона (скоро)",
+	},
+	CardEmptyTitle = "ТВОЙ ПУТЬ К ЗВЁЗДАМ",
+	CardEmptyLine = "8 клубов лиги · 3 ждут новичков",
+	CardEmptyNext = "Начни карьеру и подпиши контракт",
 	-- Club picker
 	ClubsTitle = "ВЫБЕРИ КЛУБ",
 	League = "🏆 %s  ·  %d КЛУБОВ",
@@ -54,7 +63,6 @@ local TEXT = {
 	LastPlaceholder = "Например, Иванов",
 	Confirm = "ПОДТВЕРДИТЬ  ›",
 	Saving = "СОХРАНЯЕМ…",
-	PreviewHint = "👕  Так тебя увидят на поле",
 	-- Signed contract
 	SignedTitle = "КОНТРАКТ\nПОДПИСАН!",
 	SignedPlayer = "%s %s  ·  №%d",
@@ -108,10 +116,24 @@ local CARD_SIZE = Vector2.new(216, 142)
 local CARD_GAP = 12
 local CARD_TOP = 84
 
--- Camera framings over the training stadium (the goal is at z = 0, see ShotConfig).
-local MENU_CAMERA = { from = Vector3.new(0, 10, 96), to = Vector3.new(0, 6, 0), fov = 34 }
+-- Camera over the training stadium (the goal is at z = 0, see ShotConfig) for the screens without
+-- the player; HERO and CREATE frame the player (PlayerPreview).
 local CLUBS_CAMERA = { from = Vector3.new(6, 8, 86), to = Vector3.new(0, 5.5, 0), fov = 36 }
-local BLUR = { MENU = 10, CLUBS = 16, PLAYER = 0 }
+-- Screens with the player keep him sharp and soften the stadium with depth of field instead.
+local BLUR = { HERO = 0, CREATE = 0, CLUBS = 16, NEXT = 12 }
+local DEPTH = { HERO = true, CREATE = true }
+-- Screen shade: darker behind the panels. The main menu keeps the middle clear for the player.
+local SHADE_LEFT = NumberSequence.new({
+	NumberSequenceKeypoint.new(0, 0.12),
+	NumberSequenceKeypoint.new(0.45, 0.55),
+	NumberSequenceKeypoint.new(1, 0.85),
+})
+local SHADE_SIDES = NumberSequence.new({
+	NumberSequenceKeypoint.new(0, 0.35),
+	NumberSequenceKeypoint.new(0.3, 0.95),
+	NumberSequenceKeypoint.new(0.6, 0.95),
+	NumberSequenceKeypoint.new(1, 0.3),
+})
 
 local CareerMenu = {}
 CareerMenu.__index = CareerMenu
@@ -149,7 +171,7 @@ function CareerMenu.new(remote: RemoteFunction)
 	self.selectedClub = nil
 	self.onStartTraining = nil :: ((any) -> ())?
 	self.onSettingsChanged = nil :: ((any) -> ())?
-	self.cameraMode = "MENU"
+	self.cameraMode = "HERO"
 	self.clock = 0
 	self.preview = PlayerPreview.new()
 
@@ -159,14 +181,7 @@ function CareerMenu.new(remote: RemoteFunction)
 
 	-- Darker on the left where the menus sit; the stadium shows through on the right.
 	local shade = frame({ Name = "Shade", Position = UDim2.fromOffset(-200, -120), Size = UDim2.new(1, 400, 1, 240), BackgroundColor3 = INK, Parent = gui })
-	create("UIGradient", {
-		Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0.12),
-			NumberSequenceKeypoint.new(0.45, 0.55),
-			NumberSequenceKeypoint.new(1, 0.85),
-		}),
-		Parent = shade,
-	})
+	self.shadeGradient = create("UIGradient", { Transparency = SHADE_LEFT, Parent = shade })
 	self.shade = shade
 
 	self.screens = {}
@@ -177,9 +192,16 @@ function CareerMenu.new(remote: RemoteFunction)
 	self:_buildOverlay()
 
 	local camera = workspace.CurrentCamera
-	self.blur = create("BlurEffect", { Name = "MenuBlur", Size = BLUR.MENU, Parent = camera })
-	self.camCFrame = CFrame.lookAt(MENU_CAMERA.from, MENU_CAMERA.to)
-	self.camFov = MENU_CAMERA.fov
+	self.blur = create("BlurEffect", { Name = "MenuBlur", Size = 0, Parent = camera })
+	self.depth = create("DepthOfFieldEffect", {
+		Name = "MenuDepth",
+		FarIntensity = 0.45,
+		NearIntensity = 0,
+		FocusDistance = 16,
+		InFocusRadius = 6,
+		Parent = camera,
+	})
+	self.camCFrame, self.camFov = PlayerPreview.cameraTarget("HERO")
 
 	self:_show("MAIN")
 	task.spawn(function()
@@ -220,40 +242,65 @@ end
 
 ---------------------------------------------------------------- main menu
 
+-- Spread over the whole screen like the reference main menu: logo top left, the player in the
+-- middle (3D, PlayerPreview HERO framing), big buttons on the right, career card bottom left.
 function CareerMenu:_buildMain()
-	local screen = self:_screen("MAIN", Vector2.new(460, 456), Vector2.new(0, 0.5), UDim2.new(0, 48, 0.5, 0))
-	local c = screen.content
+	local root = frame({ Name = "MAIN", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = self.gui })
+	local function group(name: string, anchor: Vector2, position: UDim2, size: Vector2): Frame
+		local holder = frame({ Name = name, AnchorPoint = anchor, Position = position, Size = UDim2.fromOffset(size.X, size.Y), BackgroundTransparency = 1, Parent = root })
+		self.scaler:add(holder)
+		return holder
+	end
 
-	local logo = frame({ Name = "Logo", Size = UDim2.fromOffset(420, 168), BackgroundTransparency = 1, Parent = c })
+	-- Logo and tagline
+	local top = group("Brand", Vector2.new(0, 0), UDim2.fromOffset(16, 4), Vector2.new(330, 172))
+	local logo = frame({ Name = "Logo", Size = UDim2.fromOffset(330, 136), BackgroundTransparency = 1, Parent = top })
 	local embedded = ImageLoader.get("Logo/Logo")
 	if embedded then
 		create("ImageLabel", { Name = "LogoImage", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ImageContent = embedded, ScaleType = Enum.ScaleType.Fit, Parent = logo })
 	else
-		UiKit.bigText({ Name = "Wordmark", Text = 'NEW FOOTBALL <font color="#FF2D55">STAR</font> <font color="#FFBF1F">★</font>', TextSize = 46, Position = UDim2.fromOffset(4, 50), Size = UDim2.fromOffset(410, 60), Parent = logo }, 4, Vector2.new(3, 4))
+		UiKit.bigText({ Name = "Wordmark", Text = 'NEW FOOTBALL <font color="#FF2D55">STAR</font> <font color="#FFBF1F">★</font>', TextSize = 36, Position = UDim2.fromOffset(4, 44), Size = UDim2.fromOffset(322, 48), Parent = logo }, 3.5, Vector2.new(3, 4))
 	end
-
-	local tagline = frame({ Name = "Tagline", Position = UDim2.fromOffset(8, 176), Size = UDim2.fromOffset(392, 30), BackgroundColor3 = NAVY, BackgroundTransparency = 0.1, Parent = c })
+	local tagline = frame({ Name = "Tagline", Position = UDim2.fromOffset(10, 140), Size = UDim2.fromOffset(310, 26), BackgroundColor3 = NAVY, BackgroundTransparency = 0.1, Parent = top })
 	corner(tagline, 6)
 	stroke(tagline, VIOLET, 2)
-	local accent = frame({ AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), Size = UDim2.fromOffset(6, 14), BackgroundColor3 = RED, Parent = tagline })
+	local accent = frame({ AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 9, 0.5, 0), Size = UDim2.fromOffset(5, 12), BackgroundColor3 = RED, Parent = tagline })
 	corner(accent, 1)
-	local taglineText = text({ Position = UDim2.fromOffset(24, 0), Size = UDim2.new(1, -30, 1, 0), Text = TEXT.Tagline, TextSize = 13, Parent = tagline })
-	outline(taglineText, 1.5)
+	local taglineText = text({ Position = UDim2.fromOffset(20, 2), Size = UDim2.new(1, -26, 1, -4), Text = TEXT.Tagline, TextSize = 11, Parent = tagline })
+	UiKit.sizeLimit(taglineText, 11)
+	outline(taglineText, 1.2)
 
-	self.newButton = UiKit.button(c, { Name = "NewCareer", Position = UDim2.fromOffset(0, 222), Size = UDim2.fromOffset(400, 68) }, TEXT.NewCareer, function()
+	-- Buttons
+	local right = group("Buttons", Vector2.new(1, 0.5), UDim2.new(1, -24, 0.5, 0), Vector2.new(350, 300))
+	local c = frame({ Name = "Content", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = right })
+	local pop = create("UIScale", { Parent = c })
+	UiKit.slashes(c, UDim2.new(1, -54, 0, -6), 20, GLOW)
+	self.newButton = UiKit.button(c, { Name = "NewCareer", Position = UDim2.fromOffset(0, 18), Size = UDim2.fromOffset(350, 76), TextSize = 28 }, TEXT.NewCareer, function()
 		self:_onNewCareer()
 	end, "primary", TEXT.NewCareerSub)
-	self.continueButton = UiKit.button(c, { Name = "Continue", Position = UDim2.fromOffset(0, 300), Size = UDim2.fromOffset(400, 68) }, TEXT.Continue, function()
+	self.continueButton = UiKit.button(c, { Name = "Continue", Position = UDim2.fromOffset(0, 106), Size = UDim2.fromOffset(350, 76), TextSize = 24 }, TEXT.Continue, function()
 		self:_onContinue()
 	end, "secondary", TEXT.ContinueNone)
-	self.settingsButton = UiKit.button(c, { Name = "Settings", Position = UDim2.fromOffset(0, 378), Size = UDim2.fromOffset(400, 52) }, "⚙  " .. TEXT.Settings, function()
+	self.settingsButton = UiKit.button(c, { Name = "Settings", Position = UDim2.fromOffset(0, 194), Size = UDim2.fromOffset(350, 58), TextSize = 24 }, "⚙  " .. TEXT.Settings, function()
 		self:_openSettings()
 	end, "secondary")
-
-	self.status = text({ Name = "Status", Position = UDim2.fromOffset(4, 434), Size = UDim2.fromOffset(400, 20), Text = TEXT.Loading, TextSize = 13, FontFace = FONT_MEDIUM, TextColor3 = LILAC, Parent = c })
+	self.status = text({ Name = "Status", Position = UDim2.fromOffset(4, 260), Size = UDim2.fromOffset(342, 36), Text = TEXT.Loading, TextSize = 12, FontFace = FONT_MEDIUM, TextColor3 = LILAC, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, Parent = c })
 	outline(self.status, 1)
 	self.newButton:setEnabled(false)
 	self.continueButton:setEnabled(false)
+
+	-- Career card
+	local cardHolder = group("CareerCard", Vector2.new(0, 1), UDim2.new(0, 16, 1, -12), Vector2.new(330, 88))
+	local card = UiKit.panel({ Name = "Card", Size = UDim2.fromScale(1, 1), Parent = cardHolder }, 12)
+	self.cardCrest = frame({ Name = "CrestHolder", Position = UDim2.fromOffset(12, 15), Size = UDim2.fromOffset(58, 58), BackgroundTransparency = 1, Parent = card })
+	self.cardTitle = text({ Name = "Title", Position = UDim2.fromOffset(82, 10), Size = UDim2.fromOffset(238, 24), Text = "", TextSize = 18, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+	outline(self.cardTitle, 1.5)
+	self.cardLine = text({ Name = "Line", Position = UDim2.fromOffset(82, 36), Size = UDim2.fromOffset(238, 20), Text = "", TextSize = 14, FontFace = FONT_BOLD, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+	outline(self.cardLine, 1)
+	self.cardNext = text({ Name = "Next", Position = UDim2.fromOffset(82, 58), Size = UDim2.fromOffset(238, 18), Text = "", TextSize = 12, FontFace = FONT_BOLD, TextColor3 = GOLD, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+	outline(self.cardNext, 1)
+
+	self.screens.MAIN = { root = root, content = c, pop = pop }
 end
 
 function CareerMenu:_refreshMain()
@@ -261,10 +308,21 @@ function CareerMenu:_refreshMain()
 	local club = career and CareerConfig.club(career.clubId)
 	self.newButton:setEnabled(self.loaded)
 	self.continueButton:setEnabled(club ~= nil)
+	for _, child in self.cardCrest:GetChildren() do
+		child:Destroy()
+	end
 	if career and club then
 		self.continueButton:setText(TEXT.Continue, string.format(TEXT.ContinueSub, club.name, career.number, career.lastName))
+		UiKit.crest(self.cardCrest, { Size = UDim2.fromOffset(58, 58) }, club)
+		self.cardTitle.Text = club.name
+		self.cardLine.Text = string.format(TEXT.CardLine, career.number, CareerConfig.upper(career.lastName), career.ovr, career.level)
+		self.cardNext.Text = TEXT.CardNext[career.training] or ""
 	else
 		self.continueButton:setText(TEXT.Continue, TEXT.ContinueNone)
+		UiKit.crest(self.cardCrest, { Size = UDim2.fromOffset(58, 58) }, CareerConfig.Mascot)
+		self.cardTitle.Text = TEXT.CardEmptyTitle
+		self.cardLine.Text = TEXT.CardEmptyLine
+		self.cardNext.Text = TEXT.CardEmptyNext
 	end
 	if not self.loaded then
 		self.status.Text = TEXT.Loading
@@ -276,6 +334,20 @@ function CareerMenu:_refreshMain()
 	self.deleteButton.button.Visible = career ~= nil
 	if self.loaded then
 		self.newButton:playShine()
+	end
+	if self.current == "MAIN" then
+		self:_showHero()
+	end
+end
+
+-- The main menu's star: the career's player in his club kit, or the mascot.
+function CareerMenu:_showHero()
+	local career = self.career
+	local club = career and CareerConfig.club(career.clubId)
+	if career and club then
+		self.preview:showHero(club, career.lastName, career.number)
+	else
+		self.preview:showHero(CareerConfig.Mascot, "", CareerConfig.MascotNumber)
 	end
 end
 
@@ -480,8 +552,6 @@ end
 function CareerMenu:_buildPlayer()
 	local screen = self:_screen("PLAYER", SCREEN_SIZE)
 	local c = screen.content
-	local hint = UiKit.chip(c, { Name = "PreviewHint", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0) }, TEXT.PreviewHint, GLOW)
-	hint.Size = UDim2.fromOffset(0, 32)
 
 	-- Form
 	local form = UiKit.panel({ Name = "Form", Size = UDim2.fromOffset(400, SCREEN_SIZE.Y), Parent = c }, 16)
@@ -922,9 +992,10 @@ function CareerMenu:_show(name: string)
 	local screen = self.screens[name]
 	UiKit.pop(screen.pop, 0.94)
 	self.current = name
-	self.cameraMode = if name == "CLUBS" then "CLUBS" elseif name == "PLAYER" then "PLAYER" else "MENU"
+	self.cameraMode = if name == "MAIN" then "HERO" elseif name == "PLAYER" then "CREATE" elseif name == "CLUBS" then "CLUBS" else "NEXT"
 	self.shade.Visible = name ~= "NEXT"
-	if name ~= "PLAYER" then
+	self.shadeGradient.Transparency = if name == "MAIN" then SHADE_SIDES else SHADE_LEFT
+	if name ~= "PLAYER" and name ~= "MAIN" then
 		self.preview:hide()
 	end
 	if name == "MAIN" then
@@ -937,6 +1008,7 @@ function CareerMenu:open(justTrained: boolean?)
 	self.active = true
 	self.gui.Enabled = true
 	self.blur.Enabled = true
+	self.depth.Enabled = true
 	self.camCFrame = workspace.CurrentCamera.CFrame -- glide from wherever the training left it
 	self.camFov = workspace.CurrentCamera.FieldOfView
 	if justTrained and self.career then
@@ -960,6 +1032,7 @@ function CareerMenu:close()
 	self.active = false
 	self.gui.Enabled = false
 	self.blur.Enabled = false
+	self.depth.Enabled = false
 	self.overlay.Visible = false
 	self.preview:hide()
 end
@@ -968,7 +1041,7 @@ function CareerMenu:isOpen(): boolean
 	return self.active
 end
 
--- Per-frame while open: camera glide between framings, blur and the player preview.
+-- Per-frame while open: camera glide between framings, blur / depth of field and the player.
 function CareerMenu:update(dt: number)
 	if not self.active then
 		return
@@ -976,14 +1049,18 @@ function CareerMenu:update(dt: number)
 	self.clock += dt
 	self.preview:update(dt)
 
-	local target, fov
-	if self.cameraMode == "PLAYER" then
-		target, fov = PlayerPreview.cameraTarget()
+	local mode = self.cameraMode
+	local t = self.clock
+	local target, fov, focus
+	if mode == "HERO" or mode == "CREATE" then
+		target, fov, focus = PlayerPreview.cameraTarget(mode)
+		if mode == "HERO" then
+			-- Slow drift, small enough to keep him framed.
+			target *= CFrame.new(math.sin(t * 0.21) * 0.35, math.sin(t * 0.17) * 0.15, 0)
+		end
 	else
-		local framing = if self.cameraMode == "CLUBS" then CLUBS_CAMERA else MENU_CAMERA
-		local t = self.clock
 		local sway = Vector3.new(math.sin(t * 0.13) * 6, math.sin(t * 0.09) * 1.2, 0)
-		target, fov = CFrame.lookAt(framing.from + sway, framing.to), framing.fov
+		target, fov = CFrame.lookAt(CLUBS_CAMERA.from + sway, CLUBS_CAMERA.to), CLUBS_CAMERA.fov
 	end
 	local k = 1 - math.exp(-3 * dt)
 	self.camCFrame = self.camCFrame:Lerp(target, k)
@@ -992,7 +1069,11 @@ function CareerMenu:update(dt: number)
 	camera.CameraType = Enum.CameraType.Scriptable
 	camera.CFrame = self.camCFrame
 	camera.FieldOfView = self.camFov
-	self.blur.Size += ((BLUR[self.cameraMode] or 0) - self.blur.Size) * k
+	self.blur.Size += ((BLUR[mode] or 0) - self.blur.Size) * k
+	self.depth.Enabled = DEPTH[mode] == true
+	if focus then
+		self.depth.FocusDistance = focus
+	end
 end
 
 return CareerMenu

@@ -13,7 +13,7 @@ local JOINT_NAMES = {
 	"LeftHip", "LeftKnee", "LeftAnkle", "RightHip", "RightKnee", "RightAnkle",
 }
 
--- One-shot actions and their length in seconds; WAVE and CHEER loop until replaced.
+-- One-shot actions and their length in seconds; WAVE, CHEER and BADGE loop until replaced.
 local DURATION = { KICK = 0.5, TRAP = 0.55, LUNGE = 0.8 }
 
 local function J(x: number, y: number, z: number): Vector3
@@ -74,9 +74,9 @@ function FigureAnimator:moveTo(position: Vector3, facing: Vector3?, dt: number)
 	end
 end
 
--- KICK | TRAP | LUNGE (one-shot), WAVE | CHEER (loop), nil = back to idle/run.
+-- KICK | TRAP | LUNGE (one-shot), WAVE | CHEER | BADGE (loop), nil = back to idle/run.
 function FigureAnimator:play(action: string?)
-	if self.action == action and (action == "WAVE" or action == "CHEER") then
+	if self.action == action and (action == "WAVE" or action == "CHEER" or action == "BADGE") then
 		return
 	end
 	self.action = action
@@ -146,12 +146,22 @@ function FigureAnimator:_pose(): (Vector3, number)
 		joints.RightShoulder = J(150, 0, 18 + 14 * math.sin(self.clock * 9))
 		joints.RightElbow = J(20, 0, 0)
 	elseif action == "CHEER" then
-		local pump = math.sin(self.clock * 10)
-		joints.LeftShoulder = J(160 + 8 * pump, 0, -16)
-		joints.RightShoulder = J(160 - 8 * pump, 0, 16)
-		joints.LeftElbow = J(15, 0, 0)
-		joints.RightElbow = J(15, 0, 0)
-		bob += math.max(0, pump) * 0.25
+		-- Goal celebration with both feet on the ground: right fist pumping, left arm out.
+		local pump = math.sin(self.clock * 7)
+		joints.RightShoulder = J(150 + 10 * pump, 0, 14)
+		joints.RightElbow = J(35 + 15 * pump, 0, 0)
+		joints.LeftShoulder = J(10, 0, -55)
+		joints.LeftElbow = J(30, 0, 0)
+		joints.Waist = J(-6, 0, 0)
+		joints.Neck = J(-12, 0, 0)
+	elseif action == "BADGE" then
+		-- Signed: right hand on the club badge, a short nod, then holds the pose.
+		local nod = math.max(0, math.sin(math.min(t, 0.9) / 0.9 * math.pi))
+		joints.RightShoulder = J(48, 0, -30)
+		joints.RightElbow = J(100, 0, 0)
+		joints.RightWrist = J(0, 0, -15)
+		joints.LeftShoulder = J(4, 0, -6)
+		joints.Neck = J(14 * nod, 0, 0)
 	end
 	return joints, bob - drop
 end

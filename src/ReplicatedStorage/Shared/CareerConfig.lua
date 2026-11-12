@@ -74,7 +74,7 @@ function CareerConfig.club(id: any): Club?
 	return if typeof(id) == "string" then clubsById[id] else nil
 end
 
--- FigureBuilder kit for a player of this club.
+-- FigureBuilder kit for a player of this club. Collar, cuffs and sock stripes use the print colour.
 function CareerConfig.kit(club: Club)
 	return {
 		skin = CareerConfig.Skin,
@@ -83,8 +83,25 @@ function CareerConfig.kit(club: Club)
 		shirt = club.shirt,
 		shorts = club.shorts,
 		socks = club.socks,
+		trim = club.print,
+		band = club.print,
 	}
 end
+
+-- The main menu's star before a career exists: the New Football Star mascot in white #10.
+CareerConfig.Mascot = {
+	id = "MASCOT",
+	name = "New Football Star",
+	short = "NFS",
+	ovr = 0,
+	stars = 0,
+	open = false,
+	shirt = rgb(244, 238, 250),
+	shorts = rgb(232, 222, 248),
+	socks = rgb(244, 238, 250),
+	print = rgb(43, 27, 107),
+} :: Club
+CareerConfig.MascotNumber = 10
 
 -- First opponent of the season: the next club below in the table (wrapping round).
 function CareerConfig.firstOpponent(club: Club): Club

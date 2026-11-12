@@ -1,6 +1,6 @@
 -- Building blocks for the career menus in the same purple "pixel UI kit" style as ShotHud:
 -- palette, fonts, glowing panels, gold/violet buttons, club crests, star ratings, text fields,
--- toggles and the viewport scaler. Layouts are designed at 1280x720 like the HUD.
+-- toggles and the viewport scaler.
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -35,11 +35,6 @@ UiKit.FONT_PRINT = Font.new(MONTSERRAT, Enum.FontWeight.Heavy) -- shirt letterin
 
 local NAVY, VIOLET, GLOW, LILAC, GOLD, GOLD_LIGHT = UiKit.NAVY, UiKit.VIOLET, UiKit.GLOW, UiKit.LILAC, UiKit.GOLD, UiKit.GOLD_LIGHT
 local INK, CREAM, WHITE, SHADOW, ORANGE, LIP, RED = UiKit.INK, UiKit.CREAM, UiKit.WHITE, UiKit.SHADOW, UiKit.ORANGE, UiKit.LIP, UiKit.RED
-
--- Same fit rules as ShotHud: design size on desktop, bigger on phones while it still fits.
-local DESIGN_SIZE = Vector2.new(1280, 720)
-local PHONE_HEIGHT = 500
-local PHONE_BOOST = 1.7
 
 function UiKit.create(className: string, props: { [string]: any }): any
 	local inst = Instance.new(className)
@@ -422,8 +417,8 @@ function UiKit.toggle(parent: Instance, props: { [string]: any }, value: boolean
 	return toggle
 end
 
--- Keeps every registered UIScale at the viewport scale. layoutSize: the area (design units) the
--- largest screen needs, so it is never scaled past the edges. boost: the "large interface" setting.
+-- Keeps every registered UIScale at the viewport scale: as big as `layoutSize` (design units of
+-- the largest screen) can be while still fitting, between 0.5 and 1.6. boost: "large interface".
 function UiKit.scaler(gui: ScreenGui, layoutSize: Vector2)
 	local scaler = { scales = {} :: { UIScale }, boost = 1, scale = 1 }
 	function scaler.rescale(_)
@@ -431,11 +426,11 @@ function UiKit.scaler(gui: ScreenGui, layoutSize: Vector2)
 		if size.X < 1 or size.Y < 1 then
 			return
 		end
-		local scale = math.min(size.X / DESIGN_SIZE.X, size.Y / DESIGN_SIZE.Y)
-		if math.min(size.X, size.Y) < PHONE_HEIGHT then
-			scale *= PHONE_BOOST
+		local fit = math.min((size.X - 40) / layoutSize.X, (size.Y - 24) / layoutSize.Y)
+		local scale = math.clamp(fit, 0.5, 1.6)
+		if scaler.boost ~= 1 then
+			scale = math.max(math.min(scale * scaler.boost, fit), 0.5)
 		end
-		scale = math.min(math.clamp(scale, 0.5, 1.3) * scaler.boost, (size.X - 20) / layoutSize.X, (size.Y - 16) / layoutSize.Y)
 		scaler.scale = scale
 		for _, uiScale in scaler.scales do
 			uiScale.Scale = scale

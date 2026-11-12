@@ -1,6 +1,7 @@
--- The player's footballer on the pitch during career creation: built in the chosen club's kit,
--- he appears facing the camera (gold flash, sparkles), then turns round to show the surname and
--- number on his back. Name or number changes turn him to the back again and pop the print.
+-- The player's footballer on the pitch behind the career menus. Two framings:
+--   HERO    main menu: big, facing the camera, left of the buttons (the mascot until a career exists)
+--   CREATE  player creation: appears facing the camera (gold flash, sparkles), then turns round to
+--           show the surname and number on his back; every change turns him to the back again.
 -- Everything here is local to this client; CareerMenu drives it and owns the camera.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -14,18 +15,18 @@ local FigureAnimator = require(script.Parent:WaitForChild("FigureAnimator"))
 local UiKit = require(script.Parent:WaitForChild("UiKit"))
 
 local SCALE = ShotConfig.Goalkeeper.ModelScale -- same size as the training players
--- He stands between the shot spot and the camera, the goal and the stand behind him. The camera
--- is shifted left so he sits in the right half of the screen, next to the creation panel.
+-- He stands between the shot spot and the camera, with the goal and the stand behind him.
 local STAGE = Vector3.new(0, 0, 56)
-local CAMERA_OFFSET = Vector3.new(-4.6, 4.4, 17)
-local LOOK_OFFSET = Vector3.new(-4.6, 3.7, 0)
-local FOV = 40
+-- Camera offset from his feet and the point it looks at. CREATE shifts the camera left so he
+-- stands in the right half, next to the form; HERO shifts it right so he stands left of the buttons.
+local FRAMINGS = {
+	CREATE = { offset = Vector3.new(-4.6, 4.8, 18), look = Vector3.new(-4.6, 4.2, 0), fov = 40 },
+	HERO = { offset = Vector3.new(1.2, 4.9, 15.5), look = Vector3.new(1.2, 4.4, 0), fov = 40 },
+}
 local FADE_IN = 0.55
-local FRONT_HOLD = 1.5 -- seconds facing the camera before the first turn
+local FRONT_HOLD = 1.5 -- seconds facing the camera before the first turn (CREATE)
 local TURN_TIME = 0.9
 local PRINT_PIXELS = 60 -- SurfaceGui pixels per stud on the shirt
-
-local VERTICAL = CFrame.Angles(0, 0, math.pi / 2) -- cylinder parts are long along X
 
 local PlayerPreview = {}
 PlayerPreview.__index = PlayerPreview
@@ -39,7 +40,10 @@ local function facingFor(angle: number): Vector3
 	return Vector3.new(math.sin(angle), 0, math.cos(angle))
 end
 
-local FRONT_ANGLE = math.atan2(CAMERA_OFFSET.X, CAMERA_OFFSET.Z) -- facing the camera
+-- Angle at which he faces the camera of a framing.
+local function frontAngle(framing): number
+	return math.atan2(framing.offset.X, framing.offset.Z)
+end
 
 local function makePart(props: { [string]: any }): Part
 	props.Anchored = true
@@ -59,39 +63,41 @@ function PlayerPreview.new()
 	self.clock = 0
 	self.club = nil
 	self.animator = nil
-	self.angle = FRONT_ANGLE
-	self.turnFrom, self.turnTo, self.turnStart = FRONT_ANGLE, FRONT_ANGLE, -math.huge
+	self.framing = FRAMINGS.CREATE
+	self.front = frontAngle(self.framing)
+	self.angle = self.front
+	self.turnFrom, self.turnTo, self.turnStart = self.angle, self.angle, -math.huge
 	self.facingBack = false
 	self.introAt = nil :: number?
+	self.appearStart = 0
+	self.fadeParts = {}
+	self.fadeGuis = {}
+	self.prints = {}
 
 	-- Showcase lighting: warm key light from the camera side, violet rim from behind.
-	local key = makePart({ Name = "KeyLight", Size = Vector3.one * 0.2, Transparency = 1, Position = STAGE + Vector3.new(-3, 7, 8), Parent = self.folder })
-	UiKit.create("PointLight", { Color = UiKit.rgb(255, 232, 200), Brightness = 1.6, Range = 16, Shadows = false, Parent = key })
-	local rim = makePart({ Name = "RimLight", Size = Vector3.one * 0.2, Transparency = 1, Position = STAGE + Vector3.new(2.5, 7, -4), Parent = self.folder })
-	UiKit.create("PointLight", { Color = UiKit.GLOW, Brightness = 3, Range = 12, Shadows = false, Parent = rim })
+	local key = makePart({ Name = "KeyLight", Size = Vector3.one * 0.2, Transparency = 1, Position = STAGE + Vector3.new(-2, 8, 9), Parent = self.folder })
+	UiKit.create("PointLight", { Color = UiKit.rgb(255, 232, 200), Brightness = 1.6, Range = 18, Shadows = false, Parent = key })
+	local rim = makePart({ Name = "RimLight", Size = Vector3.one * 0.2, Transparency = 1, Position = STAGE + Vector3.new(2.5, 8, -4), Parent = self.folder })
+	UiKit.create("PointLight", { Color = UiKit.GLOW, Brightness = 3, Range = 13, Shadows = false, Parent = rim })
 
-	-- Podium ring under his feet and the flash ring that bursts out when he appears.
-	self.podium = makePart({
-		Name = "Podium",
-		Shape = Enum.PartType.Cylinder,
-		Size = Vector3.new(0.06, 6.4, 6.4),
-		CFrame = CFrame.new(STAGE + Vector3.new(0, 0.04, 0)) * VERTICAL,
-		Color = UiKit.GLOW,
-		Material = Enum.Material.Neon,
-		Transparency = 0.55,
-		Parent = self.folder,
-	})
+	-- Thin gold ring under his feet (a flat SurfaceGui, so it stays a clean outline).
+	local ringPart = makePart({ Name = "Ring", Size = Vector3.new(6.4, 0.05, 6.4), Transparency = 1, Position = STAGE + Vector3.new(0, 0.05, 0), Parent = self.folder })
+	local ringGui = UiKit.create("SurfaceGui", { Face = Enum.NormalId.Top, SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud, PixelsPerStud = 40, LightInfluence = 0, Parent = ringPart })
+	local ring = UiKit.frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = UiKit.GLOW, BackgroundTransparency = 0.88, Parent = ringGui })
+	UiKit.corner(ring)
+	self.ringStroke = UiKit.stroke(ring, UiKit.GOLD, 6, 0.2)
+
 	self.flash = makePart({
 		Name = "Flash",
 		Shape = Enum.PartType.Cylinder,
 		Size = Vector3.new(0.05, 2, 2),
-		CFrame = CFrame.new(STAGE + Vector3.new(0, 0.07, 0)) * VERTICAL,
+		CFrame = CFrame.new(STAGE + Vector3.new(0, 0.07, 0)) * CFrame.Angles(0, 0, math.pi / 2),
 		Color = UiKit.GOLD,
 		Material = Enum.Material.Neon,
 		Transparency = 1,
 		Parent = self.folder,
 	})
-	local sparkleCarrier = makePart({ Name = "Sparkles", Size = Vector3.one * 0.2, Transparency = 1, Position = STAGE + Vector3.new(0, 3.6, 0), Parent = self.folder })
+	local sparkleCarrier = makePart({ Name = "Sparkles", Size = Vector3.one * 0.2, Transparency = 1, Position = STAGE + Vector3.new(0, 4.2, 0), Parent = self.folder })
 	self.sparkles = UiKit.create("ParticleEmitter", {
 		Enabled = false,
 		Color = ColorSequence.new(UiKit.GOLD_LIGHT, UiKit.GOLD),
@@ -108,26 +114,46 @@ function PlayerPreview.new()
 	return self
 end
 
--- Where the camera looks at him from.
-function PlayerPreview.cameraTarget(): (CFrame, number)
-	return CFrame.lookAt(STAGE + CAMERA_OFFSET, STAGE + LOOK_OFFSET), FOV
+-- Where the camera looks at him from in a framing (HERO | CREATE), and how far he is.
+function PlayerPreview.cameraTarget(mode: string): (CFrame, number, number)
+	local framing = FRAMINGS[mode] or FRAMINGS.CREATE
+	return CFrame.lookAt(STAGE + framing.offset, STAGE + framing.look), framing.fov, framing.offset.Magnitude
 end
 
--- Shirt print: surname and big number on the back, the club badge on the chest.
+-- Shirt prints: number and badge on the chest, surname and big number on the back.
 function PlayerPreview:_dressShirt(model: Model, club)
 	local torso = model:FindFirstChild("UpperTorso") :: BasePart
-	local back = UiKit.create("SurfaceGui", {
-		Name = "BackPrint",
-		Face = Enum.NormalId.Back,
-		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
-		PixelsPerStud = PRINT_PIXELS,
-		LightInfluence = 1,
-		Parent = torso,
-	})
+	local function makePrint(face: Enum.NormalId, name: string): SurfaceGui
+		return UiKit.create("SurfaceGui", {
+			Name = name,
+			Face = face,
+			SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
+			PixelsPerStud = PRINT_PIXELS,
+			LightInfluence = 1,
+			ZOffset = 1, -- above the collar drawn by FigureBuilder
+			Parent = torso,
+		})
+	end
+	local function numberLabel(parent: Instance, position: UDim2, size: UDim2): TextLabel
+		return UiKit.text({
+			Name = "Number",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = position,
+			Size = size,
+			Text = "",
+			FontFace = UiKit.FONT_PRINT,
+			TextColor3 = club.print,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextScaled = true,
+			Parent = parent,
+		})
+	end
+
+	local back = makePrint(Enum.NormalId.Back, "BackPrint")
 	self.backName = UiKit.text({
 		Name = "Surname",
 		Position = UDim2.fromScale(0.06, 0.07),
-		Size = UDim2.fromScale(0.88, 0.22),
+		Size = UDim2.fromScale(0.88, 0.2),
 		Text = "",
 		FontFace = UiKit.FONT_PRINT,
 		TextColor3 = club.print,
@@ -137,26 +163,11 @@ function PlayerPreview:_dressShirt(model: Model, club)
 	UiKit.sizeLimit(self.backName, 40)
 	local numberHolder = UiKit.frame({ Name = "NumberHolder", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.62), Size = UDim2.fromScale(0.8, 0.64), BackgroundTransparency = 1, Parent = back })
 	self.numberPop = UiKit.create("UIScale", { Parent = numberHolder })
-	self.backNumber = UiKit.text({
-		Name = "Number",
-		Size = UDim2.fromScale(1, 1),
-		Text = "",
-		FontFace = UiKit.FONT_PRINT,
-		TextColor3 = club.print,
-		TextXAlignment = Enum.TextXAlignment.Center,
-		TextScaled = true,
-		Parent = numberHolder,
-	})
+	self.backNumber = numberLabel(numberHolder, UDim2.fromScale(0.5, 0.5), UDim2.fromScale(1, 1))
 
-	local front = UiKit.create("SurfaceGui", {
-		Name = "FrontPrint",
-		Face = Enum.NormalId.Front,
-		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
-		PixelsPerStud = PRINT_PIXELS,
-		LightInfluence = 1,
-		Parent = torso,
-	})
-	UiKit.crest(front, { Name = "Badge", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.72, 0.3), Size = UDim2.fromOffset(34, 34) }, club)
+	local front = makePrint(Enum.NormalId.Front, "FrontPrint")
+	self.frontNumber = numberLabel(front, UDim2.fromScale(0.5, 0.58), UDim2.fromScale(0.42, 0.5))
+	UiKit.crest(front, { Name = "Badge", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.8, 0.24), Size = UDim2.fromOffset(28, 28) }, club)
 	self.prints = { back, front }
 end
 
@@ -170,8 +181,8 @@ function PlayerPreview:_build(club)
 		if d:IsA("BasePart") then
 			d.CastShadow = true
 			table.insert(self.fadeParts, d)
-		elseif d:IsA("Decal") then
-			table.insert(self.fadeParts, d)
+		elseif d:IsA("SurfaceGui") then
+			table.insert(self.fadeGuis, d)
 		end
 	end
 	self:_dressShirt(model, club)
@@ -185,6 +196,9 @@ function PlayerPreview:_setFade(amount: number)
 		part.LocalTransparencyModifier = amount
 	end
 	for _, gui in self.prints do
+		gui.Enabled = amount < 0.5
+	end
+	for _, gui in self.fadeGuis do
 		gui.Enabled = amount < 0.5
 	end
 end
@@ -209,21 +223,22 @@ function PlayerPreview:showFront()
 	end
 end
 
--- Appears in the club's kit facing the camera, then turns to show the back.
-function PlayerPreview:show(club, lastName: string, number: number?)
+function PlayerPreview:_appear(club, mode: string)
 	if club ~= self.club then
+		self.fadeGuis = {}
 		self:_build(club)
 	end
+	self.mode = mode
+	self.framing = FRAMINGS[mode]
+	self.front = frontAngle(self.framing)
 	self.folder.Parent = workspace
 	self.visible = true
-	self.angle, self.turnFrom, self.turnTo, self.turnStart = FRONT_ANGLE, FRONT_ANGLE, FRONT_ANGLE, -math.huge
+	self.angle, self.turnFrom, self.turnTo, self.turnStart = self.front, self.front, self.front, -math.huge
 	self.facingBack = false
-	self.animator:place(STAGE, facingFor(FRONT_ANGLE))
+	self.animator:place(STAGE, facingFor(self.front))
 	self.animator:play(nil)
 	self.appearStart = self.clock
-	self.introAt = self.clock + FRONT_HOLD
 	self:_setFade(1)
-	self:setIdentity(lastName, number, true)
 
 	self.flash.Size = Vector3.new(0.05, 2, 2)
 	self.flash.Transparency = 0.1
@@ -235,7 +250,25 @@ function PlayerPreview:show(club, lastName: string, number: number?)
 	end)
 end
 
--- Updates the shirt print. Unless `quiet`, he turns to show the back and the number pops.
+-- Main menu: stands facing the camera in his kit. Skips the entrance if he's already there.
+function PlayerPreview:showHero(club, lastName: string, number: number?)
+	if self.visible and self.mode == "HERO" and self.club == club then
+		self:setIdentity(lastName, number, true)
+		return
+	end
+	self:_appear(club, "HERO")
+	self.introAt = nil
+	self:setIdentity(lastName, number, true)
+end
+
+-- Player creation: appears in the club's kit facing the camera, then turns to show the back.
+function PlayerPreview:show(club, lastName: string, number: number?)
+	self:_appear(club, "CREATE")
+	self.introAt = self.clock + FRONT_HOLD
+	self:setIdentity(lastName, number, true)
+end
+
+-- Updates the shirt prints. Unless `quiet`, he turns to show the back and the number pops.
 function PlayerPreview:setIdentity(lastName: string, number: number?, quiet: boolean?)
 	if not self.animator then
 		return
@@ -245,6 +278,7 @@ function PlayerPreview:setIdentity(lastName: string, number: number?, quiet: boo
 	local changed = self.backName.Text ~= surname or self.backNumber.Text ~= digits
 	self.backName.Text = surname
 	self.backNumber.Text = digits
+	self.frontNumber.Text = digits
 	if quiet or not changed or self.introAt then
 		return
 	end
@@ -253,18 +287,19 @@ function PlayerPreview:setIdentity(lastName: string, number: number?, quiet: boo
 	TweenService:Create(self.numberPop, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 end
 
--- Contract signed: turns to the camera and celebrates.
+-- Contract signed: turns to the camera, hand on the badge and a nod.
 function PlayerPreview:celebrate()
 	self.introAt = nil
 	self:showFront()
 	if self.animator then
-		self.animator:play("CHEER")
+		self.animator:play("BADGE")
 	end
 	self.sparkles:Emit(24)
 end
 
 function PlayerPreview:hide()
 	self.visible = false
+	self.mode = nil
 	self.folder.Parent = nil
 	if self.animator then
 		self.animator:play(nil)
@@ -284,8 +319,7 @@ function PlayerPreview:update(dt: number)
 	self.angle = self.turnFrom + (self.turnTo - self.turnFrom) * smooth((self.clock - self.turnStart) / TURN_TIME)
 	self.animator:place(STAGE, facingFor(self.angle))
 	self.animator:update(dt)
-	local pulse = 0.5 + 0.5 * math.sin(self.clock * 2.4)
-	self.podium.Transparency = 0.5 + 0.2 * pulse
+	self.ringStroke.Transparency = 0.15 + 0.3 * (0.5 + 0.5 * math.sin(self.clock * 2.4))
 end
 
 return PlayerPreview

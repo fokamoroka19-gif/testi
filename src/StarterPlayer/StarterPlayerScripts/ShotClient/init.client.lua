@@ -249,6 +249,9 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	end
 
 	local function onDecisive()
+		if result.mode == "FOLLOWUP" and result.outcome == "GOAL" then
+			passVisuals:celebrateGoal()
+		end
 		if result.mode == "TASK" then
 			showProgress(result)
 			if result.outcome == (if pass then "GOOD" else "GOAL") then
