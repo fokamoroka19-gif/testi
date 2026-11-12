@@ -275,7 +275,12 @@ local function resolveShot(active: Episode, aimX: number, aimY: number, power: n
 	local stats = { shooting = ShotConfig.DefaultShooting, keeperSkill = Training.TaskKeeperSkill }
 	local options
 	local followUp = active.followUp
-	if followUp then
+	local match = (active :: any).match -- MatchService: { keeperSkill, shooting?, spot? }
+	if match then
+		stats.keeperSkill = match.keeperSkill
+		stats.shooting = match.shooting or stats.shooting
+		options = { start = match.spot }
+	elseif followUp then
 		-- Training keeper; the first one (after the guided pass) is a sure goal like the guided shot.
 		options = { start = followUp.spot, keeperDelay = Training.TaskKeeperDelay }
 		if followUp.phaseMode == "TUTORIAL" then
@@ -427,6 +432,11 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, a: any, b: a
 	payload.speedKmh = speedKmh
 	remotes.EpisodeResult:FireClient(player, payload)
 end
+
+-- Shared with MatchService, so match moments resolve exactly like training ones.
+EpisodeService.resolveShot = resolveShot
+EpisodeService.resolvePass = resolvePass
+EpisodeService.isNumberInRange = isNumberInRange
 
 -- Starts (or restarts) the training at `stage` (SHOT | PASS), from its guided attempt.
 function EpisodeService.beginTraining(player: Player, stage: string)

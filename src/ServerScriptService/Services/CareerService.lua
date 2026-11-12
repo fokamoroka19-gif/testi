@@ -8,6 +8,7 @@
 --   START_TRAINING  -> stage; puts the player into training at the career's saved stage
 --   SETTINGS        { shake, bigUi } -> settings
 --   DELETE          -> removes the career
+--   START_MATCH     -> header { homeId, awayId, moments }; needs the training done (MatchService)
 --
 -- Training progress (career.training: SHOT -> PASS -> DONE) only moves forward, and only when
 -- EpisodeService reports a completed task, so the client can't skip it.
@@ -37,6 +38,10 @@ type Career = {
 	level: number,
 	training: string, -- SHOT | PASS | DONE
 	createdAt: number,
+	xp: number,
+	matches: number,
+	goals: number,
+	assists: number,
 }
 type Settings = { shake: boolean, bigUi: boolean }
 type Profile = {
@@ -53,7 +58,7 @@ type Profile = {
 local CareerService = {}
 
 local profiles: { [Player]: Profile } = {}
-local hooks = nil :: { beginTraining: (Player, string) -> (), stopTraining: (Player) -> () }?
+local hooks = nil :: { beginTraining: (Player, string) -> (), stopTraining: (Player) -> (), startMatch: (Player, any) -> any }?
 
 local store: DataStore? = nil
 do
@@ -73,6 +78,13 @@ end
 
 local function key(player: Player): string
 	return "player_" .. player.UserId
+end
+
+local XP_PER_LEVEL = 100
+
+-- Non-negative whole number from saved data (0 if missing or broken).
+local function count(value: any): number
+	return if typeof(value) == "number" and value == value and value >= 0 then math.floor(value) else 0
 end
 
 -- Saved data comes back exactly as stored, but is checked anyway so a bad record can't break
@@ -96,6 +108,10 @@ local function readCareer(data: any): Career?
 		level = if typeof(data.level) == "number" then data.level else 1,
 		training = data.training,
 		createdAt = if typeof(data.createdAt) == "number" then data.createdAt else 0,
+		xp = count(data.xp),
+		matches = count(data.matches),
+		goals = count(data.goals),
+		assists = count(data.assists),
 	}
 end
 
@@ -250,6 +266,10 @@ local function createCareer(player: Player, profile: Profile, payload: any)
 		level = 1,
 		training = if ShotConfig.Training.StartStage == "PASS" then "PASS" else "SHOT",
 		createdAt = os.time(),
+		xp = 0,
+		matches = 0,
+		goals = 0,
+		assists = 0,
 	}
 	queueSave(player, profile)
 	print(string.format("[CareerService] %s: new career at %s, #%d", player.Name, club.id, payload.number))
@@ -273,6 +293,19 @@ local function handle(player: Player, profile: Profile, action: string, payload:
 			hooks.beginTraining(player, career.training)
 		end
 		return { ok = true, stage = career.training }
+	elseif action == "START_MATCH" then
+		local career = profile.career
+		if not career then
+			return { ok = false, error = "NO_CAREER" }
+		end
+		if career.training ~= "DONE" then
+			return { ok = false, error = "TRAINING_FIRST" }
+		end
+		local header = hooks and hooks.startMatch(player, career)
+		if not header then
+			return { ok = false, error = "SERVER_ERROR" }
+		end
+		return { ok = true, match = header }
 	elseif action == "SETTINGS" then
 		if typeof(payload) ~= "table" then
 			return { ok = false, error = "BAD_REQUEST" }
@@ -320,6 +353,22 @@ local function onInvoke(player: Player, action: any, payload: any)
 		return { ok = false, error = "SERVER_ERROR" }
 	end
 	return result
+end
+
+-- MatchService: full time. Adds the match to the career once and returns the updated career.
+function CareerService.onMatchFinished(player: Player, result: { xp: number, goals: number, assists: number })
+	local profile = profiles[player]
+	local career = profile and profile.career
+	if not (profile and career) then
+		return nil
+	end
+	career.matches += 1
+	career.goals += result.goals
+	career.assists += result.assists
+	career.xp += result.xp
+	career.level = 1 + career.xp // XP_PER_LEVEL
+	queueSave(player, profile)
+	return publicCareer(career)
 end
 
 -- EpisodeService: the player finished a training task (stage SHOT or PASS).

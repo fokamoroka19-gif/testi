@@ -103,9 +103,9 @@ end
 
 -- Where the painted-out numbers were on the PlayerMain sheet, as fractions of the face.
 local PRINTS = {
-	{ part = "UpperTorso", face = Enum.NormalId.Front, name = "ChestNumber", box = { 0.35, 0.42, 0.32, 0.56 } },
-	{ part = "UpperTorso", face = Enum.NormalId.Back, name = "BackNumber", box = { 0.3, 0.3, 0.4, 0.7 } },
-	{ part = "LeftUpperLeg", face = Enum.NormalId.Front, name = "ShortsNumber", box = { 0.46, 0.18, 0.4, 0.46 } },
+	{ part = "UpperTorso", face = Enum.NormalId.Front, name = "ChestNumber", box = { 0.29, 0.34, 0.42, 0.64 } },
+	{ part = "UpperTorso", face = Enum.NormalId.Back, name = "BackNumber", box = { 0.18, 0.3, 0.64, 0.7 } },
+	{ part = "LeftUpperLeg", face = Enum.NormalId.Front, name = "ShortsNumber", box = { 0.4, 0.1, 0.52, 0.58 } },
 }
 
 local function printLabel(gui: Instance, name: string, box: { number }, text: string, color: Color3): TextLabel
@@ -141,7 +141,7 @@ local function addPrints(parts: { [string]: BasePart }, kit: Kit)
 		local label = printLabel(gui, spec.name, spec.box, tostring(kit.number or ""), color)
 		label:SetAttribute("KitNumber", true)
 	end
-	local surname = printLabel(guis.UpperTorsoBack, "Surname", { 0.12, 0.04, 0.76, 0.2 }, kit.surname or "", color)
+	local surname = printLabel(guis.UpperTorsoBack, "Surname", { 0.03, 0.01, 0.94, 0.3 }, kit.surname or "", color)
 	surname:SetAttribute("KitSurname", true)
 end
 

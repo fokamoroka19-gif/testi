@@ -408,6 +408,13 @@ function ShotHud:setVisible(visible: boolean)
 	self.gui.Enabled = visible
 end
 
+-- The logo with the training stage and the goals counter belong to training; a match shows its
+-- own scoreboard instead and keeps only the power panel.
+function ShotHud:setTrainingPanels(visible: boolean)
+	self.logoScale.Parent.Visible = visible
+	self.goalsScale.Parent.Visible = visible
+end
+
 function ShotHud:setUiBoost(boost: number)
 	self.uiBoost = boost
 	self._rescale()

@@ -17,9 +17,11 @@ local ImageLoader = require(script:WaitForChild("ImageLoader"))
 local TutorialHint = require(script:WaitForChild("TutorialHint"))
 local PassVisuals = require(script:WaitForChild("PassVisuals"))
 local CareerMenu = require(script:WaitForChild("CareerMenu"))
+local MatchHud = require(script:WaitForChild("MatchHud"))
 
 local CARD_DELAY = 0.55 -- let the player see the ball hit the net before the card covers the goal
 local FOLLOW_UP_DELAY = 0.75 -- after a good pass: the receiver controls it, then the shot camera
+local MATCH_OUTCOME_TIME = 2.4 -- match: the commentator's line after your moment, before play goes on
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
 if not Remotes then
@@ -31,6 +33,8 @@ local EpisodeStarted = Remotes:WaitForChild("EpisodeStarted")
 local SubmitEpisodeInput = Remotes:WaitForChild("SubmitEpisodeInput")
 local EpisodeResult = Remotes:WaitForChild("EpisodeResult")
 local CareerRequest = Remotes:WaitForChild("CareerRequest")
+local MatchRequest = Remotes:WaitForChild("MatchRequest")
+local MatchUpdate = Remotes:WaitForChild("MatchUpdate")
 
 -- Default movement controls are useless here and would cover the screen on phones.
 task.spawn(function()
@@ -59,6 +63,8 @@ local SCENE_BLEND = 0.9 -- camera glide between scenes; input waits for it
 local waitingForEpisode = false
 local bestSpeed = 0 -- fastest goal in the current task attempt, for the completion menu
 local inTraining = false
+local inMatch = false
+local matchHud = MatchHud.new()
 local lastCompletedStage = nil -- stage of the last completed task (SHOT | PASS)
 
 -- choice: "RETRY" or "NEXT" from the completion menu, otherwise nil.
@@ -138,16 +144,23 @@ input.onShoot = function(a, b, power)
 	end
 end
 
+local handleResult -- defined below; also plays a teammate's simulated shot (episode.auto)
+
 EpisodeStarted.OnClientEvent:Connect(function(episode)
-	if not inTraining or typeof(episode) ~= "table" or (episode.kind ~= "SHOT" and episode.kind ~= "PASS") then
+	if not (inTraining or inMatch) or typeof(episode) ~= "table" or (episode.kind ~= "SHOT" and episode.kind ~= "PASS") then
 		return
 	end
 	waitingForEpisode = false
 	currentEpisode = episode
 	input:setEnabled(false)
 	local pass = episode.kind == "PASS"
-	local followUp = episode.mode == "FOLLOWUP"
+	local auto = episode.auto -- match: the teammate shoots after your pass, already resolved
+	local followUp = episode.mode == "FOLLOWUP" or auto ~= nil
 	local moved = setScene(if pass then "PASS" elseif followUp then "FOLLOWUP" else "SHOT")
+	if inMatch then
+		hud:setVisible(true)
+		matchHud:setPlaying(true)
+	end
 	if pass then
 		passVisuals:reset(episode.layout)
 		input:setMode("PASS", episode.layout.origin)
@@ -157,7 +170,7 @@ EpisodeStarted.OnClientEvent:Connect(function(episode)
 		input:setMode("SHOT")
 		moved = true
 	else
-		visuals:reset()
+		visuals:reset(episode.spot) -- match: wherever the teammate's pass found you
 		input:setMode("SHOT")
 	end
 	hud:hideCard()
@@ -191,6 +204,18 @@ EpisodeStarted.OnClientEvent:Connect(function(episode)
 		hud:setPowerZone(nil)
 		input:setGuide(nil)
 		passVisuals:setHighlight(nil)
+	end
+	if auto then
+		-- Nothing to aim: the teammate lines up and strikes, then the server's result plays.
+		hud:setTitle("PassReceived")
+		task.delay(1.2, function()
+			if currentEpisode == episode then
+				passVisuals:followUpKick()
+				visuals:onShotReleased()
+				handleResult(auto)
+			end
+		end)
+		return
 	end
 	hud:setTitle(if pass then (if guide then "PassTutorialReady" else "PassReady") elseif guide then "TutorialReady" elseif followUp then "FollowUpReady" else "Ready")
 
@@ -231,9 +256,40 @@ local function showOutcome(result)
 	end
 end
 
-EpisodeResult.OnClientEvent:Connect(function(result)
+-- Match: the commentator's line for what just happened, the new score, then on with the match.
+local function matchOutcome(result)
+	local pass = result.kind == "PASS"
+	local key
+	if pass then
+		key = "PASS_FAIL"
+	elseif result.mode == "AUTO" then
+		key = if result.outcome == "GOAL" then "ASSIST_GOAL" elseif result.outcome == "SAVE" then "MATE_SAVE" else "MATE_MISS"
+	else
+		key = if result.outcome == "GOAL" then "YOU_GOAL" elseif result.outcome == "SAVE" then "YOU_SAVE" elseif result.outcome == "POST" then "YOU_POST" else "YOU_MISS"
+	end
+	hud:setVisible(false)
+	matchHud:setPlaying(false)
+	if result.score then
+		matchHud:setScore(result.score, true)
+	end
+	matchHud:say(key, { n = result.number })
+	task.delay(MATCH_OUTCOME_TIME, function()
+		if inMatch and not currentEpisode then
+			MatchRequest:FireServer("NEXT")
+		end
+	end)
+end
+
+function handleResult(result)
 	if result.rejected then
 		warn("[ShotClient] Server rejected the input:", result.reason)
+		if inMatch then
+			-- The moment is still open on the server: aim again.
+			if currentEpisode then
+				input:setEnabled(true)
+			end
+			return
+		end
 		currentEpisode = nil
 		input:setEnabled(false)
 		task.delay(0.5, requestEpisode) -- the server resends the open episode or starts a new one
@@ -249,7 +305,7 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	end
 
 	local function onDecisive()
-		if result.mode == "FOLLOWUP" and result.outcome == "GOAL" then
+		if (result.mode == "FOLLOWUP" or result.mode == "AUTO") and result.outcome == "GOAL" then
 			passVisuals:celebrateGoal()
 		end
 		if result.mode == "TASK" then
@@ -261,17 +317,30 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 		if result.followUp then
 			-- Good pass: no card, the receiver shoots next.
 			hud:setTitle("PassReceived")
+			if inMatch then
+				matchHud:say("PASS_GOOD")
+			end
 			task.delay(FOLLOW_UP_DELAY, function()
 				if not currentEpisode and not waitingForEpisode then
-					requestEpisode()
+					if inMatch then
+						MatchRequest:FireServer("AUTO")
+					else
+						requestEpisode()
+					end
 				end
 			end)
 			return
 		end
 		hud:setTitle(if pass then "PassAfter" else "AfterShot")
-		task.delay(CARD_DELAY, function()
+		-- A goal in a match: let the scorer's knee slide play before the commentary takes over.
+		local wait = if inMatch and result.mode == "AUTO" and result.outcome == "GOAL" then 2.2 else CARD_DELAY
+		task.delay(wait, function()
 			if not currentEpisode and not waitingForEpisode then
-				showOutcome(result)
+				if inMatch then
+					matchOutcome(result)
+				else
+					showOutcome(result)
+				end
 			end
 		end)
 	end
@@ -280,6 +349,9 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	else
 		visuals:playShot(result, onDecisive)
 	end
+end
+EpisodeResult.OnClientEvent:Connect(function(result)
+	handleResult(result)
 end)
 
 -- Career menu: main menu -> club -> player -> training. It owns the camera while open.
@@ -287,15 +359,78 @@ local menu = CareerMenu.new(CareerRequest)
 menu.onSettingsChanged = function(settings)
 	visuals:setShakeEnabled(settings.shake)
 	hud:setUiBoost(if settings.bigUi then 1.15 else 1)
+	matchHud:setUiBoost(if settings.bigUi then 1.15 else 1)
 end
 menu.onStartTraining = function(career)
 	passVisuals:setPasser(career.number, CareerConfig.upper(career.lastName))
 	inTraining = true
 	lastCompletedStage = nil
 	bestSpeed = 0
+	hud:setTrainingPanels(true)
 	hud:setVisible(true)
 	requestEpisode()
 end
+
+-- Match: the simulated part is the scoreboard and the commentator over the stadium (shot camera);
+-- the training HUD's power panel only shows during the player's own moments.
+menu.onStartMatch = function(career, header)
+	local home, away = CareerConfig.club(header.homeId), CareerConfig.club(header.awayId)
+	if not (home and away) then
+		menu:open()
+		return
+	end
+	passVisuals:setPasser(career.number, CareerConfig.upper(career.lastName))
+	inMatch = true
+	currentEpisode = nil
+	waitingForEpisode = false
+	hud:hideCard()
+	hud:setTrainingPanels(false)
+	hud:setVisible(false)
+	setScene("SHOT")
+	visuals:reset()
+	matchHud:start(home, away, career.lastName)
+	MatchRequest:FireServer("NEXT")
+end
+
+matchHud.onChoice = function(choice)
+	if inMatch then
+		MatchRequest:FireServer(choice)
+	end
+end
+
+local function leaveMatch()
+	inMatch = false
+	currentEpisode = nil
+	input:setEnabled(false)
+	hint:hide()
+	hud:setPowerZone(nil)
+	hud:setVisible(false)
+	hud:setTrainingPanels(true)
+	setScene(nil)
+	menu:open()
+end
+matchHud.onFinished = leaveMatch
+
+MatchUpdate.OnClientEvent:Connect(function(update)
+	if not inMatch or typeof(update) ~= "table" then
+		return
+	end
+	hud:setVisible(false)
+	matchHud:setPlaying(false)
+	matchHud:playEvents(update.events or {}, function()
+		if not inMatch then
+			return
+		end
+		if update.result then
+			if update.career then
+				menu:setCareer(update.career)
+			end
+			matchHud:showResult(update.result, update.career)
+		elseif update.moment then
+			matchHud:showMoment(update.moment)
+		end
+	end)
+end)
 
 -- After the pass task: put the drills away and go back to the career menu.
 local function leaveTraining()

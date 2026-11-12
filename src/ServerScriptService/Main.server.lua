@@ -36,7 +36,7 @@ for _, name in { "ShotConfig", "ShotPhysics", "PassConfig", "PassPhysics", "Figu
 	end
 end
 
-local REMOTE_NAMES = { "RequestEpisode", "EpisodeStarted", "SubmitEpisodeInput", "EpisodeResult" }
+local REMOTE_NAMES = { "RequestEpisode", "EpisodeStarted", "SubmitEpisodeInput", "EpisodeResult", "MatchRequest", "MatchUpdate" }
 
 local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
 if not remotesFolder then
@@ -68,10 +68,26 @@ local SceneBuilder = requireServerModule("SceneBuilder")
 local KeeperBuilder = requireServerModule("KeeperBuilder")
 local EpisodeService = requireServerModule("EpisodeService")
 local CareerService = requireServerModule("CareerService")
+local MatchService = requireServerModule("MatchService")
 
 local scene = SceneBuilder.build()
 KeeperBuilder.build(scene)
 EpisodeService.init(remotes, { onStageCompleted = CareerService.onStageCompleted })
-CareerService.init(careerRequest, { beginTraining = EpisodeService.beginTraining, stopTraining = EpisodeService.stopTraining })
+MatchService.init(remotes, { onMatchFinished = CareerService.onMatchFinished })
+-- A player is in the menus, in training or in a match: starting one drops the others.
+CareerService.init(careerRequest, {
+	beginTraining = function(player, stage)
+		MatchService.stop(player)
+		EpisodeService.beginTraining(player, stage)
+	end,
+	stopTraining = function(player)
+		MatchService.stop(player)
+		EpisodeService.stopTraining(player)
+	end,
+	startMatch = function(player, career)
+		EpisodeService.stopTraining(player)
+		return MatchService.start(player, career)
+	end,
+})
 
-print("[Main] Career menu, shot and pass training ready")
+print("[Main] Career menu, training and match ready")

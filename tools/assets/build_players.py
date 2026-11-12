@@ -4,7 +4,7 @@ views and packed into ReplicatedStorage/Shared/Images/<Module>.lua for the clien
 
     python3 tools/assets/build_players.py [--preview DIR]
 
-Needs Pillow. Sheets live in tools/assets/source/. Boxes are sheet pixels (x0, y0, x1, y1).
+Needs Pillow, numpy and scipy. Sheets live in tools/assets/source/. Boxes are sheet pixels (x0, y0, x1, y1).
 Rig faces (see Shared/FigureBuilder): Front = chest, Back, Left = the character's left side.
 In the sheets' FRONT view the character's right arm/leg is on the image's left; in BACK the
 reverse. LEFT / RIGHT views show the face towards the image's left / right, which is how the
@@ -15,13 +15,16 @@ import base64
 import os
 import sys
 
+import numpy as np
 from PIL import Image, ImageDraw
+from scipy import ndimage
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SOURCE = os.path.join(ROOT, "tools", "assets", "source")
 OUT = os.path.join(ROOT, "src", "ReplicatedStorage", "Shared", "Images")
 MAX_SIDE = 100
 COLORS = 64
+RIM = 7  # sheet pixels of glow rim and outline removed round each figure
 
 # Body boxes shared by the three 1672x941 sheets (teammates and rival use one template).
 TEMPLATE_BODY = {
@@ -142,31 +145,56 @@ def erase(sheet: Image.Image, boxes):
                 px[x, y] = tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
-def is_background(c) -> bool:
-    r, g, b = c[:3]
-    return 0.3 * r + 0.59 * g + 0.11 * b < 60 and b > g + 6
+def backdrop_mask(sheet: Image.Image) -> np.ndarray:
+    """True where the sheet shows its dark purple backdrop or the purple glow round a figure:
+    the large dark-purple areas, grown by RIM px to take the glow's bright rim and the figures'
+    black outline with them. Kit colours (navy, black, red, white) and skin are never that purple."""
+    a = np.asarray(sheet.convert("RGB")).astype(int)
+    r, g, b = a[..., 0], a[..., 1], a[..., 2]
+    purple = (r >= g + 8) & (b >= r + 3) & (g <= 0.6 * b)
+    labels, _ = ndimage.label(purple)
+    edge = np.unique(np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]]))
+    # Panels are framed, so also seed from big components (the backdrop inside each view panel).
+    sizes = np.bincount(labels.ravel())
+    big = np.nonzero(sizes > 1500)[0]
+    keep = np.union1d(edge, big)
+    keep = keep[keep != 0]
+    return ndimage.binary_dilation(np.isin(labels, keep), iterations=RIM)
 
 
-def clean_hand(im: Image.Image) -> Image.Image:
-    """Hands are fists, so their boxes catch the dark purple backdrop at the corners: fill those
-    pixels (below the wristband) with the row's skin colour."""
-    im = im.copy()
-    px = im.load()
-    w, h = im.size
-    for y in range(int(h * 0.3), h):
-        skin = [px[x, y] for x in range(w) if not is_background(px[x, y])]
-        if not skin:
+def crop(sheet: Image.Image, box, backdrop: np.ndarray, straighten: bool) -> Image.Image:
+    """Cuts a part's face out of the sheet. With `straighten` (limbs, hands, hair), every row
+    keeps only the figure's own pixels (first to last non-backdrop pixel, less a 2 px margin)
+    stretched to the full width, so slanted arms, round fists, the gap between the legs and hair
+    spikes leave no backdrop or glow on the model; rows with (almost) no figure copy the nearest
+    row that has some. Torso and head boxes lie inside the figure and are cut as they are."""
+    x0, y0, x1, y1 = box
+    pixels = np.asarray(sheet.crop(box).convert("RGB")).astype(float)
+    fg = ~backdrop[y0:y1, x0:x1]
+    h, w = fg.shape
+    out = np.zeros_like(pixels)
+    valid = np.zeros(h, dtype=bool)
+    target = np.arange(w)
+    for y in range(h if straighten else 0):
+        cols = np.nonzero(fg[y])[0]
+        if len(cols) < 0.3 * w:
             continue
-        fill = tuple(sorted(c[i] for c in skin)[len(skin) // 2] for i in range(3))
-        for x in range(w):
-            if is_background(px[x, y]):
-                px[x, y] = fill
-    return im
-
-
-def crop(sheet: Image.Image, box) -> Image.Image:
-    im = sheet.crop(box)
-    w, h = im.size
+        a, b = cols[0], cols[-1]
+        if a > 0:
+            a += 2
+        if b < w - 1:
+            b -= 2
+        source = a + target * (b - a) / max(1, w - 1)
+        for c in range(3):
+            out[y, :, c] = np.interp(source, target, pixels[y, :, c])
+        valid[y] = True
+    if valid.any():
+        rows = np.nonzero(valid)[0]
+        for y in np.nonzero(~valid)[0]:
+            out[y] = out[rows[np.argmin(np.abs(rows - y))]]
+    else:
+        out = pixels
+    im = Image.fromarray(out.round().astype("uint8"))
     scale = min(1, MAX_SIDE / max(w, h))
     if scale < 1:
         im = im.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
@@ -288,13 +316,15 @@ def main():
             cache_key = (sheet_name, tuple(ch.get("erase", [])) if boxes is TEMPLATE_BODY else ())
             if cache_key not in sheets:
                 sheet = Image.open(os.path.join(SOURCE, sheet_name)).convert("RGB")
+                mask = backdrop_mask(sheet)  # from the untouched sheet
                 if boxes is TEMPLATE_BODY and ch.get("erase"):
                     erase(sheet, ch["erase"])
-                sheets[cache_key] = sheet
+                sheets[cache_key] = (sheet, mask)
+                if preview_dir:
+                    Image.fromarray((mask * 255).astype("uint8")).save(os.path.join(preview_dir, "mask_" + sheet_name))
             for key, box in boxes.items():
-                images[key] = crop(sheets[cache_key], box)
-                if "Hand" in key:
-                    images[key] = clean_hand(images[key])
+                straighten = not key.startswith(("UpperTorso", "LowerTorso", "Head"))
+                images[key] = crop(sheets[cache_key][0], box, sheets[cache_key][1], straighten)
         write_module(ch["module"], ch["comment"], images)
         print("wrote", ch["module"], len(images), "images")
         if preview_dir:

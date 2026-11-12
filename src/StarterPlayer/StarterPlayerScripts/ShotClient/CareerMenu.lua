@@ -64,9 +64,10 @@ local TEXT = {
 	TrainedTitle = "ОБУЧЕНИЕ\nПРОЙДЕНО!",
 	CareerTitle = "ТВОЯ\nКАРЬЕРА",
 	CareerLine = "%s %s  ·  №%d  ·  %s",
-	FirstMatch = "ПЕРВЫЙ МАТЧ СЕЗОНА",
-	Soon = "⏳  СКОРО: матчи появятся в следующем обновлении",
-	ToMenu = "В ГЛАВНОЕ МЕНЮ",
+	FirstMatch = "СЛЕДУЮЩИЙ МАТЧ",
+	CareerStats = "Уровень %d  ·  Матчи: %d  ·  Голы: %d  ·  Передачи: %d",
+	PlayMatch = "ИГРАТЬ МАТЧ  ›",
+	ToMenu = "В МЕНЮ",
 	-- Settings and confirmations
 	SettingsTitle = "НАСТРОЙКИ",
 	Shake = "Тряска камеры при ударе",
@@ -156,6 +157,7 @@ function CareerMenu.new(remote: RemoteFunction)
 	self.replace = false
 	self.selectedClub = nil
 	self.onStartTraining = nil :: ((any) -> ())?
+	self.onStartMatch = nil :: ((any, any) -> ())? -- (career, { homeId, awayId, moments })
 	self.onSettingsChanged = nil :: ((any) -> ())?
 	self.cameraMode = "MENU"
 	self.clock = 0
@@ -762,11 +764,40 @@ function CareerMenu:_buildNextMatch()
 		self.fixtureSides[i] = { crest = crestHolder, name = name }
 	end
 
-	local soon = text({ Name = "Soon", Position = UDim2.fromOffset(20, 292), Size = UDim2.new(1, -40, 0, 20), Text = TEXT.Soon, TextSize = 14, FontFace = FONT_BOLD, TextColor3 = LILAC, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
-	outline(soon, 1)
-	self.menuButton = UiKit.button(body, { Name = "ToMenu", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 322), Size = UDim2.fromOffset(300, 52) }, TEXT.ToMenu, function()
-		self:_show("MAIN")
+	self.nextStats = text({ Name = "Stats", Position = UDim2.fromOffset(20, 292), Size = UDim2.new(1, -40, 0, 20), Text = "", TextSize = 14, FontFace = FONT_BOLD, TextColor3 = LILAC, TextXAlignment = Enum.TextXAlignment.Center, Parent = body })
+	outline(self.nextStats, 1)
+	self.menuButton = UiKit.button(body, { Name = "ToMenu", Position = UDim2.fromOffset(30, 322), Size = UDim2.fromOffset(200, 52), TextSize = 18 }, TEXT.ToMenu, function()
+		if not self.busy then
+			self:_show("MAIN")
+		end
+	end, "secondary")
+	self.matchButton = UiKit.button(body, { Name = "PlayMatch", Position = UDim2.fromOffset(242, 322), Size = UDim2.fromOffset(268, 52) }, TEXT.PlayMatch, function()
+		self:_startMatch()
 	end, "primary")
+end
+
+function CareerMenu:_startMatch()
+	if self.busy or not self.career then
+		return
+	end
+	self.busy = true
+	self.matchButton:setEnabled(false)
+	task.spawn(function()
+		local result = self:_request("START_MATCH")
+		self.busy = false
+		self.matchButton:setEnabled(true)
+		if result.ok and self.onStartMatch then
+			self:close()
+			self.onStartMatch(self.career, result.match)
+		else
+			self.nextStats.Text = errorText(result.error)
+		end
+	end)
+end
+
+-- The server's copy of the career after a match (level, goals, matches).
+function CareerMenu:setCareer(career)
+	self.career = career
 end
 
 function CareerMenu:_showNext(justTrained: boolean)
@@ -790,8 +821,10 @@ function CareerMenu:_showNext(justTrained: boolean)
 		UiKit.crest(slot.crest, { Size = UDim2.fromOffset(56, 56) }, side)
 		slot.name.Text = side.name
 	end
+	self.nextStats.Text = string.format(TEXT.CareerStats, career.level or 1, career.matches or 0, career.goals or 0, career.assists or 0)
 	self:_show("NEXT")
-	self.menuButton:playShine()
+	self.matchButton:setEnabled(true)
+	self.matchButton:playShine()
 end
 
 ---------------------------------------------------------------- settings and confirmations

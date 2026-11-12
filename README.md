@@ -22,7 +22,7 @@ python3 tools/place.py sourcemap         # sourcemap.json for luau-lsp
 Outfield players are built like the goalkeeper: each body part's front, back and sides are cut
 from a character sheet in `tools/assets/source/` and packed into
 `src/ReplicatedStorage/Shared/Images/` (PlayerMain, Teammate7, Teammate28, Rival9). After
-changing a sheet or a crop box, regenerate them and rebuild the place (needs Pillow):
+changing a sheet or a crop box, regenerate them and rebuild the place (needs Pillow, numpy and scipy):
 
 ```sh
 python3 tools/assets/build_players.py --preview /tmp/preview   # preview PNGs are optional
