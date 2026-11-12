@@ -289,10 +289,7 @@ menu.onSettingsChanged = function(settings)
 	hud:setUiBoost(if settings.bigUi then 1.15 else 1)
 end
 menu.onStartTraining = function(career)
-	local club = CareerConfig.club(career.clubId)
-	if club then
-		passVisuals:setTeamKit(CareerConfig.kit(club), career.number)
-	end
+	passVisuals:setPasser(career.number, CareerConfig.upper(career.lastName))
 	inTraining = true
 	lastCompletedStage = nil
 	bestSpeed = 0

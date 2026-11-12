@@ -13,7 +13,7 @@ local JOINT_NAMES = {
 	"LeftHip", "LeftKnee", "LeftAnkle", "RightHip", "RightKnee", "RightAnkle",
 }
 
--- One-shot actions and their length in seconds; WAVE and CHEER loop until replaced.
+-- One-shot actions and their length in seconds; WAVE, CHEER and SLIDE loop until replaced.
 local DURATION = { KICK = 0.5, TRAP = 0.55, LUNGE = 0.8, NOD = 0.8 }
 
 local function J(x: number, y: number, z: number): Vector3
@@ -74,9 +74,9 @@ function FigureAnimator:moveTo(position: Vector3, facing: Vector3?, dt: number)
 	end
 end
 
--- KICK | TRAP | LUNGE | NOD (one-shot), WAVE | CHEER (loop), nil = back to idle/run.
+-- KICK | TRAP | LUNGE | NOD (one-shot), WAVE | CHEER | SLIDE (loop), nil = back to idle/run.
 function FigureAnimator:play(action: string?)
-	if self.action == action and (action == "WAVE" or action == "CHEER") then
+	if self.action == action and (action == "WAVE" or action == "CHEER" or action == "SLIDE") then
 		return
 	end
 	self.action = action
@@ -158,6 +158,25 @@ function FigureAnimator:_pose(): (Vector3, number)
 		-- Contract signed: arms stay relaxed, one short nod towards the camera.
 		local nod = math.max(0, math.sin(math.min(t, 0.8) / 0.8 * math.pi))
 		joints.Neck = J(16 * nod, 0, 0)
+	elseif action == "SLIDE" then
+		-- Goal: down onto both knees (thighs upright, shins flat behind), leaning back with the
+		-- arms spread wide and the head thrown back; the fists pump once he has stopped.
+		local k = smooth(t / 0.22)
+		local pump = if t > 0.9 then math.sin((t - 0.9) * 9) * smooth((t - 0.9) / 0.3) else 0
+		joints.LeftHip = J(-6 * k, 0, -6 * k)
+		joints.RightHip = J(-6 * k, 0, 6 * k)
+		joints.LeftKnee = J(-92 * k, 0, 0)
+		joints.RightKnee = J(-92 * k, 0, 0)
+		joints.LeftAnkle = J(-30 * k, 0, 0)
+		joints.RightAnkle = J(-30 * k, 0, 0)
+		joints.Waist = J(22 * k, 0, 0) -- +X tips the upper body back
+		joints.Neck = J(28 * k, 0, 0)
+		joints.LeftShoulder = J(25 * k, 0, (-105 + 12 * pump) * k)
+		joints.RightShoulder = J(25 * k, 0, (105 - 12 * pump) * k)
+		joints.LeftElbow = J(12 * k, 0, 0)
+		joints.RightElbow = J(12 * k, 0, 0)
+		drop = 0.9 * k
+		bob = 0
 	end
 	return joints, bob - drop
 end

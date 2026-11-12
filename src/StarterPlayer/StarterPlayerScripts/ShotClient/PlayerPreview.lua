@@ -1,5 +1,5 @@
--- The player's footballer on the pitch during career creation, in the character sheet's MAIN
--- look and the chosen club's kit. He appears facing the camera (gold flash, sparkles), then turns
+-- Your footballer on the pitch during career creation (the PlayerMain sheet, navy team kit). He
+-- appears facing the camera (gold flash, sparkles), then turns
 -- round to show the surname and number on his back; every change turns him to the back again.
 -- Everything here is local to this client; CareerMenu drives it and owns the camera.
 
@@ -24,7 +24,6 @@ local FRAMINGS = {
 local FADE_IN = 0.55
 local FRONT_HOLD = 1.5 -- seconds facing the camera before the first turn (CREATE)
 local TURN_TIME = 0.9
-local PRINT_PIXELS = 60 -- SurfaceGui pixels per stud on the shirt
 
 local PlayerPreview = {}
 PlayerPreview.__index = PlayerPreview
@@ -59,7 +58,6 @@ function PlayerPreview.new()
 	self.folder = UiKit.create("Folder", { Name = "CareerPreview" })
 	self.visible = false
 	self.clock = 0
-	self.club = nil
 	self.animator = nil
 	self.framing = FRAMINGS.CREATE
 	self.front = frontAngle(self.framing)
@@ -70,7 +68,6 @@ function PlayerPreview.new()
 	self.appearStart = 0
 	self.fadeParts = {}
 	self.fadeGuis = {}
-	self.prints = {}
 
 	-- Showcase lighting: warm key light from the camera side, violet rim from behind.
 	local key = makePart({ Name = "KeyLight", Size = Vector3.one * 0.2, Transparency = 1, Position = STAGE + Vector3.new(-2, 8, 9), Parent = self.folder })
@@ -118,83 +115,43 @@ function PlayerPreview.cameraTarget(mode: string): (CFrame, number, number)
 	return CFrame.lookAt(STAGE + framing.offset, STAGE + framing.look), framing.fov, framing.offset.Magnitude
 end
 
--- Shirt prints: number and badge on the chest, surname and big number on the back.
-function PlayerPreview:_dressShirt(model: Model, club)
-	local torso = model:FindFirstChild("UpperTorso") :: BasePart
-	local function makePrint(face: Enum.NormalId, name: string): SurfaceGui
-		return UiKit.create("SurfaceGui", {
-			Name = name,
-			Face = face,
-			SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
-			PixelsPerStud = PRINT_PIXELS,
-			LightInfluence = 1,
-			ZOffset = 1, -- above the collar drawn by FigureBuilder
-			Parent = torso,
-		})
-	end
-	local function numberLabel(parent: Instance, position: UDim2, size: UDim2): TextLabel
-		return UiKit.text({
-			Name = "Number",
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = position,
-			Size = size,
-			Text = "",
-			FontFace = UiKit.FONT_PRINT,
-			TextColor3 = club.print,
-			TextXAlignment = Enum.TextXAlignment.Center,
-			TextScaled = true,
-			Parent = parent,
-		})
-	end
+-- The player from the PlayerMain sheet, in the team's navy kit with the chosen number and surname
+-- printed by FigureBuilder. The back number pops when it changes.
+local NAVY = UiKit.rgb(26, 36, 110)
+local PLAYER_KIT = {
+	skin = CareerConfig.Skin,
+	hair = CareerConfig.Hair,
+	shirt = NAVY,
+	shorts = NAVY,
+	socks = NAVY,
+	boots = UiKit.rgb(236, 232, 244),
+	number = 10,
+}
 
-	local back = makePrint(Enum.NormalId.Back, "BackPrint")
-	self.backName = UiKit.text({
-		Name = "Surname",
-		Position = UDim2.fromScale(0.06, 0.07),
-		Size = UDim2.fromScale(0.88, 0.2),
-		Text = "",
-		FontFace = UiKit.FONT_PRINT,
-		TextColor3 = club.print,
-		TextXAlignment = Enum.TextXAlignment.Center,
-		Parent = back,
-	})
-	UiKit.sizeLimit(self.backName, 40)
-	local numberHolder = UiKit.frame({ Name = "NumberHolder", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.62), Size = UDim2.fromScale(0.8, 0.64), BackgroundTransparency = 1, Parent = back })
-	self.numberPop = UiKit.create("UIScale", { Parent = numberHolder })
-	self.backNumber = numberLabel(numberHolder, UDim2.fromScale(0.5, 0.5), UDim2.fromScale(1, 1))
-
-	local front = makePrint(Enum.NormalId.Front, "FrontPrint")
-	self.frontNumber = numberLabel(front, UDim2.fromScale(0.5, 0.58), UDim2.fromScale(0.42, 0.5))
-	UiKit.crest(front, { Name = "Badge", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.8, 0.24), Size = UDim2.fromOffset(28, 28) }, club)
-	self.prints = { back, front }
-end
-
-function PlayerPreview:_build(club)
-	if self.animator then
-		self.animator.model:Destroy()
-	end
-	local model, rootHeight = FigureBuilder.build("CareerPlayer", CareerConfig.kit(club), SCALE, "head", "MAIN")
+function PlayerPreview:_build()
+	local model, rootHeight = FigureBuilder.build("CareerPlayer", PLAYER_KIT, SCALE, "PlayerMain")
 	self.fadeParts = {}
+	self.fadeGuis = {}
 	for _, d in model:GetDescendants() do
 		if d:IsA("BasePart") then
 			d.CastShadow = true
+			table.insert(self.fadeParts, d)
+		elseif d:IsA("Decal") then
 			table.insert(self.fadeParts, d)
 		elseif d:IsA("SurfaceGui") then
 			table.insert(self.fadeGuis, d)
 		end
 	end
-	self:_dressShirt(model, club)
+	self.backNumber = model:FindFirstChild("BackNumber", true) :: TextLabel
+	self.backName = model:FindFirstChild("Surname", true) :: TextLabel
+	self.numberPop = UiKit.create("UIScale", { Parent = self.backNumber })
 	model.Parent = self.folder
 	self.animator = FigureAnimator.new(model, rootHeight, SCALE)
-	self.club = club
 end
 
 function PlayerPreview:_setFade(amount: number)
 	for _, part in self.fadeParts do
 		part.LocalTransparencyModifier = amount
-	end
-	for _, gui in self.prints do
-		gui.Enabled = amount < 0.5
 	end
 	for _, gui in self.fadeGuis do
 		gui.Enabled = amount < 0.5
@@ -221,10 +178,9 @@ function PlayerPreview:showFront()
 	end
 end
 
-function PlayerPreview:_appear(club, mode: string)
-	if club ~= self.club then
-		self.fadeGuis = {}
-		self:_build(club)
+function PlayerPreview:_appear(mode: string)
+	if not self.animator then
+		self:_build()
 	end
 	self.mode = mode
 	self.framing = FRAMINGS[mode]
@@ -248,9 +204,9 @@ function PlayerPreview:_appear(club, mode: string)
 	end)
 end
 
--- Player creation: appears in the club's kit facing the camera, then turns to show the back.
-function PlayerPreview:show(club, lastName: string, number: number?)
-	self:_appear(club, "CREATE")
+-- Player creation: appears facing the camera, then turns to show the back.
+function PlayerPreview:show(lastName: string, number: number?)
+	self:_appear("CREATE")
 	self.introAt = self.clock + FRONT_HOLD
 	self:setIdentity(lastName, number, true)
 end
@@ -263,9 +219,7 @@ function PlayerPreview:setIdentity(lastName: string, number: number?, quiet: boo
 	local surname = CareerConfig.upper(lastName)
 	local digits = if number then tostring(number) else ""
 	local changed = self.backName.Text ~= surname or self.backNumber.Text ~= digits
-	self.backName.Text = surname
-	self.backNumber.Text = digits
-	self.frontNumber.Text = digits
+	FigureBuilder.setPrints(self.animator.model, digits, surname)
 	if quiet or not changed or self.introAt then
 		return
 	end

@@ -17,6 +17,20 @@ python3 tools/place.py export some.rbxlx # a place saved from Studio -> src/
 python3 tools/place.py sourcemap         # sourcemap.json for luau-lsp
 ```
 
+## Player textures
+
+Outfield players are built like the goalkeeper: each body part's front, back and sides are cut
+from a character sheet in `tools/assets/source/` and packed into
+`src/ReplicatedStorage/Shared/Images/` (PlayerMain, Teammate7, Teammate28, Rival9). After
+changing a sheet or a crop box, regenerate them and rebuild the place (needs Pillow):
+
+```sh
+python3 tools/assets/build_players.py --preview /tmp/preview   # preview PNGs are optional
+python3 tools/place.py build
+```
+
+Images need *Game Settings → Security → Allow Mesh / Image APIs* in a published game.
+
 ## Player flow
 
 Main menu (New career / Continue / Settings) → club picker (8 clubs, 3 open) → player name and

@@ -32,15 +32,6 @@ local TEXT = {
 	Loading = "Загрузка профиля…",
 	SessionOnly = "Сохранения недоступны: прогресс останется только до выхода",
 	LoadFailed = "Нет связи с сервером. Попробуй перезайти",
-	CardLine = "№%d %s  ·  OVR %d  ·  УР. %d",
-	CardNext = {
-		SHOT = "Далее: тренировка — удар",
-		PASS = "Далее: тренировка — пас",
-		DONE = "Далее: первый матч сезона (скоро)",
-	},
-	CardEmptyTitle = "ТВОЙ ПУТЬ К ЗВЁЗДАМ",
-	CardEmptyLine = "8 клубов лиги · 3 ждут новичков",
-	CardEmptyNext = "Начни карьеру и подпиши контракт",
 	-- Club picker
 	ClubsTitle = "ВЫБЕРИ КЛУБ",
 	League = "🏆 %s  ·  %d КЛУБОВ",
@@ -123,17 +114,11 @@ local CLUBS_CAMERA = { from = Vector3.new(6, 8, 86), to = Vector3.new(0, 5.5, 0)
 -- The creation screen keeps the player sharp and softens the stadium with depth of field instead.
 local BLUR = { MENU = 6, CREATE = 0, CLUBS = 16, NEXT = 12 }
 local DEPTH = { CREATE = true }
--- Screen shade: darker behind the panels. The main menu shades both sides and keeps the middle open.
+-- Screen shade: darker on the left behind the menus, the stadium shows through on the right.
 local SHADE_LEFT = NumberSequence.new({
 	NumberSequenceKeypoint.new(0, 0.12),
 	NumberSequenceKeypoint.new(0.45, 0.55),
 	NumberSequenceKeypoint.new(1, 0.85),
-})
-local SHADE_SIDES = NumberSequence.new({
-	NumberSequenceKeypoint.new(0, 0.35),
-	NumberSequenceKeypoint.new(0.3, 0.95),
-	NumberSequenceKeypoint.new(0.6, 0.95),
-	NumberSequenceKeypoint.new(1, 0.3),
 })
 
 local CareerMenu = {}
@@ -182,7 +167,7 @@ function CareerMenu.new(remote: RemoteFunction)
 
 	-- Darker on the left where the menus sit; the stadium shows through on the right.
 	local shade = frame({ Name = "Shade", Position = UDim2.fromOffset(-200, -120), Size = UDim2.new(1, 400, 1, 240), BackgroundColor3 = INK, Parent = gui })
-	self.shadeGradient = create("UIGradient", { Transparency = SHADE_LEFT, Parent = shade })
+	create("UIGradient", { Transparency = SHADE_LEFT, Parent = shade })
 	self.shade = shade
 
 	self.screens = {}
@@ -243,26 +228,21 @@ end
 
 ---------------------------------------------------------------- main menu
 
--- Spread over the screen: logo top left, buttons on the right, career card bottom left, the
--- stadium in between.
+-- Left column: logo and tagline, the three buttons under them; the stadium fills the rest.
 function CareerMenu:_buildMain()
 	local root = frame({ Name = "MAIN", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = self.gui })
-	local function group(name: string, anchor: Vector2, position: UDim2, size: Vector2): Frame
-		local holder = frame({ Name = name, AnchorPoint = anchor, Position = position, Size = UDim2.fromOffset(size.X, size.Y), BackgroundTransparency = 1, Parent = root })
-		self.scaler:add(holder)
-		return holder
-	end
+	local column = frame({ Name = "Column", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 24, 0.5, 0), Size = UDim2.fromOffset(330, 420), BackgroundTransparency = 1, Parent = root })
+	self.scaler:add(column)
 
 	-- Logo and tagline
-	local top = group("Brand", Vector2.new(0, 0), UDim2.fromOffset(16, 4), Vector2.new(330, 172))
-	local logo = frame({ Name = "Logo", Size = UDim2.fromOffset(330, 136), BackgroundTransparency = 1, Parent = top })
+	local logo = frame({ Name = "Logo", Size = UDim2.fromOffset(330, 136), BackgroundTransparency = 1, Parent = column })
 	local embedded = ImageLoader.get("Logo/Logo")
 	if embedded then
 		create("ImageLabel", { Name = "LogoImage", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ImageContent = embedded, ScaleType = Enum.ScaleType.Fit, Parent = logo })
 	else
 		UiKit.bigText({ Name = "Wordmark", Text = 'NEW FOOTBALL <font color="#FF2D55">STAR</font> <font color="#FFBF1F">★</font>', TextSize = 36, Position = UDim2.fromOffset(4, 44), Size = UDim2.fromOffset(322, 48), Parent = logo }, 3.5, Vector2.new(3, 4))
 	end
-	local tagline = frame({ Name = "Tagline", Position = UDim2.fromOffset(10, 140), Size = UDim2.fromOffset(310, 26), BackgroundColor3 = NAVY, BackgroundTransparency = 0.1, Parent = top })
+	local tagline = frame({ Name = "Tagline", Position = UDim2.fromOffset(10, 140), Size = UDim2.fromOffset(310, 26), BackgroundColor3 = NAVY, BackgroundTransparency = 0.1, Parent = column })
 	corner(tagline, 6)
 	stroke(tagline, VIOLET, 2)
 	local accent = frame({ AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 9, 0.5, 0), Size = UDim2.fromOffset(5, 12), BackgroundColor3 = RED, Parent = tagline })
@@ -272,34 +252,21 @@ function CareerMenu:_buildMain()
 	outline(taglineText, 1.2)
 
 	-- Buttons
-	local right = group("Buttons", Vector2.new(1, 0.5), UDim2.new(1, -24, 0.5, 0), Vector2.new(290, 236))
-	local c = frame({ Name = "Content", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = right })
+	local c = frame({ Name = "Content", Position = UDim2.fromOffset(10, 182), Size = UDim2.fromOffset(310, 236), BackgroundTransparency = 1, Parent = column })
 	local pop = create("UIScale", { Parent = c })
-	UiKit.slashes(c, UDim2.new(1, -48, 0, -6), 18, GLOW)
-	self.newButton = UiKit.button(c, { Name = "NewCareer", Position = UDim2.fromOffset(0, 14), Size = UDim2.fromOffset(290, 60), TextSize = 22 }, TEXT.NewCareer, function()
+	self.newButton = UiKit.button(c, { Name = "NewCareer", Position = UDim2.fromOffset(0, 0), Size = UDim2.fromOffset(310, 60), TextSize = 22 }, TEXT.NewCareer, function()
 		self:_onNewCareer()
 	end, "primary", TEXT.NewCareerSub)
-	self.continueButton = UiKit.button(c, { Name = "Continue", Position = UDim2.fromOffset(0, 84), Size = UDim2.fromOffset(290, 60), TextSize = 19 }, TEXT.Continue, function()
+	self.continueButton = UiKit.button(c, { Name = "Continue", Position = UDim2.fromOffset(0, 70), Size = UDim2.fromOffset(310, 60), TextSize = 19 }, TEXT.Continue, function()
 		self:_onContinue()
 	end, "secondary", TEXT.ContinueNone)
-	self.settingsButton = UiKit.button(c, { Name = "Settings", Position = UDim2.fromOffset(0, 154), Size = UDim2.fromOffset(290, 46), TextSize = 19 }, "⚙  " .. TEXT.Settings, function()
+	self.settingsButton = UiKit.button(c, { Name = "Settings", Position = UDim2.fromOffset(0, 140), Size = UDim2.fromOffset(310, 46), TextSize = 19 }, "⚙  " .. TEXT.Settings, function()
 		self:_openSettings()
 	end, "secondary")
-	self.status = text({ Name = "Status", Position = UDim2.fromOffset(4, 204), Size = UDim2.fromOffset(282, 30), Text = TEXT.Loading, TextSize = 11, FontFace = FONT_MEDIUM, TextColor3 = LILAC, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, Parent = c })
+	self.status = text({ Name = "Status", Position = UDim2.fromOffset(2, 192), Size = UDim2.fromOffset(306, 30), Text = TEXT.Loading, TextSize = 11, FontFace = FONT_MEDIUM, TextColor3 = LILAC, TextWrapped = true, Parent = c })
 	outline(self.status, 1)
 	self.newButton:setEnabled(false)
 	self.continueButton:setEnabled(false)
-
-	-- Career card
-	local cardHolder = group("CareerCard", Vector2.new(0, 1), UDim2.new(0, 16, 1, -12), Vector2.new(330, 88))
-	local card = UiKit.panel({ Name = "Card", Size = UDim2.fromScale(1, 1), Parent = cardHolder }, 12)
-	self.cardCrest = frame({ Name = "CrestHolder", Position = UDim2.fromOffset(12, 15), Size = UDim2.fromOffset(58, 58), BackgroundTransparency = 1, Parent = card })
-	self.cardTitle = text({ Name = "Title", Position = UDim2.fromOffset(82, 10), Size = UDim2.fromOffset(238, 24), Text = "", TextSize = 18, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
-	outline(self.cardTitle, 1.5)
-	self.cardLine = text({ Name = "Line", Position = UDim2.fromOffset(82, 36), Size = UDim2.fromOffset(238, 20), Text = "", TextSize = 14, FontFace = FONT_BOLD, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
-	outline(self.cardLine, 1)
-	self.cardNext = text({ Name = "Next", Position = UDim2.fromOffset(82, 58), Size = UDim2.fromOffset(238, 18), Text = "", TextSize = 12, FontFace = FONT_BOLD, TextColor3 = GOLD, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
-	outline(self.cardNext, 1)
 
 	self.screens.MAIN = { root = root, content = c, pop = pop }
 end
@@ -309,21 +276,10 @@ function CareerMenu:_refreshMain()
 	local club = career and CareerConfig.club(career.clubId)
 	self.newButton:setEnabled(self.loaded)
 	self.continueButton:setEnabled(club ~= nil)
-	for _, child in self.cardCrest:GetChildren() do
-		child:Destroy()
-	end
 	if career and club then
 		self.continueButton:setText(TEXT.Continue, string.format(TEXT.ContinueSub, club.name, career.number, career.lastName))
-		UiKit.crest(self.cardCrest, { Size = UDim2.fromOffset(58, 58) }, club)
-		self.cardTitle.Text = club.name
-		self.cardLine.Text = string.format(TEXT.CardLine, career.number, CareerConfig.upper(career.lastName), career.ovr, career.level)
-		self.cardNext.Text = TEXT.CardNext[career.training] or ""
 	else
 		self.continueButton:setText(TEXT.Continue, TEXT.ContinueNone)
-		UiKit.crest(self.cardCrest, { Size = UDim2.fromOffset(58, 58) }, CareerConfig.Mascot)
-		self.cardTitle.Text = TEXT.CardEmptyTitle
-		self.cardLine.Text = TEXT.CardEmptyLine
-		self.cardNext.Text = TEXT.CardEmptyNext
 	end
 	if not self.loaded then
 		self.status.Text = TEXT.Loading
@@ -684,7 +640,7 @@ function CareerMenu:_enterPlayer()
 	self.confirmButton:setText(TEXT.Confirm)
 	self.confirmButton:setEnabled(true)
 	self:_show("PLAYER")
-	self.preview:show(club, self.lastBox.Text, nil)
+	self.preview:show(self.lastBox.Text, nil)
 	if self.numberBox.Text == "" then
 		self:_setNumber(CareerConfig.Number.Default)
 	else
@@ -981,7 +937,6 @@ function CareerMenu:_show(name: string)
 	self.current = name
 	self.cameraMode = if name == "MAIN" then "MENU" elseif name == "PLAYER" then "CREATE" elseif name == "CLUBS" then "CLUBS" else "NEXT"
 	self.shade.Visible = name ~= "NEXT"
-	self.shadeGradient.Transparency = if name == "MAIN" then SHADE_SIDES else SHADE_LEFT
 	if name ~= "PLAYER" then
 		self.preview:hide()
 	end

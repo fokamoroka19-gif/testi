@@ -28,11 +28,12 @@ local RED = rgb(255, 45, 85)
 
 local SKIN = rgb(214, 132, 82)
 local HAIR = rgb(52, 32, 26)
--- Our team in gold and purple until the career's club kit is set; the rival in red/black stripes
--- like the character sheet's opponent. Skin and hair come from each character's look.
-local TEAM_KIT = { skin = SKIN, shirt = GOLD, shorts = rgb(43, 18, 80), socks = GOLD, boots = rgb(20, 14, 30), hair = HAIR, trim = rgb(43, 18, 80), band = rgb(43, 18, 80), print = rgb(43, 18, 80) }
+-- Kits are painted on from the character sheets (tools/assets/build_players.py): our team in
+-- navy, the rival in black and red. These colours only show if images are unavailable.
+local NAVY = rgb(26, 36, 110)
+local TEAM_KIT = { skin = SKIN, shirt = NAVY, shorts = NAVY, socks = NAVY, boots = rgb(236, 232, 244), hair = HAIR }
 local BLACK = rgb(24, 18, 26)
-local OPPONENT_KIT = { skin = SKIN, shirt = rgb(204, 26, 44), stripes = BLACK, shorts = BLACK, socks = rgb(240, 236, 244), band = BLACK, trim = BLACK, boots = BLACK, print = WHITE, hair = HAIR, number = 9 }
+local OPPONENT_KIT = { skin = SKIN, shirt = BLACK, shorts = BLACK, socks = BLACK, boots = rgb(236, 232, 244), hair = HAIR }
 
 local PassVisuals = {}
 PassVisuals.__index = PassVisuals
@@ -136,10 +137,10 @@ function PassVisuals.new()
 		table.insert(self.ballParts, { patch, CFrame.fromMatrix(dir * BALL_RADIUS * 0.985, dir, dir:Cross(reference).Unit) })
 	end
 
-	local function figure(name: string, kit, look: string, number: number?)
+	local function figure(name: string, kit, sheet: string, number: number?)
 		local dressed = table.clone(kit)
-		dressed.number = number or kit.number
-		local model, rootHeight = FigureBuilder.build(name, dressed, SCALE, "head", look)
+		dressed.number = number
+		local model, rootHeight = FigureBuilder.build(name, dressed, SCALE, sheet)
 		for _, part in model:GetDescendants() do
 			if part:IsA("BasePart") then
 				part.CastShadow = true
@@ -156,10 +157,10 @@ function PassVisuals.new()
 		end
 		return animator
 	end
-	-- You pass; the teammates receive and shoot; the rival defends.
-	self.passer = figure("Passer", TEAM_KIT, "MAIN", 10)
-	self.mates = { figure("Teammate1", TEAM_KIT, "TEAMMATE", 8), figure("Teammate2", TEAM_KIT, "TEAMMATE", 7) }
-	self.defender = figure("Defender", OPPONENT_KIT, "RIVAL")
+	-- You pass (your number printed on the shirt); #7 and #28 receive; the rival #9 defends.
+	self.passer = figure("Passer", TEAM_KIT, "PlayerMain", 10)
+	self.mates = { figure("Teammate1", TEAM_KIT, "Teammate7"), figure("Teammate2", TEAM_KIT, "Teammate28") }
+	self.defender = figure("Defender", OPPONENT_KIT, "Rival9")
 
 	-- Ground markers: where teammates can take the ball, and the defender's reach.
 	self.mateRings = {
@@ -183,14 +184,9 @@ function PassVisuals.new()
 	return self
 end
 
--- The passer (you, with your number) and his teammates wear the player's club kit.
-function PassVisuals:setTeamKit(kit, number: number?)
-	for _, animator in { self.passer, self.mates[1], self.mates[2] } do
-		FigureBuilder.applyKit(animator.model, kit)
-	end
-	if number then
-		FigureBuilder.setNumber(self.passer.model, number)
-	end
+-- The passer is you: your career's number and surname on his shirt.
+function PassVisuals:setPasser(number: number, surname: string)
+	FigureBuilder.setPrints(self.passer.model, number, surname)
 end
 
 -- Shows the drill (parents everything into the workspace) and moves the camera over.
@@ -273,16 +269,43 @@ function PassVisuals:followUpKick()
 	end
 end
 
--- The shot after the pass went in: the scorer celebrates.
+-- The shot after the pass went in: the scorer sprints towards the near corner flag and goes into
+-- a knee slide (see _updateFollowUp).
 function PassVisuals:celebrateGoal()
 	local fu = self.followUp
-	if fu then
-		local scorer = self.mates[fu.receiver]
-		task.delay(0.3, function()
-			if self.followUp == fu then
-				scorer:play("CHEER")
-			end
-		end)
+	if fu and not fu.celebration then
+		local side = if fu.spot.X >= 0 then 1 else -1
+		fu.celebration = { t = -0.25, dir = (Vector3.new(side, 0, 0) + fu.toGoal * 0.35).Unit }
+	end
+end
+
+local CELEBRATION_RUN = 0.7 -- seconds of sprint before he drops to his knees
+local CELEBRATION_SPEED = 11 -- studs/s at the end of the sprint
+local SLIDE_TIME = 0.75 -- seconds the slide takes to stop
+
+function PassVisuals:_updateCelebration(receiver, c, dt: number)
+	c.t += dt
+	if c.t < 0 then
+		receiver:moveTo(receiver.position, c.dir, dt) -- watches the ball go in first
+		return
+	end
+	local speed
+	if c.t < CELEBRATION_RUN then
+		speed = CELEBRATION_SPEED * math.min(1, 0.4 + c.t / CELEBRATION_RUN)
+	else
+		if not c.sliding then
+			c.sliding = true
+			receiver:play("SLIDE")
+		end
+		speed = CELEBRATION_SPEED * math.max(0, 1 - (c.t - CELEBRATION_RUN) / SLIDE_TIME)
+	end
+	if c.sliding then
+		-- Sliding on the knees, not running: move the figure directly.
+		receiver.position += c.dir * speed * dt
+		receiver.facing = c.dir
+		receiver.speed = 0
+	else
+		receiver:moveTo(receiver.position + c.dir * speed * dt, c.dir, dt)
 	end
 end
 
@@ -290,13 +313,17 @@ function PassVisuals:_updateFollowUp(dt: number)
 	local fu = self.followUp
 	local receiver = self.mates[fu.receiver]
 	-- Receiver jogs the last steps to the ball; the others turn to watch.
-	local towards = fu.stand - receiver.position
-	local stepLen = math.min(towards.Magnitude, 9 * dt)
-	local nextPos = if towards.Magnitude > 1e-3 then receiver.position + towards.Unit * stepLen else fu.stand
-	receiver:moveTo(nextPos, fu.toGoal, dt)
+	if fu.celebration then
+		self:_updateCelebration(receiver, fu.celebration, dt)
+	else
+		local towards = fu.stand - receiver.position
+		local stepLen = math.min(towards.Magnitude, 9 * dt)
+		local nextPos = if towards.Magnitude > 1e-3 then receiver.position + towards.Unit * stepLen else fu.stand
+		receiver:moveTo(nextPos, fu.toGoal, dt)
+	end
 	for _, figure in self:_figures() do
 		if figure ~= receiver then
-			figure:moveTo(figure.position, flat(fu.spot - figure.position), dt)
+			figure:moveTo(figure.position, flat((if fu.celebration then receiver.position else fu.spot) - figure.position), dt)
 		end
 	end
 	-- Fade whoever stands between the camera and the goal (until the kick).
