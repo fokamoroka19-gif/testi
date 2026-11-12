@@ -153,6 +153,10 @@ local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, a
 end
 
 function EpisodeService.init(remoteEvents)
+	if remotes then
+		warn("[EpisodeService] init called twice; ignoring")
+		return
+	end
 	remotes = remoteEvents
 	remotes.RequestEpisode.OnServerEvent:Connect(onRequestEpisode)
 	remotes.SubmitEpisodeInput.OnServerEvent:Connect(onSubmitEpisodeInput)

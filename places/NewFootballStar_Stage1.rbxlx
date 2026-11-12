@@ -1,0 +1,1721 @@
+<roblox version="4">
+  <Item class="ReplicatedStorage" referent="0">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="Folder" referent="1">
+      <Properties>
+        <string name="Name">Shared</string>
+      </Properties>
+      <Item class="ModuleScript" referent="2">
+        <Properties>
+          <string name="Name">ShotConfig</string>
+          <string name="Source"><![CDATA[-- Tuning values for the Stage 1 shot, shared by the server (outcome) and the client (visuals)
+-- so both sides agree on goal geometry and ball flight.
+--
+-- World layout (studs): the goal line is the plane Z = 0, the goal is centred on X = 0,
+-- the ground is Y = 0, and the shooter stands at +Z shooting towards -Z.
+
+local ShotConfig = {}
+
+ShotConfig.Goal = {
+	Width = 24, -- inside width, post to post
+	Height = 8, -- inside height, ground to crossbar
+	PostRadius = 0.35,
+	NetDepth = 6,
+	-- Fraction of the ball radius that must overlap the frame to count as POST;
+	-- lighter touches deflect in (goal side) or out (wide side).
+	FrameHitDepth = 0.5,
+}
+
+ShotConfig.Ball = {
+	Radius = 1,
+}
+
+ShotConfig.ShotDistance = 36 -- goal line to ball spot
+
+-- Lower than workspace.Gravity on purpose: weak shots get a visible loop, hard shots stay flat.
+ShotConfig.Gravity = 60
+ShotConfig.MinBallSpeed = 40 -- power 0
+ShotConfig.MaxBallSpeed = 110 -- power 1
+
+ShotConfig.Accuracy = {
+	-- Standard deviation (studs) of the random offset from the aim point, by Shooting skill.
+	ScatterAtZeroSkill = 2.6,
+	ScatterAtMaxSkill = 0.5,
+	MaxSigmas = 2.5, -- cap so a single shot is never wildly off
+	-- Power above this threshold is less accurate and tends to rise over the bar.
+	OverpowerFrom = 0.85,
+	OverpowerScatter = 1.5,
+	OverpowerLift = 2.5,
+}
+
+ShotConfig.Goalkeeper = {
+	Enabled = true,
+	Skill = 60, -- 0..100, opponent goalkeeper rating
+	HomeX = 0,
+	HomeY = 3.5, -- body centre
+	HomeZ = 1.2, -- stands just in front of the line
+	Reach = 3, -- distance the hands cover without moving
+	ReactionTime = 0.22,
+	ReactionJitter = 0.06, -- +/- random part of the reaction time
+	DiveSpeedAtZeroSkill = 10,
+	DiveSpeedAtMaxSkill = 26,
+}
+
+-- Placeholder until career data exists (GDD: new players start around OVR 40).
+ShotConfig.DefaultShooting = 42
+
+ShotConfig.Episode = {
+	MinThinkTime = 0.3, -- seconds between episode start and an accepted input
+	Timeout = 120, -- an unanswered episode expires after this
+	MinRemoteInterval = 0.2, -- per-player rate limit for remote calls
+	InputTolerance = 1e-3, -- float slack allowed on input ranges
+}
+
+ShotConfig.Input = {
+	PowerCycleSeconds = 1.6, -- power meter goes 0 -> 1 -> 0 over this time while held
+	ReadyDelay = 0.35, -- pause after a new episode before input is accepted
+}
+
+ShotConfig.Camera = {
+	Position = Vector3.new(0, 4.5, ShotConfig.ShotDistance + 12),
+	LookAt = Vector3.new(0, 3, 0),
+	FieldOfView = 40,
+}
+
+return ShotConfig
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
+          <string name="Name">ShotPhysics</string>
+          <string name="Source"><![CDATA[-- Pure shot geometry and ball flight. Used by the server to decide outcomes and by the
+-- client to draw the exact same arc, so what the player sees matches what was decided.
+
+local ShotConfig = require(script.Parent.ShotConfig)
+
+local Goal = ShotConfig.Goal
+local BALL_RADIUS = ShotConfig.Ball.Radius
+local GRAVITY = Vector3.new(0, -ShotConfig.Gravity, 0)
+
+local ShotPhysics = {}
+
+-- Where the ball crosses the goal plane relative to the frame.
+ShotPhysics.Zone = {
+	OnTarget = "ON_TARGET", -- fully inside the goal mouth
+	Frame = "FRAME", -- solid contact with a post or the crossbar
+	Wide = "WIDE", -- wide or over
+}
+
+function ShotPhysics.ballSpot(): Vector3
+	return Vector3.new(0, BALL_RADIUS, ShotConfig.ShotDistance)
+end
+
+-- Aim X in -1..1 and Y in 0..1 cover exactly the area where the whole ball fits inside the
+-- goal mouth, so aiming at the edge means grazing the frame.
+function ShotPhysics.aimToGoalPoint(aimX: number, aimY: number): Vector3
+	local halfWidth = Goal.Width / 2 - BALL_RADIUS
+	local x = math.clamp(aimX, -1, 1) * halfWidth
+	local y = BALL_RADIUS + math.clamp(aimY, 0, 1) * (Goal.Height - 2 * BALL_RADIUS)
+	return Vector3.new(x, y, 0)
+end
+
+function ShotPhysics.goalPointToAim(point: Vector3): (number, number)
+	local halfWidth = Goal.Width / 2 - BALL_RADIUS
+	local aimX = math.clamp(point.X / halfWidth, -1, 1)
+	local aimY = math.clamp((point.Y - BALL_RADIUS) / (Goal.Height - 2 * BALL_RADIUS), 0, 1)
+	return aimX, aimY
+end
+
+function ShotPhysics.ballSpeed(power: number): number
+	local p = math.clamp(power, 0, 1)
+	return ShotConfig.MinBallSpeed + (ShotConfig.MaxBallSpeed - ShotConfig.MinBallSpeed) * p
+end
+
+function ShotPhysics.flightTime(start: Vector3, target: Vector3, power: number): number
+	return (target - start).Magnitude / ShotPhysics.ballSpeed(power)
+end
+
+-- Initial velocity of a projectile that leaves `start` and is at `target` after `flightTime`.
+function ShotPhysics.launchVelocity(start: Vector3, target: Vector3, flightTime: number): Vector3
+	return (target - start) / flightTime - GRAVITY * (flightTime / 2)
+end
+
+function ShotPhysics.positionAt(start: Vector3, velocity: Vector3, t: number): Vector3
+	return start + velocity * t + GRAVITY * (0.5 * t * t)
+end
+
+function ShotPhysics.velocityAt(velocity: Vector3, t: number): Vector3
+	return velocity + GRAVITY * t
+end
+
+function ShotPhysics.gravity(): Vector3
+	return GRAVITY
+end
+
+local function distanceToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number
+	local abx, aby = bx - ax, by - ay
+	local t = math.clamp(((px - ax) * abx + (py - ay) * aby) / (abx * abx + aby * aby), 0, 1)
+	local dx, dy = px - (ax + abx * t), py - (ay + aby * t)
+	return math.sqrt(dx * dx + dy * dy)
+end
+
+-- Classifies the ball centre where it crosses the goal plane (Z = 0).
+function ShotPhysics.classify(point: Vector3): string
+	local postX = Goal.Width / 2 + Goal.PostRadius
+	local barY = Goal.Height + Goal.PostRadius
+	local x, y = point.X, point.Y
+
+	local frameDistance = math.min(
+		distanceToSegment(x, y, -postX, 0, -postX, barY),
+		distanceToSegment(x, y, postX, 0, postX, barY),
+		distanceToSegment(x, y, -postX, barY, postX, barY)
+	)
+	if frameDistance < Goal.PostRadius + BALL_RADIUS * (1 - Goal.FrameHitDepth) then
+		return ShotPhysics.Zone.Frame
+	end
+	if math.abs(x) < postX and y < barY then
+		return ShotPhysics.Zone.OnTarget
+	end
+	return ShotPhysics.Zone.Wide
+end
+
+return ShotPhysics
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="4">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Script" referent="5">
+      <Properties>
+        <string name="Name">Main</string>
+        <token name="RunContext">0</token>
+        <string name="Source"><![CDATA[-- Server entry point for the Stage 1 shot prototype.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+-- First, before anything can yield: no avatar in Stage 1 (fixed camera, and phones would
+-- otherwise show the thumbstick and jump button over the goal).
+Players.CharacterAutoLoads = false
+for _, player in Players:GetPlayers() do
+	if player.Character then
+		player.Character:Destroy()
+	end
+end
+
+if ReplicatedStorage:GetAttribute("ShotServerRunning") then
+	warn("[Main] Another copy of the Main script is already running. Delete the duplicate.")
+	return
+end
+ReplicatedStorage:SetAttribute("ShotServerRunning", true)
+
+-- Modules are looked up by name anywhere under ServerScriptService, so it doesn't matter
+-- whether they sit next to this script or inside a Services folder.
+local function requireServerModule(name: string)
+	local module = ServerScriptService:FindFirstChild(name, true)
+	if not (module and module:IsA("ModuleScript")) then
+		error(string.format("[Main] ModuleScript '%s' was not found in ServerScriptService. See README > Setup.", name), 0)
+	end
+	return require(module)
+end
+
+local shared = ReplicatedStorage:FindFirstChild("Shared")
+for _, name in { "ShotConfig", "ShotPhysics" } do
+	if not (shared and shared:FindFirstChild(name)) then
+		error(string.format("[Main] ReplicatedStorage > Shared > %s (ModuleScript) is missing. See README > Setup.", name), 0)
+	end
+end
+
+local REMOTE_NAMES = { "RequestEpisode", "EpisodeStarted", "SubmitEpisodeInput", "EpisodeResult" }
+
+local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+if not remotesFolder then
+	remotesFolder = Instance.new("Folder")
+	remotesFolder.Name = "Remotes"
+	remotesFolder.Parent = ReplicatedStorage
+end
+
+local remotes = {}
+for _, name in REMOTE_NAMES do
+	local remote = remotesFolder:FindFirstChild(name)
+	if not remote then
+		remote = Instance.new("RemoteEvent")
+		remote.Name = name
+		remote.Parent = remotesFolder
+	end
+	remotes[name] = remote
+end
+
+local SceneBuilder = requireServerModule("SceneBuilder")
+local EpisodeService = requireServerModule("EpisodeService")
+
+SceneBuilder.build()
+EpisodeService.init(remotes)
+
+print("[Main] Stage 1 shot prototype ready")
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="6">
+      <Properties>
+        <string name="Name">SceneBuilder</string>
+        <string name="Source"><![CDATA[-- Builds the stadium at runtime: pitch, markings, goal with net, ad boards, a stand with a
+-- crowd, and lighting. Goal dimensions come from ShotConfig so the visuals always match the
+-- geometry the server uses for outcomes.
+
+local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
+
+local Goal = ShotConfig.Goal
+local VERTICAL = CFrame.Angles(0, 0, math.pi / 2) -- cylinder parts are long along X
+
+local WHITE = Color3.new(1, 1, 1)
+local LIME = Color3.fromRGB(163, 230, 53)
+local DARK = Color3.fromRGB(14, 20, 16)
+local GRASS_LIGHT = Color3.fromRGB(64, 138, 56)
+local GRASS_DARK = Color3.fromRGB(52, 118, 47)
+
+local PITCH_HALF_WIDTH = 70
+local PITCH_BACK, PITCH_FRONT = -14, 114 -- grass behind the goal line / far end
+local STRIPE_DEPTH = 8
+local BOARD_Z = -17
+local STAND_FRONT_Z = -22
+local STAND_HALF_WIDTH = 85
+local TIERS, TIER_DEPTH, TIER_RISE = 9, 3.2, 1.8
+
+local BOARD_TEXTS = {
+	"NEW FOOTBALL STAR", "NEWFORD FC", "EASTBRIDGE UNITED", "REDMONT ATHLETIC",
+	"WESTPORT CITY", "NORTHVALE FC", "RIVERSIDE ROVERS", "SOUTHGATE FC",
+}
+
+local CROWD_COLORS = {
+	LIME, LIME, LIME, WHITE, WHITE, WHITE,
+	Color3.fromRGB(30, 90, 50), Color3.fromRGB(30, 90, 50),
+	Color3.fromRGB(40, 40, 44), Color3.fromRGB(200, 55, 55),
+	Color3.fromRGB(45, 95, 200), Color3.fromRGB(245, 200, 40),
+}
+
+local SceneBuilder = {}
+
+-- Decorative, anchored, no collisions: nothing in Stage 1 relies on Roblox physics.
+local function makePart(props: { [string]: any }): Part
+	local part = Instance.new("Part")
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.TopSurface = Enum.SurfaceType.Smooth
+	part.BottomSurface = Enum.SurfaceType.Smooth
+	part.Material = Enum.Material.SmoothPlastic
+	local parent = props.Parent
+	for key, value in props do
+		if key ~= "Parent" then
+			(part :: any)[key] = value
+		end
+	end
+	part.Parent = parent
+	return part
+end
+
+local function folder(name: string, parent: Instance): Folder
+	local f = Instance.new("Folder")
+	f.Name = name
+	f.Parent = parent
+	return f
+end
+
+-- Axis-aligned bar between two points (used for pitch lines and net strings).
+local function bar(parent: Instance, from: Vector3, to: Vector3, thickness: number, props: { [string]: any }?)
+	local delta = to - from
+	local size = Vector3.new(
+		math.abs(delta.X) + thickness,
+		math.abs(delta.Y) + thickness,
+		math.abs(delta.Z) + thickness
+	)
+	local p = { Size = size, CFrame = CFrame.new((from + to) / 2), Color = WHITE, Parent = parent }
+	for key, value in props or {} do
+		p[key] = value
+	end
+	return makePart(p)
+end
+
+-- The default "Baseplate" template has a baseplate at ground level (flickers through the
+-- pitch) and a SpawnLocation in the goal mouth. Removed for this play session only.
+local function clearDefaultTemplate()
+	for _, child in workspace:GetChildren() do
+		if child:IsA("SpawnLocation") or (child.Name == "Baseplate" and child:IsA("BasePart")) then
+			child:Destroy()
+		end
+	end
+end
+
+local function buildPitch(scene: Instance)
+	local pitch = folder("Pitch", scene)
+	makePart({
+		Name = "Surround",
+		Size = Vector3.new(420, 1, 420),
+		CFrame = CFrame.new(0, -0.55, 40),
+		Color = Color3.fromRGB(40, 78, 42),
+		Material = Enum.Material.Grass,
+		Parent = pitch,
+	})
+	local stripes = math.ceil((PITCH_FRONT - PITCH_BACK) / STRIPE_DEPTH)
+	for i = 0, stripes - 1 do
+		makePart({
+			Name = "Stripe",
+			Size = Vector3.new(PITCH_HALF_WIDTH * 2, 1, STRIPE_DEPTH),
+			CFrame = CFrame.new(0, -0.5, PITCH_BACK + STRIPE_DEPTH * (i + 0.5)),
+			Color = if i % 2 == 0 then GRASS_LIGHT else GRASS_DARK,
+			Material = Enum.Material.Grass,
+			Parent = pitch,
+		})
+	end
+
+	-- Markings at real-world scale (goal width 7.32 m = 24 studs, so the ball sits on the penalty spot).
+	local lines = folder("Markings", scene)
+	local y, w = 0, 0.4
+	local function line(x1: number, z1: number, x2: number, z2: number)
+		bar(lines, Vector3.new(x1, y, z1), Vector3.new(x2, y, z2), w, { Size = Vector3.new(math.abs(x2 - x1) + w, 0.06, math.abs(z2 - z1) + w) })
+	end
+	line(-PITCH_HALF_WIDTH, 0, PITCH_HALF_WIDTH, 0) -- goal line
+	line(-PITCH_HALF_WIDTH, 0, -PITCH_HALF_WIDTH, PITCH_FRONT) -- touchlines
+	line(PITCH_HALF_WIDTH, 0, PITCH_HALF_WIDTH, PITCH_FRONT)
+	for _, box in { { 30, 18 }, { 66, 54 } } do -- six-yard box, penalty box
+		local halfWidth, depth = box[1], box[2]
+		line(-halfWidth, 0, -halfWidth, depth)
+		line(halfWidth, 0, halfWidth, depth)
+		line(-halfWidth, depth, halfWidth, depth)
+	end
+	makePart({
+		Name = "PenaltySpot",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.06, 1.2, 1.2),
+		CFrame = CFrame.new(0, 0, ShotConfig.ShotDistance) * VERTICAL,
+		Color = WHITE,
+		Parent = lines,
+	})
+end
+
+local function buildGoal(scene: Instance)
+	local goal = Instance.new("Model")
+	goal.Name = "Goal"
+
+	local W, H, D = Goal.Width, Goal.Height, Goal.NetDepth
+	local postX = W / 2 + Goal.PostRadius
+	local postLength = H + 2 * Goal.PostRadius
+	local diameter = 2 * Goal.PostRadius
+	for _, side in { -1, 1 } do
+		makePart({
+			Name = if side < 0 then "LeftPost" else "RightPost",
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(postLength, diameter, diameter),
+			CFrame = CFrame.new(side * postX, postLength / 2, 0) * VERTICAL,
+			Color = WHITE,
+			Reflectance = 0.08,
+			Parent = goal,
+		})
+	end
+	makePart({
+		Name = "Crossbar",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(W + 4 * Goal.PostRadius, diameter, diameter),
+		CFrame = CFrame.new(0, H + Goal.PostRadius, 0),
+		Color = WHITE,
+		Reflectance = 0.08,
+		Parent = goal,
+	})
+
+	-- Back frame of the net box.
+	local support = { Color = Color3.fromRGB(205, 205, 210) }
+	local hw = W / 2
+	bar(goal, Vector3.new(-hw, 0, -D), Vector3.new(-hw, H, -D), 0.25, support)
+	bar(goal, Vector3.new(hw, 0, -D), Vector3.new(hw, H, -D), 0.25, support)
+	bar(goal, Vector3.new(-hw, H, -D), Vector3.new(hw, H, -D), 0.25, support)
+	bar(goal, Vector3.new(-hw, 0.1, -D), Vector3.new(hw, 0.1, -D), 0.25, support)
+	for _, x in { -hw, hw } do
+		bar(goal, Vector3.new(x, H, 0), Vector3.new(x, H, -D), 0.2, support)
+		bar(goal, Vector3.new(x, 0.1, 0), Vector3.new(x, 0.1, -D), 0.2, support)
+	end
+
+	-- Net mesh: a 1-stud grid of thin strings on the back, sides and roof.
+	local net = folder("Net", goal)
+	local netString = { Transparency = 0.25, CastShadow = false, Color = Color3.fromRGB(240, 240, 240) }
+	local t = 0.06
+	for x = -hw, hw do
+		bar(net, Vector3.new(x, 0, -D), Vector3.new(x, H, -D), t, netString)
+		bar(net, Vector3.new(x, H, 0), Vector3.new(x, H, -D), t, netString)
+	end
+	for yy = 0, H do
+		bar(net, Vector3.new(-hw, yy, -D), Vector3.new(hw, yy, -D), t, netString)
+		bar(net, Vector3.new(-hw, yy, 0), Vector3.new(-hw, yy, -D), t, netString)
+		bar(net, Vector3.new(hw, yy, 0), Vector3.new(hw, yy, -D), t, netString)
+	end
+	for z = 0, D do
+		bar(net, Vector3.new(-hw, 0, -z), Vector3.new(-hw, H, -z), t, netString)
+		bar(net, Vector3.new(hw, 0, -z), Vector3.new(hw, H, -z), t, netString)
+		bar(net, Vector3.new(-hw, H, -z), Vector3.new(hw, H, -z), t, netString)
+	end
+
+	goal.Parent = scene
+end
+
+local function buildBoards(scene: Instance)
+	local boards = folder("AdBoards", scene)
+	local count = #BOARD_TEXTS
+	local width = STAND_HALF_WIDTH * 2 / count
+	for i, text in BOARD_TEXTS do
+		local isLime = i % 2 == 0
+		local board = makePart({
+			Name = "Board",
+			Size = Vector3.new(width - 0.3, 3, 0.5),
+			CFrame = CFrame.new(-STAND_HALF_WIDTH + width * (i - 0.5), 1.5, BOARD_Z),
+			Color = if isLime then LIME else DARK,
+			Parent = boards,
+		})
+		local gui = Instance.new("SurfaceGui")
+		gui.Face = Enum.NormalId.Back -- faces the pitch (+Z)
+		gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+		gui.PixelsPerStud = 40
+		gui.LightInfluence = 0.2
+		gui.Parent = board
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.fromScale(1, 1)
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.GothamBlack
+		label.TextScaled = true
+		label.Text = text
+		label.TextColor3 = if isLime then DARK else LIME
+		label.Parent = gui
+		local padding = Instance.new("UIPadding")
+		padding.PaddingTop = UDim.new(0.18, 0)
+		padding.PaddingBottom = UDim.new(0.18, 0)
+		padding.PaddingLeft = UDim.new(0.05, 0)
+		padding.PaddingRight = UDim.new(0.05, 0)
+		padding.Parent = label
+	end
+end
+
+local function buildStand(scene: Instance)
+	local stand = folder("Stand", scene)
+	local crowd = folder("Crowd", scene) -- the client makes these jump on a goal
+	local rng = Random.new(7) -- fixed seed: same crowd every time
+	local width = STAND_HALF_WIDTH * 2
+
+	for tier = 0, TIERS - 1 do
+		local front = STAND_FRONT_Z - tier * TIER_DEPTH
+		local top = (tier + 1) * TIER_RISE
+		makePart({
+			Name = "Tier",
+			Size = Vector3.new(width, top, TIER_DEPTH),
+			CFrame = CFrame.new(0, top / 2, front - TIER_DEPTH / 2),
+			Color = if tier % 2 == 0 then Color3.fromRGB(62, 66, 72) else Color3.fromRGB(70, 74, 80),
+			Material = Enum.Material.Concrete,
+			Parent = stand,
+		})
+		makePart({
+			Name = "Seats",
+			Size = Vector3.new(width, 0.7, 1),
+			CFrame = CFrame.new(0, top + 0.35, front - TIER_DEPTH + 0.6),
+			Color = Color3.fromRGB(24, 74, 40),
+			Parent = stand,
+		})
+		for x = -STAND_HALF_WIDTH + 1.5, STAND_HALF_WIDTH - 1.5, 2.6 do
+			if rng:NextNumber() < 0.85 then
+				local height = 1.8 + rng:NextNumber() * 0.5
+				makePart({
+					Name = "Fan",
+					Size = Vector3.new(1.3, height, 0.9),
+					CFrame = CFrame.new(x + rng:NextNumber(-0.4, 0.4), top + height / 2, front - TIER_DEPTH * 0.5),
+					Color = CROWD_COLORS[rng:NextInteger(1, #CROWD_COLORS)],
+					Parent = crowd,
+				})
+			end
+		end
+	end
+
+	local back = STAND_FRONT_Z - TIERS * TIER_DEPTH
+	local roofY = TIERS * TIER_RISE + 8
+	makePart({
+		Name = "BackWall",
+		Size = Vector3.new(width, roofY, 1),
+		CFrame = CFrame.new(0, roofY / 2, back - 0.5),
+		Color = Color3.fromRGB(34, 38, 44),
+		Material = Enum.Material.Concrete,
+		Parent = stand,
+	})
+	local roofDepth = (STAND_FRONT_Z - 4) - back
+	makePart({
+		Name = "Roof",
+		Size = Vector3.new(width + 4, 1, math.abs(roofDepth)),
+		CFrame = CFrame.new(0, roofY, (back + STAND_FRONT_Z - 4) / 2),
+		Color = Color3.fromRGB(24, 27, 32),
+		Material = Enum.Material.Metal,
+		Parent = stand,
+	})
+	makePart({
+		Name = "RoofLight",
+		Size = Vector3.new(width + 4, 0.5, 0.4),
+		CFrame = CFrame.new(0, roofY - 0.5, STAND_FRONT_Z - 4),
+		Color = LIME,
+		Material = Enum.Material.Neon,
+		Parent = stand,
+	})
+	for _, x in { -STAND_HALF_WIDTH, -STAND_HALF_WIDTH / 3, STAND_HALF_WIDTH / 3, STAND_HALF_WIDTH } do
+		makePart({
+			Name = "Column",
+			Size = Vector3.new(1, roofY, 1),
+			CFrame = CFrame.new(x, roofY / 2, STAND_FRONT_Z - 4),
+			Color = Color3.fromRGB(34, 38, 44),
+			Material = Enum.Material.Metal,
+			Parent = stand,
+		})
+	end
+end
+
+local function ensureChild(parent: Instance, className: string, name: string): any
+	local existing = parent:FindFirstChildOfClass(className)
+	if existing then
+		return existing
+	end
+	local inst = Instance.new(className)
+	inst.Name = name
+	inst.Parent = parent
+	return inst
+end
+
+local function setupLighting()
+	Lighting.ClockTime = 15.6
+	Lighting.GeographicLatitude = 35
+	Lighting.Brightness = 2.4
+	Lighting.OutdoorAmbient = Color3.fromRGB(140, 145, 140)
+	Lighting.EnvironmentDiffuseScale = 0.6
+	Lighting.EnvironmentSpecularScale = 0.6
+	Lighting.GlobalShadows = true
+
+	local atmosphere = ensureChild(Lighting, "Atmosphere", "Atmosphere")
+	atmosphere.Density = 0.25
+	atmosphere.Offset = 0.1
+	atmosphere.Color = Color3.fromRGB(199, 220, 235)
+	atmosphere.Decay = Color3.fromRGB(110, 120, 135)
+	atmosphere.Glare = 0.15
+	atmosphere.Haze = 1
+
+	local bloom = ensureChild(Lighting, "BloomEffect", "Bloom")
+	bloom.Intensity = 0.4
+	bloom.Size = 24
+	bloom.Threshold = 1.5
+
+	local grading = ensureChild(Lighting, "ColorCorrectionEffect", "ColorCorrection")
+	grading.Saturation = 0.12
+	grading.Contrast = 0.06
+	grading.Brightness = 0.02
+
+	local rays = ensureChild(Lighting, "SunRaysEffect", "SunRays")
+	rays.Intensity = 0.04
+	rays.Spread = 0.6
+end
+
+function SceneBuilder.build(): Folder
+	local old = workspace:FindFirstChild("FootballScene")
+	if old then
+		old:Destroy()
+	end
+	clearDefaultTemplate()
+
+	local scene = Instance.new("Folder")
+	scene.Name = "FootballScene"
+	buildPitch(scene)
+	buildGoal(scene)
+	buildBoards(scene)
+	buildStand(scene)
+	scene.Parent = workspace
+
+	setupLighting()
+	print(string.format("[SceneBuilder] Stadium built (%d parts)", #scene:GetDescendants()))
+	return scene
+end
+
+return SceneBuilder
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="Folder" referent="7">
+      <Properties>
+        <string name="Name">Services</string>
+      </Properties>
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">EpisodeService</string>
+          <string name="Source"><![CDATA[-- Owns interactive episodes: hands them out, validates client input and sends back results.
+-- The client only ever sends {episodeId, aimX, aimY, power}; it never reports an outcome.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
+local ShotResolver = require(script.Parent.ShotResolver)
+
+type Episode = { id: number, kind: string, seed: number, startedAt: number }
+type PlayerState = {
+	nextEpisodeId: number,
+	active: Episode?,
+	lastRemoteAt: number,
+	shots: number,
+	goals: number,
+}
+
+local EpisodeService = {}
+
+local states: { [Player]: PlayerState } = {}
+local seedSource = Random.new()
+local remotes
+
+local function getState(player: Player): PlayerState
+	local state = states[player]
+	if not state then
+		state = { nextEpisodeId = 1, active = nil, lastRemoteAt = -math.huge, shots = 0, goals = 0 }
+		states[player] = state
+	end
+	return state
+end
+
+local function passesRateLimit(state: PlayerState): boolean
+	local now = os.clock()
+	if now - state.lastRemoteAt < ShotConfig.Episode.MinRemoteInterval then
+		return false
+	end
+	state.lastRemoteAt = now
+	return true
+end
+
+-- Rejects non-numbers, NaN, infinities and out-of-range values.
+local function isNumberInRange(value: any, min: number, max: number): boolean
+	if typeof(value) ~= "number" or value ~= value then
+		return false
+	end
+	local tolerance = ShotConfig.Episode.InputTolerance
+	return value >= min - tolerance and value <= max + tolerance
+end
+
+local function sendEpisode(player: Player, episode: Episode)
+	remotes.EpisodeStarted:FireClient(player, { episodeId = episode.id, kind = episode.kind })
+end
+
+local function startEpisode(player: Player, state: PlayerState)
+	local episode = {
+		id = state.nextEpisodeId,
+		kind = "SHOT",
+		-- Logged so any result can be reproduced from (seed, input).
+		seed = seedSource:NextInteger(1, 2 ^ 31 - 1),
+		startedAt = os.clock(),
+	}
+	state.nextEpisodeId += 1
+	state.active = episode
+	print(string.format("[EpisodeService] %s: episode #%d started (SHOT, seed %d)", player.Name, episode.id, episode.seed))
+	sendEpisode(player, episode)
+end
+
+local function reject(player: Player, episodeId: any, reason: string)
+	warn(string.format("[EpisodeService] %s: rejected input for episode %s (%s)", player.Name, tostring(episodeId), reason))
+	remotes.EpisodeResult:FireClient(player, {
+		episodeId = if typeof(episodeId) == "number" then episodeId else nil,
+		rejected = true,
+		reason = reason,
+	})
+end
+
+local function onRequestEpisode(player: Player)
+	local state = getState(player)
+	if not passesRateLimit(state) then
+		return
+	end
+
+	local active = state.active
+	if active and os.clock() - active.startedAt <= ShotConfig.Episode.Timeout then
+		-- Client lost track of it (e.g. after a rejection): resend instead of issuing a new one.
+		sendEpisode(player, active)
+		return
+	end
+	startEpisode(player, state)
+end
+
+local function onSubmitEpisodeInput(player: Player, episodeId: any, aimX: any, aimY: any, power: any)
+	local state = getState(player)
+	if not passesRateLimit(state) then
+		return
+	end
+
+	local active = state.active
+	if not active or episodeId ~= active.id then
+		reject(player, episodeId, "unknown or already finished episode")
+		return
+	end
+	if not (isNumberInRange(aimX, -1, 1) and isNumberInRange(aimY, 0, 1) and isNumberInRange(power, 0, 1)) then
+		reject(player, episodeId, "invalid input values")
+		return
+	end
+
+	local elapsed = os.clock() - active.startedAt
+	if elapsed < ShotConfig.Episode.MinThinkTime then
+		reject(player, episodeId, "input too early")
+		return
+	end
+	if elapsed > ShotConfig.Episode.Timeout then
+		state.active = nil
+		reject(player, episodeId, "episode expired")
+		return
+	end
+
+	-- Consume before resolving so the same episode can never produce a second result.
+	state.active = nil
+
+	local input = {
+		aimX = math.clamp(aimX, -1, 1),
+		aimY = math.clamp(aimY, 0, 1),
+		power = math.clamp(power, 0, 1),
+	}
+	local stats = { shooting = ShotConfig.DefaultShooting, keeperSkill = ShotConfig.Goalkeeper.Skill }
+	local result = ShotResolver.resolve(input, stats, Random.new(active.seed))
+
+	state.shots += 1
+	if result.outcome == "GOAL" then
+		state.goals += 1
+	end
+
+	print(string.format(
+		"[EpisodeService] %s: episode #%d aim=(%.2f, %.2f) power=%.2f -> %s (%d/%d goals)",
+		player.Name, active.id, input.aimX, input.aimY, input.power, result.outcome, state.goals, state.shots
+	))
+
+	remotes.EpisodeResult:FireClient(player, {
+		episodeId = active.id,
+		outcome = result.outcome,
+		start = result.start,
+		target = result.target,
+		flightTime = result.flightTime,
+		keeperTarget = result.keeperTarget,
+		keeperReaction = result.keeperReaction,
+		shots = state.shots,
+		goals = state.goals,
+	})
+end
+
+function EpisodeService.init(remoteEvents)
+	if remotes then
+		warn("[EpisodeService] init called twice; ignoring")
+		return
+	end
+	remotes = remoteEvents
+	remotes.RequestEpisode.OnServerEvent:Connect(onRequestEpisode)
+	remotes.SubmitEpisodeInput.OnServerEvent:Connect(onSubmitEpisodeInput)
+	Players.PlayerRemoving:Connect(function(player)
+		states[player] = nil
+	end)
+end
+
+return EpisodeService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">ShotResolver</string>
+          <string name="Source"><![CDATA[-- Server-only: turns validated shot input into an outcome. Never runs on the client.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
+local ShotPhysics = require(Shared:WaitForChild("ShotPhysics"))
+
+export type ShotInput = { aimX: number, aimY: number, power: number }
+export type ShotStats = { shooting: number, keeperSkill: number }
+export type ShotResult = {
+	outcome: string, -- "GOAL" | "SAVE" | "POST" | "MISS"
+	start: Vector3,
+	intended: Vector3, -- aim point before inaccuracy
+	target: Vector3, -- where the ball actually crosses the goal plane
+	flightTime: number,
+	keeperTarget: Vector3, -- where the keeper's body centre gets to (goal plane)
+	keeperReaction: number,
+}
+
+local ShotResolver = {}
+
+local function lerp(a: number, b: number, t: number): number
+	return a + (b - a) * t
+end
+
+-- Standard normal sample (Box-Muller).
+local function gaussian(rng: Random): number
+	local u1 = math.max(rng:NextNumber(), 1e-9)
+	local u2 = rng:NextNumber()
+	return math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2)
+end
+
+function ShotResolver.resolve(input: ShotInput, stats: ShotStats, rng: Random): ShotResult
+	local accuracy = ShotConfig.Accuracy
+	local keeper = ShotConfig.Goalkeeper
+
+	-- 1. Inaccuracy: better shooters scatter less; overpowered shots scatter more and rise.
+	local skill = math.clamp(stats.shooting, 0, 100) / 100
+	local overpower = math.max(0, (input.power - accuracy.OverpowerFrom) / (1 - accuracy.OverpowerFrom))
+	local sigma = lerp(accuracy.ScatterAtZeroSkill, accuracy.ScatterAtMaxSkill, skill)
+		+ overpower * accuracy.OverpowerScatter
+	local cap = accuracy.MaxSigmas
+	local offsetX = math.clamp(gaussian(rng), -cap, cap) * sigma
+	local offsetY = math.clamp(gaussian(rng), -cap, cap) * sigma + overpower * accuracy.OverpowerLift
+
+	local intended = ShotPhysics.aimToGoalPoint(input.aimX, input.aimY)
+	local target = Vector3.new(
+		intended.X + offsetX,
+		math.max(ShotConfig.Ball.Radius, intended.Y + offsetY), -- low shots roll along the ground
+		0
+	)
+	local start = ShotPhysics.ballSpot()
+	local flightTime = ShotPhysics.flightTime(start, target, input.power)
+	local zone = ShotPhysics.classify(target)
+
+	-- 2. Goalkeeper: reacts after a short delay, then moves towards the ball at a skill-based
+	-- speed. It is a save if his hands reach the crossing point before the ball does.
+	local home = Vector3.new(keeper.HomeX, keeper.HomeY, 0)
+	local toBall = Vector3.new(target.X, target.Y, 0) - home
+	local reaction = keeper.ReactionTime + (rng:NextNumber() * 2 - 1) * keeper.ReactionJitter
+	local diveSpeed = lerp(keeper.DiveSpeedAtZeroSkill, keeper.DiveSpeedAtMaxSkill, math.clamp(stats.keeperSkill, 0, 100) / 100)
+	local canTravel = diveSpeed * math.max(0, flightTime - reaction)
+	local mustTravel = math.max(0, toBall.Magnitude - keeper.Reach)
+
+	local keeperTarget = home
+	if keeper.Enabled and toBall.Magnitude > 1e-3 then
+		keeperTarget = home + toBall.Unit * math.min(canTravel, mustTravel)
+	end
+
+	local outcome
+	if zone == ShotPhysics.Zone.Frame then
+		outcome = "POST"
+	elseif zone == ShotPhysics.Zone.Wide then
+		outcome = "MISS"
+	elseif keeper.Enabled and canTravel >= mustTravel then
+		outcome = "SAVE"
+	else
+		outcome = "GOAL"
+	end
+
+	return {
+		outcome = outcome,
+		start = start,
+		intended = intended,
+		target = target,
+		flightTime = flightTime,
+		keeperTarget = keeperTarget,
+		keeperReaction = reaction,
+	}
+end
+
+return ShotResolver
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="StarterPlayer" referent="10">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="11">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="LocalScript" referent="12">
+        <Properties>
+          <string name="Name">ShotClient</string>
+          <string name="Source"><![CDATA[-- Client entry point for the Stage 1 shot: wires input and visuals to the server remotes.
+-- The client sends only aim and power; the server decides the outcome.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ShotConfig"))
+local InputController = require(script:WaitForChild("InputController"))
+local ShotVisuals = require(script:WaitForChild("ShotVisuals"))
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+if not Remotes then
+	warn("[ShotClient] Still waiting for ReplicatedStorage.Remotes. The server script (Main) has not started; check Output for red [Main] errors.")
+	Remotes = ReplicatedStorage:WaitForChild("Remotes")
+end
+local RequestEpisode = Remotes:WaitForChild("RequestEpisode")
+local EpisodeStarted = Remotes:WaitForChild("EpisodeStarted")
+local SubmitEpisodeInput = Remotes:WaitForChild("SubmitEpisodeInput")
+local EpisodeResult = Remotes:WaitForChild("EpisodeResult")
+
+local HINT = "Hold on the goal to aim and charge, release to shoot"
+
+-- Default movement controls are useless here and would cover the screen on phones.
+task.spawn(function()
+	local playerModule = Players.LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule", 5)
+	if playerModule then
+		local ok, err = pcall(function()
+			require(playerModule):GetControls():Disable()
+		end)
+		if not ok then
+			warn("[ShotClient] Could not disable default controls:", err)
+		end
+	end
+end)
+
+local visuals = ShotVisuals.new()
+local input = InputController.new()
+local currentEpisode = nil
+
+local function requestEpisode()
+	RequestEpisode:FireServer()
+end
+
+input.onShoot = function(aimX, aimY, power)
+	local episode = currentEpisode
+	if not episode then
+		return
+	end
+	input:setEnabled(false)
+	visuals:onShotReleased()
+	SubmitEpisodeInput:FireServer(episode.episodeId, aimX, aimY, power)
+end
+
+EpisodeStarted.OnClientEvent:Connect(function(episode)
+	if typeof(episode) ~= "table" or episode.kind ~= "SHOT" then
+		return
+	end
+	currentEpisode = episode
+	input:setEnabled(false)
+	visuals:reset()
+	task.delay(ShotConfig.Input.ReadyDelay, function()
+		if currentEpisode == episode then
+			input:setEnabled(true)
+			visuals:setHint(HINT)
+		end
+	end)
+end)
+
+EpisodeResult.OnClientEvent:Connect(function(result)
+	if result.rejected then
+		warn("[ShotClient] Server rejected the shot:", result.reason)
+		currentEpisode = nil
+		input:setEnabled(false)
+		task.delay(0.5, requestEpisode) -- the server resends the open episode or starts a new one
+		return
+	end
+	if not currentEpisode or result.episodeId ~= currentEpisode.episodeId then
+		return
+	end
+
+	currentEpisode = nil
+	visuals:playShot(result)
+	requestEpisode()
+end)
+
+RunService.RenderStepped:Connect(function(dt)
+	visuals:update(dt)
+	input:update()
+	if input.enabled then
+		visuals:updateAiming(true, input.aimX, input.aimY, input.power, input.holding)
+	end
+end)
+
+requestEpisode()
+print("[ShotClient] ready")
+]]></string>
+        </Properties>
+        <Item class="ModuleScript" referent="13">
+          <Properties>
+            <string name="Name">InputController</string>
+            <string name="Source"><![CDATA[-- Turns mouse or touch into a normalized aim (X -1..1, Y 0..1) and power (0..1).
+-- Press on the goal to aim, hold to charge the power meter, release to shoot.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
+local ShotPhysics = require(Shared:WaitForChild("ShotPhysics"))
+
+local InputController = {}
+InputController.__index = InputController
+
+function InputController.new()
+	local self = setmetatable({
+		enabled = false,
+		holding = false,
+		aimX = 0,
+		aimY = 0.5,
+		power = 0,
+		onShoot = nil :: ((aimX: number, aimY: number, power: number) -> ())?,
+		_activeInput = nil :: InputObject?,
+		_holdStartedAt = 0,
+	}, InputController)
+
+	UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		self:_onBegan(input, gameProcessed)
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		self:_onChanged(input)
+	end)
+	UserInputService.InputEnded:Connect(function(input)
+		self:_onEnded(input)
+	end)
+	return self
+end
+
+function InputController:setEnabled(enabled: boolean)
+	self.enabled = enabled
+	if not enabled then
+		self.holding = false
+		self._activeInput = nil
+		self.power = 0
+	end
+end
+
+-- Call every frame: advances the power meter while held.
+function InputController:update()
+	if not self.holding then
+		return
+	end
+	local phase = ((os.clock() - self._holdStartedAt) / ShotConfig.Input.PowerCycleSeconds) % 1
+	self.power = 1 - math.abs(1 - 2 * phase) -- 0 -> 1 -> 0
+end
+
+-- Projects a screen point onto the goal plane (Z = 0).
+function InputController:_aimAt(position: Vector3)
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return
+	end
+	local ray = camera:ScreenPointToRay(position.X, position.Y)
+	if ray.Direction.Z > -1e-4 then
+		return
+	end
+	local point = ray.Origin + ray.Direction * (-ray.Origin.Z / ray.Direction.Z)
+	self.aimX, self.aimY = ShotPhysics.goalPointToAim(point)
+end
+
+function InputController:_onBegan(input: InputObject, gameProcessed: boolean)
+	if gameProcessed or not self.enabled or self.holding then
+		return
+	end
+	local inputType = input.UserInputType
+	if inputType == Enum.UserInputType.MouseButton1 or inputType == Enum.UserInputType.Touch then
+		self.holding = true
+		self._activeInput = input
+		self._holdStartedAt = os.clock()
+		self.power = 0
+		self:_aimAt(input.Position)
+	end
+end
+
+function InputController:_onChanged(input: InputObject)
+	if not self.enabled then
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.MouseMovement then
+		self:_aimAt(input.Position) -- PC: the marker follows the mouse even before clicking
+	elseif input.UserInputType == Enum.UserInputType.Touch and input == self._activeInput then
+		self:_aimAt(input.Position)
+	end
+end
+
+function InputController:_onEnded(input: InputObject)
+	if not self.holding then
+		return
+	end
+	local active = self._activeInput
+	local isMouseRelease = input.UserInputType == Enum.UserInputType.MouseButton1
+		and active ~= nil
+		and active.UserInputType == Enum.UserInputType.MouseButton1
+	if not (isMouseRelease or input == active) then
+		return
+	end
+
+	self.holding = false
+	self._activeInput = nil
+	if self.enabled and self.onShoot then
+		self.onShoot(self.aimX, self.aimY, self.power)
+	end
+end
+
+return InputController
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="14">
+          <Properties>
+            <string name="Name">ShotVisuals</string>
+            <string name="Source"><![CDATA[-- Client-only visuals: camera, ball, goalkeeper, aim marker, trajectory preview, effects and HUD.
+-- Everything here is local to this player and has no effect on the outcome.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ShotConfig = require(Shared:WaitForChild("ShotConfig"))
+local ShotPhysics = require(Shared:WaitForChild("ShotPhysics"))
+
+local Keeper = ShotConfig.Goalkeeper
+local BALL_RADIUS = ShotConfig.Ball.Radius
+local PREVIEW_DOTS = 14
+local FOLLOW_THROUGH_SECONDS = 1.6
+local KEEPER_MIN_Y = 1.2
+local KEEPER_MAX_TILT = math.rad(95)
+local BALL_SPIN_RATE = 14 -- radians per second in flight
+
+local WHITE = Color3.new(1, 1, 1)
+local LIME = Color3.fromRGB(163, 230, 53)
+local DARK = Color3.fromRGB(14, 20, 16)
+local YELLOW = Color3.fromRGB(250, 204, 21)
+local RED = Color3.fromRGB(239, 68, 68)
+
+local KIT = Color3.fromRGB(255, 140, 0)
+local SKIN = Color3.fromRGB(234, 192, 160)
+
+local OUTCOME_TEXT = {
+	GOAL = { "GOAL!", LIME, "What a strike!" },
+	SAVE = { "SAVED!", WHITE, "The keeper got there first" },
+	POST = { "OFF THE POST!", YELLOW, "So close!" },
+	MISS = { "MISSED!", RED, "Keep it on target" },
+}
+
+-- Keeper figure relative to his body centre (feet on the ground at HomeY = 3.5), facing +Z.
+local KEEPER_PARTS = {
+	{ "LeftBoot", Vector3.new(0.9, 0.5, 1.3), CFrame.new(-0.55, -3.25, 0.15), DARK },
+	{ "RightBoot", Vector3.new(0.9, 0.5, 1.3), CFrame.new(0.55, -3.25, 0.15), DARK },
+	{ "LeftLeg", Vector3.new(0.85, 2.1, 0.85), CFrame.new(-0.55, -2, 0), KIT },
+	{ "RightLeg", Vector3.new(0.85, 2.1, 0.85), CFrame.new(0.55, -2, 0), KIT },
+	{ "Shorts", Vector3.new(2.1, 0.9, 1.15), CFrame.new(0, -0.6, 0), Color3.fromRGB(25, 25, 28) },
+	{ "Torso", Vector3.new(2.2, 2, 1.1), CFrame.new(0, 0.85, 0), KIT },
+	{ "LeftArm", Vector3.new(0.7, 2, 0.7), CFrame.new(-1.55, 1.1, 0) * CFrame.Angles(0, 0, math.rad(35)), KIT },
+	{ "RightArm", Vector3.new(0.7, 2, 0.7), CFrame.new(1.55, 1.1, 0) * CFrame.Angles(0, 0, -math.rad(35)), KIT },
+	{ "LeftGlove", Vector3.one * 0.85, CFrame.new(-2.15, 2.05, 0), LIME },
+	{ "RightGlove", Vector3.one * 0.85, CFrame.new(2.15, 2.05, 0), LIME },
+	{ "Head", Vector3.one * 1.25, CFrame.new(0, 2.5, 0), SKIN, Enum.PartType.Ball },
+	{ "Hair", Vector3.new(1.3, 0.45, 1.3), CFrame.new(0, 3.0, -0.05), Color3.fromRGB(50, 35, 25) },
+}
+
+local ShotVisuals = {}
+ShotVisuals.__index = ShotVisuals
+
+local function create(className: string, props: { [string]: any }): any
+	local inst = Instance.new(className)
+	for key, value in props do
+		if key ~= "Parent" then
+			inst[key] = value
+		end
+	end
+	if props.Parent then
+		inst.Parent = props.Parent
+	end
+	return inst
+end
+
+local function makePart(props: { [string]: any }): Part
+	props.Anchored = true
+	props.CanCollide = false
+	props.CanQuery = false
+	props.CanTouch = false
+	props.TopSurface = Enum.SurfaceType.Smooth
+	props.BottomSurface = Enum.SurfaceType.Smooth
+	props.Material = props.Material or Enum.Material.SmoothPlastic
+	return create("Part", props)
+end
+
+local function corner(parent: Instance, radius: number)
+	create("UICorner", { CornerRadius = UDim.new(0, radius), Parent = parent })
+end
+
+local function label(props: { [string]: any }): TextLabel
+	props.BackgroundTransparency = props.BackgroundTransparency or 1
+	props.Font = props.Font or Enum.Font.GothamBlack
+	props.TextColor3 = props.TextColor3 or WHITE
+	props.TextScaled = true
+	return create("TextLabel", props)
+end
+
+local function icosahedronDirections(): { Vector3 }
+	local phi = (1 + math.sqrt(5)) / 2
+	local dirs = {}
+	for _, a in { -1, 1 } do
+		for _, b in { -phi, phi } do
+			table.insert(dirs, Vector3.new(0, a, b).Unit)
+			table.insert(dirs, Vector3.new(a, b, 0).Unit)
+			table.insert(dirs, Vector3.new(b, 0, a).Unit)
+		end
+	end
+	return dirs
+end
+
+function ShotVisuals.new()
+	local self = setmetatable({}, ShotVisuals)
+	self.state = "idle"
+	self.clock = 0
+	self.shake = 0
+	self.fovKick = 0
+
+	local folder = create("Folder", { Name = "ShotVisuals", Parent = workspace })
+	self.folder = folder
+
+	-- Ball: white sphere with 12 black patches, moved together.
+	local ballModel = create("Model", { Name = "Ball", Parent = folder })
+	self.ballParts = {
+		{ makePart({ Name = "Shell", Shape = Enum.PartType.Ball, Size = Vector3.one * BALL_RADIUS * 2, Color = WHITE, Parent = ballModel }), CFrame.identity },
+	}
+	for _, dir in icosahedronDirections() do
+		local patch = makePart({
+			Name = "Patch",
+			Shape = Enum.PartType.Ball,
+			Size = Vector3.one * BALL_RADIUS * 0.6,
+			Color = Color3.fromRGB(20, 20, 22),
+			CastShadow = false,
+			Parent = ballModel,
+		})
+		table.insert(self.ballParts, { patch, CFrame.new(dir * BALL_RADIUS * 0.8) })
+	end
+
+	local keeperModel = create("Model", { Name = "Goalkeeper" })
+	self.keeperParts = {}
+	for _, spec in KEEPER_PARTS do
+		local part = makePart({ Name = spec[1], Size = spec[2], Color = spec[4], Shape = spec[5] or Enum.PartType.Block, Parent = keeperModel })
+		table.insert(self.keeperParts, { part, spec[3] })
+		if spec[1] == "Torso" then
+			local gui = create("SurfaceGui", { Face = Enum.NormalId.Back, SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud, PixelsPerStud = 50, Parent = part })
+			label({ Size = UDim2.fromScale(1, 0.8), Position = UDim2.fromScale(0, 0.1), Text = "1", TextColor3 = DARK, Parent = gui })
+		end
+	end
+	keeperModel.Parent = if Keeper.Enabled then folder else nil
+	self.keeperHome = Vector3.new(Keeper.HomeX, Keeper.HomeY, Keeper.HomeZ)
+
+	self.aimMarker = makePart({
+		Name = "AimMarker",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.1, BALL_RADIUS * 2, BALL_RADIUS * 2), -- same size as the ball
+		Color = LIME,
+		Material = Enum.Material.Neon,
+		CastShadow = false,
+		Parent = folder,
+	})
+	self.aimDot = makePart({
+		Name = "AimDot",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.12, 0.45, 0.45),
+		Color = WHITE,
+		Material = Enum.Material.Neon,
+		CastShadow = false,
+		Parent = folder,
+	})
+
+	self.dots = {}
+	for i = 1, PREVIEW_DOTS do
+		self.dots[i] = makePart({
+			Name = "PreviewDot",
+			Shape = Enum.PartType.Ball,
+			Size = Vector3.one * (0.45 - 0.2 * i / PREVIEW_DOTS),
+			Color = LIME,
+			Material = Enum.Material.Neon,
+			CastShadow = false,
+			Parent = folder,
+		})
+	end
+
+	-- Confetti burst from the top of the net on a goal.
+	local emitterPart = makePart({
+		Name = "Confetti",
+		Size = Vector3.one,
+		Transparency = 1,
+		CFrame = CFrame.new(0, ShotConfig.Goal.Height + 1, -ShotConfig.Goal.NetDepth / 2),
+		Parent = folder,
+	})
+	self.confetti = create("ParticleEmitter", {
+		Enabled = false,
+		Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, LIME),
+			ColorSequenceKeypoint.new(0.5, WHITE),
+			ColorSequenceKeypoint.new(1, YELLOW),
+		}),
+		Size = NumberSequence.new(0.6, 0.2),
+		Speed = NumberRange.new(25, 45),
+		SpreadAngle = Vector2.new(70, 70),
+		EmissionDirection = Enum.NormalId.Top,
+		Acceleration = Vector3.new(0, -40, 0),
+		Drag = 1.5,
+		Lifetime = NumberRange.new(1.5, 2.5),
+		RotSpeed = NumberRange.new(-200, 200),
+		LightEmission = 0.5,
+		Parent = emitterPart,
+	})
+
+	self:_buildHud()
+	self:reset()
+	return self
+end
+
+function ShotVisuals:_buildHud()
+	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+	local gui = create("ScreenGui", {
+		Name = "ShotHud",
+		ResetOnSpawn = false,
+		ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets,
+		Parent = playerGui,
+	})
+	self.hudScale = create("UIScale", { Parent = gui })
+
+	-- Scoreboard (top left)
+	local board = create("Frame", {
+		Name = "Scoreboard",
+		Position = UDim2.new(0, 12, 0, 12),
+		Size = UDim2.new(0, 220, 0, 70),
+		BackgroundColor3 = DARK,
+		BackgroundTransparency = 0.15,
+		Parent = gui,
+	})
+	corner(board, 12)
+	create("UIStroke", { Color = LIME, Thickness = 2, Transparency = 0.2, Parent = board })
+	local function stat(caption: string, x: number)
+		label({ Position = UDim2.new(x, 0, 0, 8), Size = UDim2.new(0.5, 0, 0, 16), Font = Enum.Font.GothamBold, TextColor3 = LIME, Text = caption, Parent = board })
+		return label({ Position = UDim2.new(x, 0, 0, 26), Size = UDim2.new(0.5, 0, 0, 36), Text = "0", Parent = board })
+	end
+	self.goalsValue = stat("GOALS", 0)
+	self.shotsValue = stat("SHOTS", 0.5)
+	create("Frame", { Position = UDim2.new(0.5, -1, 0, 12), Size = UDim2.new(0, 2, 1, -24), BackgroundColor3 = LIME, BackgroundTransparency = 0.6, BorderSizePixel = 0, Parent = board })
+
+	-- Title chip (top centre)
+	local chip = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 12),
+		Size = UDim2.new(0, 230, 0, 34),
+		BackgroundColor3 = DARK,
+		BackgroundTransparency = 0.15,
+		Parent = gui,
+	})
+	corner(chip, 17)
+	label({ Size = UDim2.new(1, -24, 1, -12), Position = UDim2.new(0, 12, 0, 6), Font = Enum.Font.GothamBold, TextColor3 = LIME, Text = "SHOOTING DRILL", Parent = chip })
+
+	-- Hint (bottom centre)
+	local hint = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, -14),
+		Size = UDim2.new(0, 560, 0, 44),
+		BackgroundColor3 = DARK,
+		BackgroundTransparency = 0.25,
+		Visible = false,
+		Parent = gui,
+	})
+	corner(hint, 22)
+	self.hintText = label({ Size = UDim2.new(1, -32, 1, -16), Position = UDim2.new(0, 16, 0, 8), Font = Enum.Font.GothamBold, Parent = hint })
+	self.hintFrame = hint
+
+	-- Result banner (centre)
+	local banner = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.3, 0),
+		Size = UDim2.new(0, 520, 0, 130),
+		BackgroundColor3 = DARK,
+		BackgroundTransparency = 0.2,
+		Visible = false,
+		Parent = gui,
+	})
+	corner(banner, 18)
+	self.bannerStroke = create("UIStroke", { Thickness = 3, Parent = banner })
+	self.bannerTitle = label({ Position = UDim2.new(0, 16, 0, 10), Size = UDim2.new(1, -32, 0, 80), Parent = banner })
+	create("UIStroke", { Color = Color3.new(0, 0, 0), Thickness = 2, Transparency = 0.3, Parent = self.bannerTitle })
+	self.bannerSubtitle = label({ Position = UDim2.new(0, 16, 0, 92), Size = UDim2.new(1, -32, 0, 26), Font = Enum.Font.GothamBold, TextColor3 = Color3.fromRGB(210, 220, 210), Parent = banner })
+	self.bannerScale = create("UIScale", { Parent = banner })
+	self.banner = banner
+
+	-- Power meter (right). The red band marks overpower: harder but less accurate.
+	local meter = create("Frame", {
+		Name = "PowerMeter",
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -24, 0.55, 0),
+		Size = UDim2.new(0, 34, 0, 260),
+		BackgroundColor3 = DARK,
+		BackgroundTransparency = 0.1,
+		Visible = false,
+		Parent = gui,
+	})
+	corner(meter, 10)
+	create("UIStroke", { Color = WHITE, Thickness = 2, Transparency = 0.6, Parent = meter })
+	create("Frame", {
+		Size = UDim2.new(1, 0, 1 - ShotConfig.Accuracy.OverpowerFrom, 0),
+		BackgroundColor3 = RED,
+		BackgroundTransparency = 0.55,
+		BorderSizePixel = 0,
+		Parent = meter,
+	})
+	local fill = create("Frame", {
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 4, 1, -4),
+		Size = UDim2.new(1, -8, 0, 0),
+		BackgroundColor3 = LIME,
+		BorderSizePixel = 0,
+		Parent = meter,
+	})
+	corner(fill, 7)
+	label({ AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 0, -8), Size = UDim2.new(0, 80, 0, 18), Font = Enum.Font.GothamBold, Text = "POWER", Parent = meter })
+	self.powerPercent = label({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 1, 8), Size = UDim2.new(0, 70, 0, 22), Text = "0%", Parent = meter })
+	self.powerMeter = meter
+	self.powerFill = fill
+
+	-- Scale the whole HUD with screen height so it fits phones in landscape.
+	local function rescale()
+		local camera = workspace.CurrentCamera
+		if camera then
+			self.hudScale.Scale = math.clamp(camera.ViewportSize.Y / 720, 0.6, 1.3)
+		end
+	end
+	rescale()
+	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(rescale)
+end
+
+function ShotVisuals:_setBall(position: Vector3, spin: number)
+	local base = CFrame.new(position) * CFrame.Angles(-spin, 0, 0)
+	for _, entry in self.ballParts do
+		entry[1].CFrame = base * entry[2]
+	end
+end
+
+function ShotVisuals:_setKeeper(pivot: CFrame)
+	for _, entry in self.keeperParts do
+		entry[1].CFrame = pivot * entry[2]
+	end
+end
+
+function ShotVisuals:_poseKeeper(target: Vector3, alpha: number)
+	local eased = 1 - (1 - alpha) ^ 2
+	local position = self.keeperHome:Lerp(target, eased)
+	local direction = target - self.keeperHome
+	-- Lean the body towards the dive; bigger dives lean further.
+	local tilt = math.clamp(math.atan2(-direction.X, direction.Y), -KEEPER_MAX_TILT, KEEPER_MAX_TILT)
+	local lean = math.clamp(direction.Magnitude / 4, 0, 1)
+	self:_setKeeper(CFrame.new(position) * CFrame.Angles(0, 0, tilt * lean * eased))
+end
+
+function ShotVisuals:setHint(text: string)
+	self.hintText.Text = text
+	self.hintFrame.Visible = text ~= ""
+end
+
+function ShotVisuals:setScore(goals: number, shots: number)
+	self.goalsValue.Text = tostring(goals)
+	self.shotsValue.Text = tostring(shots)
+end
+
+function ShotVisuals:reset()
+	self.state = "idle"
+	self.ballSpin = 0
+	self:_setBall(ShotPhysics.ballSpot(), 0)
+	self:_setKeeper(CFrame.new(self.keeperHome))
+	self.banner.Visible = false
+	self:updateAiming(false, 0, 0.5, 0, false)
+end
+
+-- Per-frame: camera (with shake and kick), keeper idle sway.
+function ShotVisuals:update(dt: number)
+	self.clock += dt
+	self.shake = math.max(0, self.shake - dt * 2.5)
+	self.fovKick = math.max(0, self.fovKick - dt * 12)
+
+	local camera = workspace.CurrentCamera
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.FieldOfView = ShotConfig.Camera.FieldOfView - self.fovKick
+	local base = CFrame.lookAt(ShotConfig.Camera.Position, ShotConfig.Camera.LookAt)
+	if self.shake > 0 then
+		local t = self.clock * 25
+		local amount = self.shake * 0.35
+		base *= CFrame.new(math.noise(t, 1) * amount, math.noise(t, 2) * amount, 0)
+	end
+	camera.CFrame = base
+
+	if self.state == "idle" then
+		local t = self.clock
+		local sway = Vector3.new(math.sin(t * 2.2) * 0.35, math.abs(math.sin(t * 4.4)) * 0.12, 0)
+		self:_setKeeper(CFrame.new(self.keeperHome + sway))
+	end
+end
+
+-- Shows the aim marker, and while holding, the power meter and the predicted (no-error) arc.
+function ShotVisuals:updateAiming(enabled: boolean, aimX: number, aimY: number, power: number, holding: boolean)
+	local point = ShotPhysics.aimToGoalPoint(aimX, aimY)
+	local facing = CFrame.Angles(0, math.pi / 2, 0)
+	local pulse = 0.25 + 0.15 * math.sin(self.clock * 6)
+	self.aimMarker.Transparency = if enabled then pulse else 1
+	self.aimMarker.CFrame = CFrame.new(point + Vector3.new(0, 0, 0.3)) * facing
+	self.aimDot.Transparency = if enabled then 0 else 1
+	self.aimDot.CFrame = CFrame.new(point + Vector3.new(0, 0, 0.32)) * facing
+
+	local showPower = enabled and holding
+	self.powerMeter.Visible = showPower
+	self.powerFill.Size = UDim2.new(1, -8, power, -8 * power)
+	self.powerFill.BackgroundColor3 = if power >= ShotConfig.Accuracy.OverpowerFrom
+		then RED
+		elseif power > 0.6 then LIME:Lerp(YELLOW, (power - 0.6) / 0.25)
+		else LIME
+	self.powerPercent.Text = string.format("%d%%", math.floor(power * 100 + 0.5))
+
+	local start = ShotPhysics.ballSpot()
+	local flightTime = ShotPhysics.flightTime(start, point, power)
+	local velocity = ShotPhysics.launchVelocity(start, point, flightTime)
+	for i, dot in self.dots do
+		dot.Transparency = if showPower then 0.1 + 0.5 * i / PREVIEW_DOTS else 1
+		if showPower then
+			dot.CFrame = CFrame.new(ShotPhysics.positionAt(start, velocity, flightTime * i / (PREVIEW_DOTS + 1)))
+		end
+	end
+end
+
+-- Called the moment the player releases: small camera kick for impact.
+function ShotVisuals:onShotReleased()
+	self.fovKick = 2.5
+	self:updateAiming(false, 0, 0.5, 0, false)
+	self:setHint("")
+end
+
+function ShotVisuals:_showBanner(outcome: string)
+	local info = OUTCOME_TEXT[outcome] or { outcome, WHITE, "" }
+	self.bannerTitle.Text = info[1]
+	self.bannerTitle.TextColor3 = info[2]
+	self.bannerStroke.Color = info[2]
+	self.bannerSubtitle.Text = info[3]
+	self.banner.Visible = true
+	self.bannerScale.Scale = 0.4
+	TweenService:Create(self.bannerScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+end
+
+-- Makes the server-built crowd jump for a moment (local effect only).
+function ShotVisuals:_celebrateCrowd()
+	local scene = workspace:FindFirstChild("FootballScene")
+	local crowd = scene and scene:FindFirstChild("Crowd")
+	if not crowd then
+		return
+	end
+	if not self.crowdParts then
+		self.crowdParts, self.crowdBase = {}, {}
+		for _, fan in crowd:GetChildren() do
+			if fan:IsA("BasePart") then
+				table.insert(self.crowdParts, fan)
+				table.insert(self.crowdBase, fan.CFrame)
+			end
+		end
+	end
+	task.spawn(function()
+		local parts, base = self.crowdParts, self.crowdBase
+		local frames = table.create(#parts)
+		local elapsed = 0
+		while elapsed < 2 do
+			elapsed += RunService.RenderStepped:Wait()
+			local envelope = 1 - elapsed / 2
+			for i, cf in base do
+				frames[i] = cf + Vector3.new(0, math.abs(math.sin(elapsed * 9 + i * 1.7)) * 0.9 * envelope, 0)
+			end
+			workspace:BulkMoveTo(parts, frames, Enum.BulkMoveMode.FireCFrameChanged)
+		end
+		workspace:BulkMoveTo(parts, base, Enum.BulkMoveMode.FireCFrameChanged)
+	end)
+end
+
+-- Velocity right after the ball reaches the goal plane / keeper; purely cosmetic.
+local function velocityAfterImpact(outcome: string, velocity: Vector3, target: Vector3): Vector3
+	if outcome == "GOAL" then
+		return velocity * 0.6
+	elseif outcome == "SAVE" then
+		local side = if target.X >= 0 then 1 else -1
+		return Vector3.new(side * 7, 9, -velocity.Z * 0.25)
+	elseif outcome == "POST" then
+		if target.Y > ShotConfig.Goal.Height - BALL_RADIUS then
+			return Vector3.new(velocity.X * 0.5, 10, -velocity.Z * 0.35) -- crossbar
+		end
+		return Vector3.new(-velocity.X * 0.4, velocity.Y * 0.3 + 3, -velocity.Z * 0.4)
+	end
+	return velocity
+end
+
+-- Plays the server-decided shot. Yields until the animation is finished.
+function ShotVisuals:playShot(result)
+	self.state = "shot"
+
+	local start: Vector3 = result.start
+	local target: Vector3 = result.target
+	local flightTime: number = result.flightTime
+	local velocity = ShotPhysics.launchVelocity(start, target, flightTime)
+
+	-- The keeper stands in front of the line, so a save happens slightly before the goal plane.
+	local endTime = flightTime
+	if result.outcome == "SAVE" then
+		endTime = flightTime * (1 - Keeper.HomeZ / (start.Z - target.Z))
+	end
+
+	local keeperTarget = Vector3.new(result.keeperTarget.X, math.max(KEEPER_MIN_Y, result.keeperTarget.Y), Keeper.HomeZ)
+	local reaction: number = result.keeperReaction
+	local diveDuration = math.max(endTime - reaction, 0.05)
+
+	local t = 0
+	while t < endTime do
+		self:_setBall(ShotPhysics.positionAt(start, velocity, t), t * BALL_SPIN_RATE)
+		self:_poseKeeper(keeperTarget, math.clamp((t - reaction) / diveDuration, 0, 1))
+		t += RunService.RenderStepped:Wait()
+	end
+
+	local position = ShotPhysics.positionAt(start, velocity, endTime)
+	local spin = endTime * BALL_SPIN_RATE
+	self:_setBall(position, spin)
+	self:_poseKeeper(keeperTarget, 1)
+	self:_showBanner(result.outcome)
+	self:setScore(result.goals, result.shots)
+	if result.outcome == "GOAL" then
+		self.shake = 1
+		self.confetti:Emit(140)
+		self:_celebrateCrowd()
+	else
+		self.shake = 0.4
+	end
+
+	-- Follow-through: gravity, ground bounces and the back of the net.
+	local vel = velocityAfterImpact(result.outcome, ShotPhysics.velocityAt(velocity, endTime), target)
+	local netBack = -ShotConfig.Goal.NetDepth + BALL_RADIUS
+	local elapsed = 0
+	while elapsed < FOLLOW_THROUGH_SECONDS do
+		local dt = math.min(RunService.RenderStepped:Wait(), 1 / 20)
+		elapsed += dt
+		vel += ShotPhysics.gravity() * dt
+		position += vel * dt
+		if position.Y < BALL_RADIUS then
+			position = Vector3.new(position.X, BALL_RADIUS, position.Z)
+			vel = Vector3.new(vel.X * 0.8, -vel.Y * 0.5, vel.Z * 0.8)
+		end
+		if result.outcome == "GOAL" and position.Z < netBack then
+			position = Vector3.new(position.X, position.Y, netBack)
+			vel = Vector3.new(vel.X * 0.3, vel.Y, 0)
+		end
+		spin += vel.Magnitude / BALL_RADIUS * dt * 0.5
+		self:_setBall(position, spin)
+	end
+	task.wait(0.4)
+end
+
+return ShotVisuals
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+    </Item>
+  </Item>
+</roblox>

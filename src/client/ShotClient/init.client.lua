@@ -9,7 +9,11 @@ local ShotConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild
 local InputController = require(script:WaitForChild("InputController"))
 local ShotVisuals = require(script:WaitForChild("ShotVisuals"))
 
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+if not Remotes then
+	warn("[ShotClient] Still waiting for ReplicatedStorage.Remotes. The server script (Main) has not started; check Output for red [Main] errors.")
+	Remotes = ReplicatedStorage:WaitForChild("Remotes")
+end
 local RequestEpisode = Remotes:WaitForChild("RequestEpisode")
 local EpisodeStarted = Remotes:WaitForChild("EpisodeStarted")
 local SubmitEpisodeInput = Remotes:WaitForChild("SubmitEpisodeInput")
@@ -44,7 +48,7 @@ input.onShoot = function(aimX, aimY, power)
 		return
 	end
 	input:setEnabled(false)
-	visuals:setHint("")
+	visuals:onShotReleased()
 	SubmitEpisodeInput:FireServer(episode.episodeId, aimX, aimY, power)
 end
 
@@ -80,7 +84,8 @@ EpisodeResult.OnClientEvent:Connect(function(result)
 	requestEpisode()
 end)
 
-RunService.RenderStepped:Connect(function()
+RunService.RenderStepped:Connect(function(dt)
+	visuals:update(dt)
 	input:update()
 	if input.enabled then
 		visuals:updateAiming(true, input.aimX, input.aimY, input.power, input.holding)

@@ -7,7 +7,18 @@ goalkeeper, aim marker, power meter, and GOAL / SAVE / POST / MISS results. Work
 The server checks types, ranges, the current episode, repeats and request rate, then computes
 the outcome with its own random seed. A client cannot report a goal.
 
-## Files → Roblox Studio
+## Setup
+
+**Easiest:** download `places/NewFootballStar_Stage1.rbxlx`, open it in Studio (File → Open from File),
+and press Play. Everything is already in the right place. The stadium, goal, crowd and remotes are
+built by the server when the game starts, so the place looks empty in edit mode. That's expected.
+To rebuild the file after changing code, run `rojo build -o places/NewFootballStar_Stage1.rbxlx`.
+
+**With Rojo:** `rojo serve` and connect from the Studio plugin (`default.project.json` maps the folders below).
+
+**By hand:** create the objects below with these exact names and types, and paste in the file contents.
+Don't drag `.lua` files into Studio. That keeps suffixes like `.server` and `.client` in the names.
+The server modules can be anywhere under ServerScriptService (next to `Main` or inside `Services`).
 
 | File | Studio location | Type |
 |---|---|---|
@@ -21,12 +32,7 @@ the outcome with its own random seed. A client cannot report a goal.
 | `src/client/ShotClient/InputController.lua` | `.../ShotClient/InputController` (child of the LocalScript) | ModuleScript |
 | `src/client/ShotClient/ShotVisuals.lua` | `.../ShotClient/ShotVisuals` (child of the LocalScript) | ModuleScript |
 
-**With Rojo:** `rojo serve` and connect from the Studio plugin (`default.project.json` maps the folders above).
-
-**By hand:** create `Shared` (Folder) in ReplicatedStorage and `Services` (Folder) in
-ServerScriptService, create each object from the table with the exact name and type, and paste the file contents.
-You don't need to create the pitch, goal, or remotes: the server builds `Workspace/FootballScene` and
-`ReplicatedStorage/Remotes` when the game starts.
+The default Baseplate and SpawnLocation are removed automatically during play (they would cover the pitch and goal).
 
 ## Controls
 
@@ -41,7 +47,7 @@ the dotted line shows the planned path without random error.
 ## Testing
 
 1. **PC:** press Play. The Output window should show:
-   `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
+   `[SceneBuilder] Stadium built (… parts)`, `[Main] Stage 1 shot prototype ready`, `[ShotClient] ready`,
    `[EpisodeService] <you>: episode #1 started (SHOT, seed …)`, and after each shot
    `[EpisodeService] <you>: episode #1 aim=(0.72, 0.55) power=0.64 -> GOAL (1/1 goals)`.
    There should be no red errors.

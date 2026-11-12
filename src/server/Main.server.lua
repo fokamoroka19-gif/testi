@@ -2,13 +2,39 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 
-local SceneBuilder = require(script.Parent:WaitForChild("SceneBuilder"))
-local EpisodeService = require(script.Parent:WaitForChild("Services"):WaitForChild("EpisodeService"))
-
--- No avatar in Stage 1: the shot is played from a fixed camera, and without a character
--- phones don't show the movement thumbstick and jump button over the goal.
+-- First, before anything can yield: no avatar in Stage 1 (fixed camera, and phones would
+-- otherwise show the thumbstick and jump button over the goal).
 Players.CharacterAutoLoads = false
+for _, player in Players:GetPlayers() do
+	if player.Character then
+		player.Character:Destroy()
+	end
+end
+
+if ReplicatedStorage:GetAttribute("ShotServerRunning") then
+	warn("[Main] Another copy of the Main script is already running. Delete the duplicate.")
+	return
+end
+ReplicatedStorage:SetAttribute("ShotServerRunning", true)
+
+-- Modules are looked up by name anywhere under ServerScriptService, so it doesn't matter
+-- whether they sit next to this script or inside a Services folder.
+local function requireServerModule(name: string)
+	local module = ServerScriptService:FindFirstChild(name, true)
+	if not (module and module:IsA("ModuleScript")) then
+		error(string.format("[Main] ModuleScript '%s' was not found in ServerScriptService. See README > Setup.", name), 0)
+	end
+	return require(module)
+end
+
+local shared = ReplicatedStorage:FindFirstChild("Shared")
+for _, name in { "ShotConfig", "ShotPhysics" } do
+	if not (shared and shared:FindFirstChild(name)) then
+		error(string.format("[Main] ReplicatedStorage > Shared > %s (ModuleScript) is missing. See README > Setup.", name), 0)
+	end
+end
 
 local REMOTE_NAMES = { "RequestEpisode", "EpisodeStarted", "SubmitEpisodeInput", "EpisodeResult" }
 
@@ -29,6 +55,9 @@ for _, name in REMOTE_NAMES do
 	end
 	remotes[name] = remote
 end
+
+local SceneBuilder = requireServerModule("SceneBuilder")
+local EpisodeService = requireServerModule("EpisodeService")
 
 SceneBuilder.build()
 EpisodeService.init(remotes)
